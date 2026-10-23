@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Harness — Quản lý account</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; padding: 24px; }
+  .container { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin-bottom: 12px; color: #79c0ff; }
+  label { display: block; font-size: 12px; color: #8b949e; margin: 10px 0 4px; }
+  input, textarea { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; color: #e6edf3; font-size: 13px; font-family: ui-monospace, monospace; }
+  textarea { min-height: 70px; resize: vertical; }
+  button { background: #238636; color: #fff; border: none; border-radius: 6px; padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 12px; }
+  button:hover { background: #2ea043; }
+  button:disabled { opacity: .5; cursor: wait; }
+  button.ghost { background: transparent; border: 1px solid #30363d; color: #e6edf3; }
+  button.danger { background: transparent; border: 1px solid #f85149; color: #f85149; padding: 5px 10px; font-size: 12px; margin: 0; }
+  .hint { background: #1c2128; border-left: 3px solid #1f6feb; padding: 12px 14px; border-radius: 0 6px 6px 0; font-size: 13px; color: #aab8c5; margin-bottom: 16px; line-height: 1.6; }
+  .hint a { color: #58a6ff; }
+  .hint code { background: #0d1117; padding: 1px 5px; border-radius: 4px; }
+  .steplist { list-style: none; counter-reset: step; }
+  .steplist li { counter-increment: step; margin: 6px 0; padding-left: 26px; position: relative; }
+  .steplist li::before { content: counter(step); position: absolute; left: 0; top: 1px; width: 18px; height: 18px; background: #1f6feb; border-radius: 50%; color: #fff; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: #8b949e; font-weight: 500; padding: 8px; border-bottom: 1px solid #30363d; font-size: 12px; }
+  td { padding: 10px 8px; border-bottom: 1px solid #21262d; font-family: ui-monospace, monospace; font-size: 12.5px; }
+  td.name { font-family: inherit; font-size: 13px; }
+  .status-ok { color: #3fb950; } .status-bad { color: #f85149; } .status-warn { color: #d29922; }
+  .mini { color: #8b949e; font-size: 11.5px; }
+  .actions { display: flex; gap: 6px; }
+  #msg { font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .ok { color: #3fb950; } .err { color: #f85149; }
+  .empty { color: #8b949e; font-size: 13px; padding: 16px; text-align: center; }
+  .api-sample { background: #0d1117; border-radius: 6px; padding: 12px; font-family: ui-monospace, monospace; font-size: 12px; color: #a5d6ff; overflow-x: auto; white-space: pre; margin-top: 8px; }
+  .poolstat { display: inline-block; background: #1c2128; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12.5px; margin-right: 8px; }
+  .poolstat b { color: #79c0ff; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>DeepSeek Harness</h1>
+  <div class="sub">Pool session DeepSeek Web → API OpenAI-compatible, thông minh xoay vòng, không cần browser lúc chạy</div>
+
+  <div class="card">
+    <h2>🔐 Thêm account — login 1 nút</h2>
+    <ol class="steplist">
+      <li>Bấm <b>➕ Login account mới</b> — phần mềm tự mở tab DeepSeek trong Chrome</li>
+      <li>Login trong tab đó kiểu gì cũng được (Google / email / passkey)</li>
+      <li><b>Khum cần bấm gì nữa</b> — login xong phần mềm TỰ lưu session + TỰ tắt tab</li>
+      <li>Acc mới hiện ngay trong bảng dưới → làm lại từ bước 1 cho acc kế</li>
+    </ol>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <button style="background:#8957e5;margin-top:0" id="btnBuild" onclick="buildProfile()">🏗️ Build profile (nuôi như real user)</button>
+      <button style="background:#1f6feb;margin-top:0" id="btnLogin" onclick="loginStart()">➕ Login account mới</button>
+    </div>
+    <div class="mini" style="margin-top:8px;color:#8b949e;font-size:12px">Build profile 1 lần đầu: Chrome login tự dạo web thật (~40s) để fingerprint trông tin cậy — đỡ lỗi "Current device environment error". Profile giữ nguyên giữa các lần login.</div>
+    <div id="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>Pool status</h2>
+    <div id="poolStats"></div>
+  </div>
+
+  <div class="card">
+    <h2>Accounts</h2>
+    <table>
+      <thead><tr><th>Account</th><th>Metrics</th><th>Trạng thái</th><th></th></tr></thead>
+      <tbody id="accBody"></tbody>
+    </table>
+    <div id="empty" class="empty">Chưa có account nào — thêm bằng flow Google login ở trên.</div>
+  </div>
+
+  <div class="card">
+    <h2>API endpoint (OpenAI-compatible)</h2>
+    <div class="api-sample">curl http://127.0.0.1:8790/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-web","messages":[{"role":"user","content":"hello"}]}'
+
+# thinking: {"model":"deepseek-web-r1"}  |  search: thêm "search": true</div>
+    <div class="sub" style="margin-top:10px">Models: <code>deepseek-web</code> (thường), <code>deepseek-web-r1</code> (thinking)</div>
+  </div>
+</div>
+
+<script>
+const SIGN_IN_URL = 'https://chat.deepseek.com/sign_in';
+
+function copyLink(btn) {
+  navigator.clipboard.writeText(SIGN_IN_URL).then(() => {
+    btn.textContent = '✓ Đã copy';
+    setTimeout(() => btn.textContent = '📋 Copy link', 1500);
+  });
+}
+
+async function buildProfile() {
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('btnBuild');
+  btn.disabled = true; btn.textContent = '⏳ Đang nuôi profile (~40s)…';
+  try {
+    const r = await fetch('/api/build_profile', {method: 'POST'});
+    const d = await r.json();
+    if (!d.ok) { msg.textContent = '✗ ' + d.error; msg.className = 'err'; return; }
+    msg.textContent = '✓ ' + d.note; msg.className = 'ok';
+    setTimeout(() => {
+      btn.disabled = false; btn.textContent = '🏗️ Build profile (nuôi như real user)';
+      msg.textContent = '✓ Build profile xong (xem log) — giờ bấm Login account mới'; msg.className = 'ok';
+    }, 45000);
+  } catch (e) {
+    msg.textContent = 'Lỗi: ' + e.message; msg.className = 'err';
+    btn.disabled = false; btn.textContent = '🏗️ Build profile (nuôi như real user)';
+  }
+}
+
+async function loginStart() {
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('btnLogin');
+  btn.disabled = true; btn.textContent = '⏳ Đang mở tab…';
+  try {
+    const r = await fetch('/api/login_start', {method: 'POST'});
+    const d = await r.json();
+    if (!d.ok) { msg.textContent = '✗ ' + d.error; msg.className = 'err'; return; }
+    msg.textContent = '✓ Tab DS đã mở — login trong đó, xong phần mềm tự lưu + tự tắt tab (canh tối đa 10 phút)';
+    msg.className = 'ok';
+    // poll accounts để thấy acc mới khi flow capture xong
+    const t = setInterval(loadStats, 2000);
+    setTimeout(() => clearInterval(t), 660000);
+  } catch (e) {
+    msg.textContent = 'Lỗi: ' + e.message; msg.className = 'err';
+  } finally {
+    btn.disabled = false; btn.textContent = '➕ Login account mới';
+  }
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    const p = d.pool;
+    document.getElementById('poolStats').innerHTML =
+      `<span class="poolstat">Accounts: <b>${p.total}</b></span>` +
+      `<span class="poolstat">Available: <b>${p.available}</b></span>` +
+      `<span class="poolstat">Capacity hint: <b>~${p.capacity_now_rpm_hint} calls/30s</b></span>`;
+    const tbody = document.getElementById('accBody');
+    tbody.innerHTML = '';
+    document.getElementById('empty').style.display = d.accounts.length ? 'none' : 'block';
+    for (const a of d.accounts) {
+      const tr = document.createElement('tr');
+      const st = a.last_status === 'ok' ? '<span class="status-ok">● ok</span>'
+        : (a.last_status || '').includes('refresh') ? '<span class="status-ok">● ok (refreshed)</span>'
+        : `<span class="status-bad">● ${a.last_status || '?'}</span>`;
+      const cd = a.cooldown_left_secs > 0
+        ? `<span class="status-warn">cooldown ${a.cooldown_left_secs}s</span>`
+        : 'sẵn sàng';
+      const mini = `<div class="mini">ok ${a.total_ok} · empty ${a.total_empty} · err ${a.total_error}</div>`;
+      tr.innerHTML =
+        `<td class="name">${a.label}<div class="mini">id ${a.id.slice(0,8)}</div></td>` +
+        `<td>burst ${a.burst_count}/${a.burst_limit}<div class="mini">${cd}</div></td>` +
+        `<td>${st}${mini}</td>`;
+      const td = document.createElement('td');
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const vbtn = document.createElement('button');
+      vbtn.className = 'ghost'; vbtn.style.cssText = 'padding:5px 10px;font-size:12px;margin:0';
+      vbtn.textContent = 'Verify'; vbtn.onclick = () => verify(a.id);
+      const dbtn = document.createElement('button');
+      dbtn.className = 'danger'; dbtn.textContent = 'Xoá'; dbtn.onclick = () => del(a.id);
+      actions.append(vbtn, dbtn); td.append(actions); tr.append(td);
+      tbody.append(tr);
+    }
+  } catch (e) {}
+}
+
+async function loadAccounts() {
+  const r = await fetch('/api/accounts');
+  const d = await r.json();
+  const tbody = document.getElementById('accBody');
+  tbody.innerHTML = '';
+  document.getElementById('empty').style.display = d.accounts.length ? 'none' : 'block';
+  for (const a of d.accounts) {
+    const tr = document.createElement('tr');
+    const st = a.last_status === 'ok' ? '<span class="status-ok">● hoạt động</span>'
+      : '<span class="status-bad">● ' + (a.last_status || '?') + '</span>';
+    tr.innerHTML = `<td class="name">${a.label}</td><td><code>${a.token_prefix}…</code></td><td>${st}</td><td>${a.last_verified ? new Date(a.last_verified*1000).toLocaleTimeString() : '—'}</td>`;
+    const td = document.createElement('td');
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const vbtn = document.createElement('button');
+    vbtn.className = 'ghost'; vbtn.style.cssText = 'padding:5px 10px;font-size:12px;margin:0';
+    vbtn.textContent = 'Verify'; vbtn.onclick = () => verify(a.id);
+    const dbtn = document.createElement('button');
+    dbtn.className = 'danger'; dbtn.textContent = 'Xoá'; dbtn.onclick = () => del(a.id);
+    actions.append(vbtn, dbtn); td.append(actions); tr.append(td);
+    tbody.append(tr);
+  }
+}
+
+async function captureAll() {
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('btnScan');
+  btn.disabled = true; btn.textContent = '⏳ Đang quét…';
+  msg.textContent = ''; msg.className = '';
+  try {
+    const r = await fetch('/api/capture', {method: 'POST'});
+    const d = await r.json();
+    if (!d.ok) { msg.textContent = '✗ ' + d.error; msg.className = 'err'; return; }
+    msg.textContent = `✓ ${d.action}: +${d.added} acc mới, ${d.refreshed} refresh — ${d.email || ''}`;
+    msg.className = 'ok';
+    loadStats();
+  } catch (e) {
+    msg.textContent = 'Lỗi: ' + e.message; msg.className = 'err';
+  } finally {
+    btn.disabled = false; btn.textContent = '🔍 Quét tabs & lưu session';
+  }
+}
+
+async function addAccount() {
+  const msg = document.getElementById('msg');
+  msg.textContent = 'Đang verify token…'; msg.className = '';
+  try {
+    const session = JSON.parse(document.getElementById('session').value);
+    const label = document.getElementById('label').value;
+    const r = await fetch('/api/accounts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label, token: session.token, cookies: session.cookies || {}}),
+    });
+    const d = await r.json();
+    if (!r.ok) { msg.textContent = 'Lỗi: ' + (d.error || r.status); msg.className = 'err'; return; }
+    msg.textContent = 'Đã thêm account ✓'; msg.className = 'ok';
+    document.getElementById('session').value = '';
+    document.getElementById('label').value = '';
+    loadStats();
+  } catch (e) {
+    msg.textContent = 'JSON không hợp lệ: ' + e.message; msg.className = 'err';
+  }
+}
+
+async function verify(id) {
+  await fetch('/api/accounts/' + id + '/verify', {method: 'POST'});
+  loadStats();
+}
+
+async function del(id) {
+  if (!confirm('Xoá account này?')) return;
+  await fetch('/api/accounts/' + id, {method: 'DELETE'});
+  loadStats();
+}
+
+loadStats();
+setInterval(loadStats, 15000);
+</script>
+</body>
+</html>
