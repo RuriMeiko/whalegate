@@ -14,6 +14,7 @@ pub enum StreamEv {
     Ready(String),      // chat_session_id
     MsgId(i64),         // response_message_id
     RawHasContent(bool),// SSE có fragment nào không (rate-limit detect)
+    Truncated(String),  // stream bị cắt giữa chừng (stall/lỗi mạng) — gửi ngay trước Done
     Done(String),       // full SSE text (để parse tool-calls cuối)
 }
 
@@ -269,14 +270,15 @@ pub async fn chat_stream(
         let t0 = t_req;
         let mut first_byte_ms: Option<u128> = None;
         let mut total_bytes: usize = 0;
+        let mut truncated: Option<String> = None;
         let mut raw: Vec<u8> = Vec::new(); // byte dư của ký tự UTF-8 bị cắt giữa 2 chunk (vd '｜' 3 byte)
         // DS ngừng gửi (không byte nào trong STALL_SECS) → coi là treo, thoát để server retry thay vì chờ vô hạn
         const STALL_SECS: u64 = 90;
         loop {
             let chunk = match tokio::time::timeout(std::time::Duration::from_secs(STALL_SECS), stream.next()).await {
-                Err(_) => { eprintln!("[ds-stall] không có dữ liệu {}s (sau {}ms, {} bytes) — bỏ stream", STALL_SECS, t0.elapsed().as_millis(), total_bytes); break; }
+                Err(_) => { eprintln!("[ds-stall] không có dữ liệu {}s (sau {}ms, {} bytes) — bỏ stream", STALL_SECS, t0.elapsed().as_millis(), total_bytes); truncated = Some(format!("DeepSeek ngừng gửi dữ liệu {}s", STALL_SECS)); break; }
                 Ok(None) => break,
-                Ok(Some(Err(e))) => { eprintln!("[ds-stream-err] {} (sau {}ms, {} bytes)", e, t0.elapsed().as_millis(), total_bytes); break; }
+                Ok(Some(Err(e))) => { eprintln!("[ds-stream-err] {} (sau {}ms, {} bytes)", e, t0.elapsed().as_millis(), total_bytes); truncated = Some(format!("stream lỗi giữa chừng: {}", e)); break; }
                 Ok(Some(Ok(c))) => c,
             };
             first_byte_ms.get_or_insert_with(|| t0.elapsed().as_millis());
@@ -379,6 +381,7 @@ pub async fn chat_stream(
         }
         eprintln!("[ds-timing] first_byte={}ms total={}ms bytes={} sse_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, full.chars().count());
         let _ = tx.send(StreamEv::RawHasContent(has_content));
+        if let Some(r) = truncated { let _ = tx.send(StreamEv::Truncated(r)); }
         let _ = tx.send(StreamEv::Done(full));
         let _ = sid2;
     });

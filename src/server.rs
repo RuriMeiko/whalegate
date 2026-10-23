@@ -16,7 +16,10 @@ use tokio::sync::RwLock;
 
 use crate::client::DsClient;
 
-const CREDS_PATH: &str = "/home/rurimeiko/.ds-harness/accounts.json";
+/// File acc (DS_ACCOUNTS_PATH ghi đè, tiện chạy bản test với bộ acc riêng).
+fn creds_path() -> String {
+    std::env::var("DS_ACCOUNTS_PATH").unwrap_or_else(|_| "/home/rurimeiko/.ds-harness/accounts.json".into())
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Account {
@@ -103,24 +106,24 @@ impl AccStats {
             && self.burst_count >= Self::burst_limit()
     }
 
-    fn available(&self, now: u64) -> bool {
+    pub(crate) fn available(&self, now: u64) -> bool {
         now >= self.cooldown_until && !self.burst_active(now)
     }
 
-    fn mark_ok(&mut self) {
+    pub(crate) fn mark_ok(&mut self) {
         self.fail_streak = 0;
         self.cooldown_until = 0;
     }
 
     /// Hỏng/rỗng: cooldown 15s, 30s, 60s … tối đa 10 phút (DS_FAIL_COOLDOWN_MAX).
-    fn mark_fail(&mut self, now: u64) {
+    pub(crate) fn mark_fail(&mut self, now: u64) {
         self.fail_streak = self.fail_streak.saturating_add(1);
         let max: u64 = std::env::var("DS_FAIL_COOLDOWN_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
         let cd = (15u64 << (self.fail_streak - 1).min(10)).min(max);
         self.cooldown_until = now + cd;
     }
 
-    fn record_call(&mut self, now: u64) {
+    pub(crate) fn record_call(&mut self, now: u64) {
         if now.saturating_sub(self.burst_window_start) >= Self::burst_window() as u64 {
             self.burst_window_start = now;
             self.burst_count = 0;
@@ -154,45 +157,45 @@ impl Creds {
 }
 
 pub fn load_creds() -> Result<Creds> {
-    let store: Store = serde_json::from_str(&std::fs::read_to_string(CREDS_PATH)?)?;
+    let store: Store = serde_json::from_str(&std::fs::read_to_string(creds_path())?)?;
     let acc = store
         .accounts
         .first()
-        .ok_or_else(|| anyhow::anyhow!("no accounts in {}", CREDS_PATH))?;
+        .ok_or_else(|| anyhow::anyhow!("no accounts in {}", creds_path()))?;
     Ok(Creds {
         token: acc.token.clone(),
         cookies: acc.cookies.clone(),
     })
 }
 
-async fn load_store() -> Store {
-    tokio::fs::read_to_string(CREDS_PATH)
+pub(crate) async fn load_store() -> Store {
+    tokio::fs::read_to_string(creds_path())
         .await
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-async fn save_store(store: &Store) -> Result<()> {
-    tokio::fs::create_dir_all(std::path::Path::new(CREDS_PATH).parent().unwrap()).await?;
+pub(crate) async fn save_store(store: &Store) -> Result<()> {
+    tokio::fs::create_dir_all(std::path::Path::new(&creds_path()).parent().unwrap()).await?;
     let json = serde_json::to_string_pretty(store)?;
-    tokio::fs::write(CREDS_PATH, &json).await?;
+    tokio::fs::write(creds_path(), &json).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(CREDS_PATH, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(creds_path(), std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
 
-struct AppState {
-    store: RwLock<Store>,
+pub(crate) struct AppState {
+    pub(crate) store: RwLock<Store>,
     // Round-robin pointer chọn account kế tiếp
-    rr: std::sync::atomic::AtomicU64,
+    pub(crate) rr: std::sync::atomic::AtomicU64,
     // acc_id -> đang xử lý 1 call (chống double-use burst khi concurrent)
-    in_flight: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
+    pub(crate) in_flight: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
     // đang canh 1 tab login (chặn double-start)
-    login_watching: std::sync::Mutex<bool>,
+    pub(crate) login_watching: std::sync::Mutex<bool>,
 }
 
 // ---------- handlers ----------
@@ -342,10 +345,10 @@ async fn api_verify_account(
 
 // ---------- DSML tool-call parse (DS web trả tool call dạng text DSML) ----------
 // Format: <｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="bash"> <｜｜DSML｜｜ parameter name="command" string="true">...value...</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>
-struct DsmlToolCall {
-    name: String,
-    arguments: String, // JSON object string
-    before: String,    // content trước khối DSML
+pub(crate) struct DsmlToolCall {
+    pub(crate) name: String,
+    pub(crate) arguments: String, // JSON object string
+    pub(crate) before: String,    // content trước khối DSML
 }
 
 
@@ -492,11 +495,11 @@ fn normalize_dsml(text: &str) -> String {
 /// - còn lại → flush hết
 const TOOL_MARKERS: [&str; 7] = ["DSML", "<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function"];
 
-fn has_tool_marker(buf: &str) -> bool {
+pub(crate) fn has_tool_marker(buf: &str) -> bool {
     TOOL_MARKERS.iter().any(|k| buf.contains(k))
 }
 
-fn safe_flush_len(buf: &str) -> usize {
+pub(crate) fn safe_flush_len(buf: &str) -> usize {
     if let Some(m) = TOOL_MARKERS.iter().filter_map(|k| buf.find(k)).min() {
         return buf[..m].rfind('<').unwrap_or(m);
     }
@@ -508,13 +511,13 @@ fn safe_flush_len(buf: &str) -> usize {
 
 /// Số lượt tối đa trên 1 session web trước khi đổi (DS_SESSION_ROTATE, mặc định 30).
 /// Prompt luôn gửi đủ lịch sử, session web không giữ ngữ cảnh → để nó phình vô hạn chỉ tổ chậm/nặng.
-fn session_rotate_limit() -> u32 {
+pub(crate) fn session_rotate_limit() -> u32 {
     std::env::var("DS_SESSION_ROTATE").ok().and_then(|v| v.parse().ok()).unwrap_or(30)
 }
 
 /// Ghi nhận 1 lượt dùng session `sid` cho acc. Session khác session đang lưu (do xoay vòng) → thay mới,
 /// xoá session cũ sau 10 phút (request đang chạy dở trên session cũ còn kịp xong).
-fn note_session_use(a: &mut Account, sid: &str) {
+pub(crate) fn note_session_use(a: &mut Account, sid: &str) {
     match a.thread_session_id.as_deref() {
         Some(cur) if cur == sid => a.thread_uses += 1,
         old => {
@@ -537,7 +540,7 @@ fn note_session_use(a: &mut Account, sid: &str) {
 }
 
 /// Pipeline parse tool-call DUY NHẤT (cả stream lẫn non-stream): chuẩn hoá biến thể rồi thử lần lượt các parser.
-fn parse_any_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
+pub(crate) fn parse_any_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
     let n = normalize_dsml(text);
     parse_dsml_tool_calls(&n)
         .or_else(|| parse_dsml_json_tool_calls(&n))
@@ -546,13 +549,13 @@ fn parse_any_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
 }
 
 /// id tool-call duy nhất — `call_0` lặp ở mọi step làm model/client nhầm result ↔ call.
-fn new_call_id() -> String {
+pub(crate) fn new_call_id() -> String {
     format!("call_{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
 }
 
 /// Điền các property string bắt buộc mà model bỏ sót (vd bash.description) theo schema tools của client,
 /// thay vì để client trả "invalid arguments: missing required property".
-fn fill_required_args(tools: &Option<Vec<Value>>, call: &mut DsmlToolCall) {
+pub(crate) fn fill_required_args(tools: &Option<Vec<Value>>, call: &mut DsmlToolCall) {
     let Some(tools) = tools else { return };
     let Some(params) = tools.iter()
         .filter_map(|t| t.get("function"))
@@ -1117,18 +1120,18 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
 // ---------- OpenAI-compatible API ----------
 
 #[derive(Deserialize)]
-struct ChatRequest {
-    model: Option<String>,
-    messages: Vec<Value>,
-    stream: Option<bool>,
+pub(crate) struct ChatRequest {
+    pub(crate) model: Option<String>,
+    pub(crate) messages: Vec<Value>,
+    pub(crate) stream: Option<bool>,
     // true = tạo conversation mới; false/mặc định = chat tiếp thread hiện có
     new_thread: Option<bool>,
     // Bật DeepThink (thinking) / Tìm kiếm thông minh (websearch). Mặc định cả hai OFF.
-    thinking: Option<bool>,
-    search: Option<bool>,
+    pub(crate) thinking: Option<bool>,
+    pub(crate) search: Option<bool>,
     // OpenAI tools schema từ client (dsh) — render thành hướng dẫn DSML cho model
     #[serde(default)]
-    tools: Option<Vec<Value>>,
+    pub(crate) tools: Option<Vec<Value>>,
 }
 
 // Render tool specs (OpenAI schema) thành hướng dẫn gọi DSML — NHẤN MẠNH: mọi parameter
@@ -1146,7 +1149,7 @@ Use string=\"true\" for text values; for numbers, booleans, arrays and objects u
 Several invoke elements may share one calls block. Include every REQUIRED parameter. \
 Keep any text before the block short. If you need no tool, answer in plain text with no block.\n";
 
-fn render_tools_spec(tools: &Option<Vec<Value>>) -> String {
+pub(crate) fn render_tools_spec(tools: &Option<Vec<Value>>) -> String {
     let Some(tl) = tools else { return String::new() };
     if tl.is_empty() { return String::new(); }
     let mut out = String::from(TOOL_FORMAT_GUIDE);
@@ -1175,7 +1178,7 @@ fn render_tools_spec(tools: &Option<Vec<Value>>) -> String {
     out
 }
 
-fn render_content(m: &Value) -> String {
+pub(crate) fn render_content(m: &Value) -> String {
     // content có thể là string hoặc array of parts [{type:"text"|"tool_result"|"tool_call"...}]
     match m.get("content") {
         Some(Value::String(s)) => s.clone(),
@@ -1253,7 +1256,7 @@ fn render_tool_calls(m: &Value) -> String {
     out
 }
 
-fn messages_to_prompt(messages: &[Value]) -> String {
+pub(crate) fn messages_to_prompt(messages: &[Value]) -> String {
     // id → tên tool, lấy từ các tool_calls của assistant, để gắn nhãn tool_result
     let mut call_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for m in messages {
@@ -1312,590 +1315,18 @@ fn messages_to_prompt(messages: &[Value]) -> String {
         .join("\n")
 }
 
-// Trích text từ SSE DeepSeek — cấu trúc thật (đã verify raw stream):
-// - init:   {"v":{"response":{...,"fragments":[{"id":2,"type":"THINK","content":"We",...}]}}}
-// - append trần vào fragment ĐANG active: data: {"v":" need"}   (không có p)
-// - append path: {"p":"response/fragments/-1/content","o":"APPEND","v":"..."}
-// - fragment MỚI: {"p":"response/fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"5",...}]}
-// Text trả về = nội dung các fragment type RESPONSE (bỏ THINK).
-fn extract_text_from_sse(sse: &str) -> String {
-    let mut response_text = String::new();
-    let mut cur_type = String::new(); // type fragment đang active
-
-    for line in sse.lines() {
-        let Some(data) = line.strip_prefix("data: ") else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
-
-        // 1. object response đầy đủ (init/reconnect) — set active type từ fragment cuối
-        if let Some(frags) = v
-            .get("v")
-            .and_then(|x| x.get("response"))
-            .and_then(|r| r.get("fragments"))
-            .and_then(|f| f.as_array())
-        {
-            if let Some(last) = frags.last() {
-                cur_type = last["type"].as_str().unwrap_or("").to_string();
-                if cur_type == "RESPONSE" {
-                    if let Some(c) = last["content"].as_str() {
-                        response_text = c.to_string(); // fragment RESPONSE khởi đầu
-                    }
-                }
-            }
-            continue;
-        }
-
-        // 2. fragment MỚI qua path response/fragments APPEND mảng
-        if v.get("p").and_then(|p| p.as_str()) == Some("response/fragments") {
-            if v.get("o").and_then(|o| o.as_str()) == Some("APPEND") {
-                if let Some(arr) = v.get("v").and_then(|x| x.as_array()) {
-                    for f in arr {
-                        cur_type = f["type"].as_str().unwrap_or("").to_string();
-                        if cur_type == "RESPONSE" {
-                            if let Some(c) = f["content"].as_str() {
-                                response_text.push_str(c);
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        // 3. append path vào fragment active
-        if let Some(p) = v.get("p").and_then(|p| p.as_str()) {
-            if p.ends_with("/content")
-                && v.get("o").and_then(|o| o.as_str()) == Some("APPEND")
-                && cur_type == "RESPONSE"
-            {
-                if let Some(t) = v.get("v").and_then(|x| x.as_str()) {
-                    response_text.push_str(t);
-                }
-            }
-            continue;
-        }
-
-        // 4. append trần {"v":"text"} → fragment active
-        if cur_type == "RESPONSE" {
-            if let Some(t) = v.get("v").and_then(|x| x.as_str()) {
-                // chỉ nhận khi không phải object phức tạp (update_session vỗ object)
-                response_text.push_str(t);
-            }
-        }
-    }
-    response_text
-}
-
-async fn api_chat_completions(
-    State(st): State<Arc<AppState>>,
-    Json(req): Json<ChatRequest>,
-) -> Result<Response, (StatusCode, Json<Value>)> {
-    // SMART ROTATION + IN-FLIGHT LOCK + WAIT-QUEUE:
-    // - chọn acc available (không cooldown/burst, không bận call khác) ít dùng nhất
-    // - khoá in-flight: 1 acc chỉ chạy 1 call đồng thời
-    // - nếu tất cả bận/cooldown → chờ tới 20s rồi trả 429
-    // hàng đợi chờ acc rảnh (DS_QUEUE_WAIT_SECS, mặc định 120s): 1 lượt thinking có thể mất >1 phút nên 20s là quá ngắn
-    let queue_wait: u64 = std::env::var("DS_QUEUE_WAIT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(queue_wait);
-    let (token, cookies, thread_sid, acc_id, lock) = loop {
-        let now = now();
-        // 1) chọn candidate tốt nhất (available + không busy)
-        let picked = {
-            let store = st.store.read().await;
-            let accs = &store.accounts;
-            if accs.is_empty() {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"error": "no account configured"})),
-                ));
-            }
-            let in_flight = st.in_flight.lock().unwrap();
-            let mut best: Option<((u32, u64), usize)> = None; // ((in_flight, lru), idx) — ít bận nhất trước, rồi lâu chưa dùng nhất
-            for (i, a) in accs.iter().enumerate() {
-                // acc chính (pool_enabled=false) không bao giờ bị tool dùng
-                if !a.pool_enabled {
-                    continue;
-                }
-                let conc = in_flight
-                    .get(&a.id)
-                    .map(|v| v.load(std::sync::atomic::Ordering::Acquire))
-                    .unwrap_or(0);
-                // CAP concurrent/acc (DS_MAX_CONC_PER_ACC, default 2) — cộng đồng
-                // report ban khi >2 call đồng thời/acc
-                if conc < AccStats::max_conc() && a.stats.available(now) {
-                    let key = (conc, a.stats.last_used_at);
-                    if best.map(|(bk, _)| key < bk).unwrap_or(true) {
-                        best = Some((key, i));
-                    }
-                }
-            }
-            drop(in_flight);
-            best.map(|(_, i)| {
-                let a = &accs[i];
-                (a.token.clone(), a.cookies.clone(), if a.thread_uses >= session_rotate_limit() { None } else { a.thread_session_id.clone() }, a.id.clone())
-            })
-        };
-
-        let Some((tok_, cks_, sid_, id_)) = picked else {
-            // hết acc available → chờ 500ms rồi chọn lại (cooldown sớm nhất sẽ mở)
-            if tokio::time::Instant::now() >= deadline {
-                return Err((
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(json!({"error": "pool exhausted: all accounts busy/cooling down", "retry_after_secs": 5})),
-                ));
-            }
-            // JITTER: chờ 200-700ms thay vì 500ms cứng — pattern chờ đều đều
-            // là dấu hiệu bot; lệch nhẹ cho tự nhiên
-            let jitter = 200 + (now % 500);
-            tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
-            continue;
-        };
-
-        // 2) chiếm khoá in-flight; thua race thì chọn lại từ đầu
-        let got = {
-            let mut map = st.in_flight.lock().unwrap();
-            map.entry(id_.clone())
-                .or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)))
-                .clone()
-        };
-        if got.fetch_add(1, std::sync::atomic::Ordering::AcqRel) < AccStats::max_conc() {
-            break (tok_, cks_, sid_, id_, got);
-        }
-        // đủ cap → hoàn lại rồi chọn lại
-        got.fetch_sub(1, std::sync::atomic::Ordering::Release);
-        if tokio::time::Instant::now() >= deadline {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": "pool exhausted (in-flight contention)"})),
-            ));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
-    // Guard: tự mở khoá khi handler return (kể cả error)
-    struct InFlightGuard(std::sync::Arc<std::sync::atomic::AtomicU32>);
-    impl Drop for InFlightGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
-        }
-    }
-    let _in_flight_guard = InFlightGuard(lock.clone());
-
-    let c = DsClient::new(token.clone(), cookie_string(&cookies)).map_err(into_err)?;
-    if let Some(t) = &req.tools {
-        eprintln!("[req-tools] {} tools: {:?}", t.len(), t.iter().map(|x| x.get("function").and_then(|f| f.get("name")).cloned().unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>());
-    } else {
-        eprintln!("[req-tools] NONE — dsh không gửi field tools (tools nằm trong messages)");
-    }
-    let tools_hdr = render_tools_spec(&req.tools);
-    let tools_all = req.tools.clone();
-    let prompt = {
-        let base = messages_to_prompt(&req.messages);
-        let mut hdr = String::new();
-        if !tools_hdr.is_empty() {
-            hdr.push_str(&tools_hdr);
-            hdr.push_str("\n");
-        }
-        format!("{}\n{}\n", hdr, base)
-    };
-
-    let thinking = req
-        .model
-        .as_deref()
-        .map(|m| m.contains("r1"))
-        .unwrap_or(false)
-        || req.thinking.unwrap_or(false);
-    // yêu cầu đặt tên phiên của client: không cần thinking, đỡ tốn 4-5s + slot acc
-    let is_title_req = req.tools.as_ref().map_or(true, |t| t.is_empty())
-        && req.messages.iter().any(|m| render_content(m).contains("Create a concise title"));
-    let thinking = thinking && !is_title_req;
-    let search = req.search.unwrap_or(false);
-
-    // STATELESS trong 1 session cố định: parent_message_id luôn null → mỗi request
-    // là turn độc lập (context sạch như gọi API thật), không tạo conversation mới
-    // ngoài danh sách. Chỉ tạo session mới khi chưa có.
-    // Rate-limit mềm DS web: sau ~7 call liên tiếp, stream trả rỗng — tự hồi phục
-    // sau ~8-10s. Auto-retry 1 lần khi SSE rỗng.
-    let (sid, sse) = {
-        let mut sid = None;
-        let mut sse = String::new();
-        for attempt in 0..2 {
-            let (s, txt, _) = c
-                .chat(&prompt, thread_sid.as_deref(), None, thinking, search)
-                .await
-                .map_err(into_err)?;
-            sid = Some(s);
-            sse = txt;
-            let has_content = sse.contains("\"type\":\"RESPONSE\"")
-                || sse.contains("\"type\":\"THINK\"")
-                || sse.contains("\"type\":\"SEARCH\"");
-            if has_content || attempt == 1 {
-                break;
-            }
-            eprintln!("[rate-limit] empty SSE, retry after 8s (attempt {})", attempt + 1);
-            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-        }
-        (sid.unwrap(), sse)
-    };
-
-    let now = now();
-    let has_content = sse.contains("\"type\":\"RESPONSE\"")
-        || sse.contains("\"type\":\"THINK\"")
-        || sse.contains("\"type\":\"SEARCH\"");
-    let text = extract_text_from_sse(&sse);
-
-    // Cập nhật metrics: record_call + kết quả (ok/empty)
-    {
-        let mut store = st.store.write().await;
-        if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
-            note_session_use(a, &sid);
-            a.stats.record_call(now);
-            if has_content && !text.trim().is_empty() {
-                a.stats.total_ok += 1;
-                a.stats.mark_ok(); // acc khỏe — mở khoá ngay nếu đang cooldown
-            } else if has_content {
-                a.stats.total_empty += 1;
-            } else {
-                a.stats.total_empty += 1;
-                // stream rỗng hoàn toàn → cooldown tăng dần
-                a.stats.mark_fail(now);
-            }
-            a.last_status = Some(if !text.trim().is_empty() {
-                "ok".into()
-            } else {
-                "throttled".into()
-            });
-        }
-        let _ = save_store(&store).await;
-    }
-
-    let model_name = req.model.unwrap_or_else(|| "deepseek-web".into());
-
-    // DS web trả tool-call dạng DSML text (hoặc XML-tag) → dịch sang tool_calls chuẩn OpenAI
-    let mut dsml_parsed = parse_any_tool_calls(&text);
-    if let Some((_, calls)) = dsml_parsed.as_mut() {
-        for c in calls.iter_mut() { fill_required_args(&tools_all, c); }
-    }
-
-    // STREAMING REAL-TIME: pump SSE DS → SSE OpenAI (reasoning + content delta live)
-    if req.stream.unwrap_or(false) {
-        use crate::client::StreamEv;
-        let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-        let thinking_on = thinking; // model có reasoning → gửi reasoning_content
-        let model_name2 = model_name.clone();
-        let acc_id2 = acc_id.clone();
-        let st2 = st.clone();
-        let tools_all2 = tools_all.clone();
-
-        let body_stream = async_stream::stream! {
-            // chunk role
-            let role_chunk = serde_json::json!({
-                "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]
-            });
-            yield Event::default().data(role_chunk.to_string());
-
-            let mut sid2: Option<String> = None;
-            let mut msg_id: Option<i64> = None;
-            let mut resp_text = String::new();   // buffer pending (chưa yield)
-            let mut full_text = String::new();   // toàn bộ response (để parse tool-call ở Done)
-            let mut yielded_len: usize = 0;      // số chars full_text đã stream ra content
-            let mut think_text = String::new();
-            let mut think_buf = String::new();   // đuôi reasoning nghi là đầu marker (chưa flush)
-            let mut think_dropped = false;       // đã thấy DSML trong reasoning → bỏ phần còn lại
-            let mut has_content = false;
-            let mut finished = false;
-            let mut last_err: Option<String> = None; // lỗi attempt cuối — trả về client thay vì nuốt
-
-            for attempt in 0..3 {
-                // retry: reset buffer — tránh dư tích text/leak từ attempt trước
-                if attempt > 0 {
-                    resp_text.clear();
-                    full_text.clear();
-                    yielded_len = 0;
-                    think_buf.clear();
-                    think_dropped = false;
-                }
-                let stream_res = match crate::client::DsClient::new(token.clone(), cookie_string(&cookies)) {
-                    Ok(c) => c.chat_stream(&prompt, thread_sid.as_deref(), None, thinking_on, search).await,
-                    Err(e) => Err(e),
-                };
-                let (s2, mut rx) = match stream_res {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        eprintln!("[ds-error] attempt {}: {:#}", attempt, e);
-                        last_err = Some(format!("{:#}", e));
-                        continue;
-                    }
-                };
-                sid2 = Some(s2);
-
-                let mut empty_run = true;
-                while let Some(ev) = rx.recv().await {
-                    match ev {
-                        StreamEv::MsgId(m) => { msg_id = Some(m); }
-                        StreamEv::Thinking(t) => {
-                            empty_run = false;
-                            think_text.push_str(&t);
-                            // GUARD reasoning: model hay nháp khối tool-call trong lúc nghĩ → không để markup DSML lọt ra client
-                            if !think_dropped && !t.is_empty() {
-                                think_buf.push_str(&t);
-                                let cut = safe_flush_len(&think_buf);
-                                if has_tool_marker(&think_buf) {
-                                    eprintln!("[toolcall-guard] DSML trong reasoning — cắt từ marker ({} chars bỏ)", think_buf.chars().count() - think_buf[..cut].chars().count());
-                                    think_dropped = true;
-                                }
-                                if cut > 0 {
-                                    let head: String = think_buf[..cut].to_string();
-                                    let ev = serde_json::json!({
-                                        "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                        "choices": [{"index": 0, "delta": {"reasoning_content": head}, "finish_reason": null}]
-                                    });
-                                    yield Event::default().data(ev.to_string());
-                                }
-                                if think_dropped { think_buf.clear(); } else { think_buf.drain(..cut); }
-                            }
-                        }
-                        StreamEv::Response(t) => {
-                            empty_run = false;
-                            has_content = true;
-                            resp_text.push_str(&t);
-                            full_text.push_str(&t);
-                            // TOOL-CALL GUARD v2: giữ buffer khi nó đang "kết thúc bằng prefix
-                            // chưa hoàn tất của '<｜｜DSML｜｜' hoặc '<' + tên tool" — flush phần
-                            // ĐẦU an toàn, giữ phần đuôi nghi ngờ để Done parse.
-                            // chỉ flush phần đầu chắc chắn là prose; giữ đuôi nghi là đầu marker,
-                            // hoặc toàn bộ từ marker trở đi (Done sẽ parse tool-call)
-                            let cut = safe_flush_len(&resp_text);
-                            if cut > 0 {
-                                let head: String = resp_text[..cut].to_string();
-                                let ev = serde_json::json!({
-                                    "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                    "choices": [{"index": 0, "delta": {"content": head}, "finish_reason": null}]
-                                });
-                                yield Event::default().data(ev.to_string());
-                                yielded_len += head.chars().count();
-                                resp_text.drain(..cut);
-                            }
-                            // pending: giữ buffer — nếu DSML form đủ '<｜｜DSML｜｜ calls>' → giữ tiếp
-                            // (Done sẽ parse tool-call); nếu chỉ là '<' văn bản thường (vd "a < b")
-                            // → Done flush như content thường.
-                        }
-                        StreamEv::RawHasContent(hc) => {
-                            has_content = hc || has_content;
-                        }
-                        StreamEv::Done(full) => {
-                            if !think_dropped && !think_buf.is_empty() {
-                                let ev = serde_json::json!({
-                                    "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                    "choices": [{"index": 0, "delta": {"reasoning_content": think_buf.clone()}, "finish_reason": null}]
-                                });
-                                yield Event::default().data(ev.to_string());
-                                think_buf.clear();
-                            }
-                            // rate-limit mềm: stream rỗng → retry sau 8s
-                            if !has_content {
-                                if attempt < 2 {
-                                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                                } else {
-                                    last_err = Some("DeepSeek web trả stream rỗng sau 3 lần thử (có thể bị throttle)".into());
-                                }
-                                break; // retry / bỏ cuộc
-                            }
-                            // DS yêu cầu retry (click_behavior=retry) — response bị cắt giữa:
-                            // retry turn (attempt 2) nếu chưa dùng lần retry
-                            if full.contains("\"click_behavior\":\"retry\"") && attempt < 2 {
-                                eprintln!("[ds-retry] click_behavior=retry — retry attempt 2");
-                                // reset buffer + bỏ prose đã yield? dsh đã nhận prose — attempt 2
-                                // sẽ tạo SSE event mới; content trùng lặp chấp nhận (hiếm)
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                break; // retry
-                            }
-                            // tool-calls: parse full text — nếu khớp DSML/XML → thay content đã stream
-                            // Done ev có thể mang full text dài hơn full_text (fragment cuối đến muộn)
-                            let parse_text = normalize_dsml(&full_text);
-                            eprintln!("[dbg done2] pt={:?}", parse_text.chars().take(180).collect::<String>());
-                            if let Some((before, mut calls)) = parse_any_tool_calls(&parse_text)
-                            {
-                                // phần text trước tool-call: chỉ yield PHẦN CHƯA stream
-                                // (trước đó đã flush từng fragment — tránh trùng lặp)
-                                let before_chars = before.chars().count();
-                                if before_chars > yielded_len {
-                                    let rem: String = before.chars().skip(yielded_len).collect();
-                                    if !rem.is_empty() {
-                                        let ev = serde_json::json!({
-                                            "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                            "choices": [{"index": 0, "delta": {"content": rem}, "finish_reason": null}]
-                                        });
-                                        yield Event::default().data(ev.to_string());
-                                    }
-                                }
-                                for c in calls.iter_mut() { fill_required_args(&tools_all2, c); }
-                                for (i, c) in calls.iter().enumerate() {
-                                    let ev = serde_json::json!({
-                                        "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                        "choices": [{"index": 0, "delta": {"tool_calls": [{
-                                            "index": i, "id": new_call_id(), "type": "function",
-                                            "function": {"name": c.name, "arguments": c.arguments}
-                                        }]}, "finish_reason": null}]
-                                    });
-                                    yield Event::default().data(ev.to_string());
-                                }
-                                let fin = serde_json::json!({
-                                    "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
-                                });
-                                yield Event::default().data(fin.to_string());
-                            } else {
-                                // không phải tool-call — flush buffer còn pending
-                                // NHƯNG nếu buffer chứa marker DSML (fragment tool-call dở bị cắt)
-                                // → DROP, không leak markup ra client
-                                let has_marker = resp_text.contains("DSML")
-                                    || resp_text.contains("<dsml")
-                                    || resp_text.contains("<invoke")
-                                    || resp_text.contains("<parameter")
-                                    || resp_text.contains("<bash")
-                                    || resp_text.contains("<tool")
-                                    || resp_text.contains("<function");
-                                if has_marker && attempt < 2 {
-                                    // marker tool-call mà parse trượt → log nguyên văn + retry 1 lượt
-                                    eprintln!("[toolcall-unparsed] retry; raw={:?}", parse_text);
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                    break;
-                                }
-                                if !resp_text.is_empty() && !has_marker {
-                                    let ev = serde_json::json!({
-                                        "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                        "choices": [{"index": 0, "delta": {"content": resp_text.clone()}, "finish_reason": null}]
-                                    });
-                                    yield Event::default().data(ev.to_string());
-                                }
-                                if has_marker {
-                                    eprintln!("[toolcall-guard] dropped unfinished DSML fragment ({} chars)", resp_text.len());
-                                }
-                                let fin = serde_json::json!({
-                                    "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-                                });
-                                yield Event::default().data(fin.to_string());
-                            }
-                            // usage estimate (DS web không trả count — chars/4)
-                            let pt = (prompt.chars().count() as i64) / 4;
-                            let ct = (full_text.chars().count() as i64 + think_text.chars().count() as i64) / 4;
-                            let usage = serde_json::json!({
-                                "id": id, "object": "chat.completion.chunk", "model": model_name2,
-                                "choices": [], "usage": {
-                                    "prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct,
-                                    "prompt_tokens_details": {"cached_tokens": 0}
-                                }
-                            });
-                            yield Event::default().data(usage.to_string());
-                            finished = true;
-                        }
-                        StreamEv::Ready(_) => {}
-                    }
-                }
-                if finished { break; }
-            }
-
-            if !finished {
-                // 3 lần thử đều hỏng: báo lỗi rõ cho client (trước đây trả completion rỗng như thể xong bình thường)
-                let msg = last_err.clone().unwrap_or_else(|| "DeepSeek web không trả dữ liệu".into());
-                eprintln!("[ds-fail] {}", msg);
-                let ev = serde_json::json!({"error": {"message": msg, "type": "upstream_error", "code": "ds_upstream_failed"}});
-                yield Event::default().data(ev.to_string());
-                let mut store = st2.store.write().await;
-                let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id2) {
-                    a.stats.total_error += 1;
-                    a.stats.mark_fail(n);
-                    a.last_status = Some("error".into());
-                }
-                let _ = save_store(&store).await;
-            }
-            yield Event::default().data("[DONE]".to_string());
-
-            // stats update
-            if let (a_id, Some(s_id)) = (&acc_id2, &sid2) {
-                let mut store = st2.store.write().await;
-                if let Some(a) = store.accounts.iter_mut().find(|a| a.id == *a_id) {
-                    note_session_use(a, s_id);
-                    let n = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    a.stats.record_call(n);
-                    if has_content && !full_text.trim().is_empty() {
-                        a.stats.total_ok += 1;
-                        a.stats.mark_ok();
-                        a.last_status = Some("ok".into());
-                    } else {
-                        a.stats.total_empty += 1;
-                        a.stats.mark_fail(n);
-                        a.last_status = Some("throttled".into());
-                    }
-                }
-                let _ = save_store(&store).await;
-            }
-            let _ = msg_id;
-        };
-
-        let stream = Box::pin(body_stream);
-        return Ok(Sse::new(stream.map(|e| Ok::<_, std::convert::Infallible>(e))).into_response());
-    }
-
-    let body = if let Some((before, calls)) = &dsml_parsed {
-        let tc: Vec<Value> = calls
-            .iter()
-            .enumerate()
-            .map(|(i, c)| json!({
-                "id": new_call_id(),
-                "type": "function",
-                "function": {"name": c.name, "arguments": c.arguments}
-            }))
-            .collect();
-        json!({
-            "id": format!("chatcmpl-{}", sid),
-            "object": "chat.completion",
-            "model": model_name,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": if before.is_empty() { Value::Null } else { json!(before) },
-                    "tool_calls": tc
-                },
-                "finish_reason": "tool_calls"
-            }],
-            "usage": {"prompt_tokens": (prompt.chars().count() as i64) / 4,
-                       "completion_tokens": (text.chars().count() as i64) / 4,
-                       "total_tokens": (prompt.chars().count() as i64 + text.chars().count() as i64) / 4}
-        })
-    } else {
-        json!({
-            "id": format!("chatcmpl-{}", sid),
-            "object": "chat.completion",
-            "model": model_name,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": (prompt.chars().count() as i64) / 4,
-                       "completion_tokens": (text.chars().count() as i64) / 4,
-                       "total_tokens": (prompt.chars().count() as i64 + text.chars().count() as i64) / 4}
-        })
-    };
-    Ok(Json(body).into_response())
-}
-
-// Stats tổng quan cho UI/monitoring: per-account metrics + health pool
 async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
     let now = now();
     let store = st.store.read().await;
+    let in_flight: std::collections::HashMap<String, u32> = st.in_flight.lock().unwrap().iter()
+        .map(|(k, v)| (k.clone(), v.load(std::sync::atomic::Ordering::Acquire))).collect();
     let accounts: Vec<Value> = store
         .accounts
         .iter()
         .map(|a| {
             json!({
+                "in_flight": in_flight.get(&a.id).copied().unwrap_or(0),
+                "fail_streak": a.stats.fail_streak,
                 "id": a.id,
                 "label": a.label,
                 "available": a.stats.available(now),
@@ -2133,7 +1564,7 @@ async fn auto_refresh_loop(st: Arc<AppState>) {
 
 // ---------- helpers ----------
 
-fn cookie_string(cookies: &std::collections::BTreeMap<String, String>) -> String {
+pub(crate) fn cookie_string(cookies: &std::collections::BTreeMap<String, String>) -> String {
     cookies
         .iter()
         .map(|(k, v)| format!("{}={}", k, v))
@@ -2141,14 +1572,14 @@ fn cookie_string(cookies: &std::collections::BTreeMap<String, String>) -> String
         .join("; ")
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
 }
 
-fn into_err(e: anyhow::Error) -> (StatusCode, Json<Value>) {
+pub(crate) fn into_err(e: anyhow::Error) -> (StatusCode, Json<Value>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({"error": e.to_string()})),
@@ -2156,6 +1587,31 @@ fn into_err(e: anyhow::Error) -> (StatusCode, Json<Value>) {
 }
 
 // ---------- router ----------
+
+/// Chặn truy cập: UI và /api/* (quản trị acc, token/cookie) chỉ cho loopback dù server bị bind ra ngoài;
+/// /v1/* yêu cầu `Authorization: Bearer <DS_API_KEY>` nếu đặt biến môi trường DS_API_KEY.
+async fn access_guard(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    if (path == "/" || path.starts_with("/api/")) && !addr.ip().is_loopback() {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "admin chỉ cho phép từ localhost"}))).into_response();
+    }
+    if path.starts_with("/v1/") {
+        if let Ok(key) = std::env::var("DS_API_KEY") {
+            if !key.is_empty() {
+                let ok = req.headers().get("authorization").and_then(|v| v.to_str().ok())
+                    .map(|v| v == format!("Bearer {}", key)).unwrap_or(false);
+                if !ok {
+                    return (StatusCode::UNAUTHORIZED, Json(json!({"error": "thiếu hoặc sai API key"}))).into_response();
+                }
+            }
+        }
+    }
+    next.run(req).await
+}
 
 pub async fn run(port: u16) -> Result<()> {
     let store = load_store().await;
@@ -2176,9 +1632,10 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/login_start", post(api_login_start))
         .route("/api/build_profile", post(api_build_profile))
         .route("/api/stats", get(api_stats))
-        .route("/v1/chat/completions", post(api_chat_completions))
+        .route("/v1/chat/completions", post(crate::chat::api_chat_completions))
         .route("/v1/models", get(api_models))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB — prompt dài (256K+ token)
+        .layer(axum::middleware::from_fn(access_guard))
         .with_state(st.clone());
 
     // Auto-refresh cookies từ Chrome mỗi 5 phút
@@ -2187,7 +1644,7 @@ pub async fn run(port: u16) -> Result<()> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     println!("deepseek-harness listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }
 
