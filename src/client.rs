@@ -208,6 +208,7 @@ pub async fn chat_stream(
     use tokio::sync::mpsc;
     use futures::StreamExt;
 
+    let t_req = std::time::Instant::now(); // mốc từ lúc nhận request (tạo session + PoW + chờ header đều tính)
     let sid = match session_id {
         Some(s) => s.to_string(),
         None => self.create_session().await?,
@@ -265,7 +266,7 @@ pub async fn chat_stream(
         let mut has_content = false;
         let mut sent_msg_id = false;
 
-        let t0 = std::time::Instant::now();
+        let t0 = t_req;
         let mut first_byte_ms: Option<u128> = None;
         let mut total_bytes: usize = 0;
         let mut raw: Vec<u8> = Vec::new(); // byte dư của ký tự UTF-8 bị cắt giữa 2 chunk (vd '｜' 3 byte)
@@ -376,7 +377,7 @@ pub async fn chat_stream(
                 }
             }
         }
-        eprintln!("[ds-timing] first_byte={}ms total={}ms bytes={} resp_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, full.chars().count());
+        eprintln!("[ds-timing] first_byte={}ms total={}ms bytes={} sse_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, full.chars().count());
         let _ = tx.send(StreamEv::RawHasContent(has_content));
         let _ = tx.send(StreamEv::Done(full));
         let _ = sid2;
