@@ -58,8 +58,9 @@
     <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
       <button style="background:#8957e5;margin-top:0" id="btnBuild" onclick="buildProfile()">🏗️ Build profile (nuôi như real user)</button>
       <button style="background:#1f6feb;margin-top:0" id="btnLogin" onclick="loginStart()">➕ Login account mới</button>
+      <button style="background:#238636;margin-top:0" id="btnScan" onclick="captureAll()">🔍 Quét tabs & lưu session</button>
     </div>
-    <div class="mini" style="margin-top:8px;color:#8b949e;font-size:12px">Build profile 1 lần đầu: Chrome login tự dạo web thật (~40s) để fingerprint trông tin cậy — đỡ lỗi "Current device environment error". Profile giữ nguyên giữa các lần login.</div>
+    <div class="mini" style="margin-top:8px;color:#8b949e;font-size:12px">Quét tabs: lấy session từ Chrome đang login sẵn (CDP 9333), không mở tab mới. Build profile 1 lần đầu: Chrome login tự dạo web thật (~40s) để fingerprint trông tin cậy — đỡ lỗi "Current device environment error". Profile giữ nguyên giữa các lần login.</div>
     <div id="msg"></div>
   </div>
 
