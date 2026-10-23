@@ -64,6 +64,9 @@ pub struct AccStats {
     pub total_error: u64,
     #[serde(default)]
     pub last_used_at: u64,
+    // số lần hỏng/rỗng liên tiếp — cooldown tăng dần để acc xấu tự rời pool rồi tự quay lại
+    #[serde(default)]
+    pub fail_streak: u32,
 }
 
 impl AccStats {
@@ -102,6 +105,19 @@ impl AccStats {
 
     fn available(&self, now: u64) -> bool {
         now >= self.cooldown_until && !self.burst_active(now)
+    }
+
+    fn mark_ok(&mut self) {
+        self.fail_streak = 0;
+        self.cooldown_until = 0;
+    }
+
+    /// Hỏng/rỗng: cooldown 15s, 30s, 60s … tối đa 10 phút (DS_FAIL_COOLDOWN_MAX).
+    fn mark_fail(&mut self, now: u64) {
+        self.fail_streak = self.fail_streak.saturating_add(1);
+        let max: u64 = std::env::var("DS_FAIL_COOLDOWN_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        let cd = (15u64 << (self.fail_streak - 1).min(10)).min(max);
+        self.cooldown_until = now + cd;
     }
 
     fn record_call(&mut self, now: u64) {
@@ -1377,7 +1393,9 @@ async fn api_chat_completions(
     // - chọn acc available (không cooldown/burst, không bận call khác) ít dùng nhất
     // - khoá in-flight: 1 acc chỉ chạy 1 call đồng thời
     // - nếu tất cả bận/cooldown → chờ tới 20s rồi trả 429
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    // hàng đợi chờ acc rảnh (DS_QUEUE_WAIT_SECS, mặc định 120s): 1 lượt thinking có thể mất >1 phút nên 20s là quá ngắn
+    let queue_wait: u64 = std::env::var("DS_QUEUE_WAIT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(queue_wait);
     let (token, cookies, thread_sid, acc_id, lock) = loop {
         let now = now();
         // 1) chọn candidate tốt nhất (available + không busy)
@@ -1391,7 +1409,7 @@ async fn api_chat_completions(
                 ));
             }
             let in_flight = st.in_flight.lock().unwrap();
-            let mut best: Option<(u64, usize)> = None; // (lru, idx)
+            let mut best: Option<((u32, u64), usize)> = None; // ((in_flight, lru), idx) — ít bận nhất trước, rồi lâu chưa dùng nhất
             for (i, a) in accs.iter().enumerate() {
                 // acc chính (pool_enabled=false) không bao giờ bị tool dùng
                 if !a.pool_enabled {
@@ -1404,9 +1422,9 @@ async fn api_chat_completions(
                 // CAP concurrent/acc (DS_MAX_CONC_PER_ACC, default 2) — cộng đồng
                 // report ban khi >2 call đồng thời/acc
                 if conc < AccStats::max_conc() && a.stats.available(now) {
-                    let lru = a.stats.last_used_at;
-                    if best.map(|(bl, _)| lru < bl).unwrap_or(true) {
-                        best = Some((lru, i));
+                    let key = (conc, a.stats.last_used_at);
+                    if best.map(|(bk, _)| key < bk).unwrap_or(true) {
+                        best = Some((key, i));
                     }
                 }
             }
@@ -1532,13 +1550,13 @@ async fn api_chat_completions(
             a.stats.record_call(now);
             if has_content && !text.trim().is_empty() {
                 a.stats.total_ok += 1;
-                a.stats.cooldown_until = 0; // acc khỏe — mở khoá ngay nếu đang cooldown nhẹ
+                a.stats.mark_ok(); // acc khỏe — mở khoá ngay nếu đang cooldown
             } else if has_content {
                 a.stats.total_empty += 1;
             } else {
                 a.stats.total_empty += 1;
-                // stream rỗng hoàn toàn → cooldown dài hơn
-                a.stats.cooldown_until = now + 15;
+                // stream rỗng hoàn toàn → cooldown tăng dần
+                a.stats.mark_fail(now);
             }
             a.last_status = Some(if !text.trim().is_empty() {
                 "ok".into()
@@ -1585,6 +1603,7 @@ async fn api_chat_completions(
             let mut think_dropped = false;       // đã thấy DSML trong reasoning → bỏ phần còn lại
             let mut has_content = false;
             let mut finished = false;
+            let mut last_err: Option<String> = None; // lỗi attempt cuối — trả về client thay vì nuốt
 
             for attempt in 0..3 {
                 // retry: reset buffer — tránh dư tích text/leak từ attempt trước
@@ -1601,7 +1620,11 @@ async fn api_chat_completions(
                 };
                 let (s2, mut rx) = match stream_res {
                     Ok(pair) => pair,
-                    Err(_) => continue, // lỗi — bỏ qua attempt này
+                    Err(e) => {
+                        eprintln!("[ds-error] attempt {}: {:#}", attempt, e);
+                        last_err = Some(format!("{:#}", e));
+                        continue;
+                    }
                 };
                 sid2 = Some(s2);
 
@@ -1669,9 +1692,13 @@ async fn api_chat_completions(
                                 think_buf.clear();
                             }
                             // rate-limit mềm: stream rỗng → retry sau 8s
-                            if !has_content && attempt < 2 {
-                                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                                break; // retry
+                            if !has_content {
+                                if attempt < 2 {
+                                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                                } else {
+                                    last_err = Some("DeepSeek web trả stream rỗng sau 3 lần thử (có thể bị throttle)".into());
+                                }
+                                break; // retry / bỏ cuộc
                             }
                             // DS yêu cầu retry (click_behavior=retry) — response bị cắt giữa:
                             // retry turn (attempt 2) nếu chưa dùng lần retry
@@ -1769,6 +1796,21 @@ async fn api_chat_completions(
                 if finished { break; }
             }
 
+            if !finished {
+                // 3 lần thử đều hỏng: báo lỗi rõ cho client (trước đây trả completion rỗng như thể xong bình thường)
+                let msg = last_err.clone().unwrap_or_else(|| "DeepSeek web không trả dữ liệu".into());
+                eprintln!("[ds-fail] {}", msg);
+                let ev = serde_json::json!({"error": {"message": msg, "type": "upstream_error", "code": "ds_upstream_failed"}});
+                yield Event::default().data(ev.to_string());
+                let mut store = st2.store.write().await;
+                let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id2) {
+                    a.stats.total_error += 1;
+                    a.stats.mark_fail(n);
+                    a.last_status = Some("error".into());
+                }
+                let _ = save_store(&store).await;
+            }
             yield Event::default().data("[DONE]".to_string());
 
             // stats update
@@ -1783,11 +1825,11 @@ async fn api_chat_completions(
                     a.stats.record_call(n);
                     if has_content && !full_text.trim().is_empty() {
                         a.stats.total_ok += 1;
-                        a.stats.cooldown_until = 0;
+                        a.stats.mark_ok();
                         a.last_status = Some("ok".into());
                     } else {
                         a.stats.total_empty += 1;
-                        a.stats.cooldown_until = n + 15;
+                        a.stats.mark_fail(n);
                         a.last_status = Some("throttled".into());
                     }
                 }
@@ -2278,6 +2320,18 @@ mod xml_tests {
     #[test]
     fn call_ids_are_unique() {
         assert_ne!(new_call_id(), new_call_id());
+    }
+
+    #[test]
+    fn fail_cooldown_escalates_and_resets() {
+        let mut st = AccStats::default();
+        st.mark_fail(1000); assert_eq!(st.cooldown_until, 1015);
+        st.mark_fail(1000); assert_eq!(st.cooldown_until, 1030);
+        st.mark_fail(1000); assert_eq!(st.cooldown_until, 1060);
+        for _ in 0..20 { st.mark_fail(1000); }
+        assert_eq!(st.cooldown_until, 1600); // trần 600s
+        st.mark_ok();
+        assert_eq!((st.fail_streak, st.cooldown_until), (0, 0));
     }
 
     #[test]
