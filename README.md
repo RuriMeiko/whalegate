@@ -113,9 +113,10 @@ journalctl --user -u ds-harness -f
    ```bash
    google-chrome --remote-debugging-port=9333
    ```
-2. Vào UI → bấm **"Sinh link OAuth2"** → đăng nhập Google/email trong tab vừa mở.
-3. Server canh tab đó (poll 2s), thấy token → verify → **lưu → tự đóng tab**.
-4. Hoặc bấm **"Quét tabs"** để bắt toàn bộ tab `chat.deepseek.com` đang đăng nhập.
+2. Vào UI → bấm **"➕ Login account mới"** — server tự mở tab DeepSeek trong Chrome.
+3. Đăng nhập trong tab đó (Google / email / passkey — kiểu gì cũng được). Server canh tab (poll 2s), thấy token → verify → **lưu → tự đóng tab**, acc hiện ngay trong bảng.
+4. Hoặc bấm **"🔍 Quét tabs & lưu session"** để bắt toàn bộ tab `chat.deepseek.com` đang đăng nhập sẵn.
+5. Lần đầu nên bấm **"🏗️ Build profile"** (~40s): Chrome login tự dạo web thật để fingerprint trông tin cậy, đỡ lỗi `Current device environment error`. Profile được giữ nguyên giữa các lần login.
 
 Server còn tự **refresh cookie từ Chrome mỗi 5 phút** cho acc khớp token đang sống.
 
