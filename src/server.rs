@@ -520,6 +520,20 @@ fn note_session_use(a: &mut Account, sid: &str) {
     }
 }
 
+/// Pipeline parse tool-call DUY NHẤT (cả stream lẫn non-stream): chuẩn hoá biến thể rồi thử lần lượt các parser.
+fn parse_any_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
+    let n = normalize_dsml(text);
+    parse_dsml_tool_calls(&n)
+        .or_else(|| parse_dsml_json_tool_calls(&n))
+        .or_else(|| parse_dsml_nested_tool_calls(&n))
+        .or_else(|| parse_xml_tool_call(&n).map(|(b, c)| (b, vec![c])))
+}
+
+/// id tool-call duy nhất — `call_0` lặp ở mọi step làm model/client nhầm result ↔ call.
+fn new_call_id() -> String {
+    format!("call_{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
+}
+
 /// Điền các property string bắt buộc mà model bỏ sót (vd bash.description) theo schema tools của client,
 /// thay vì để client trả "invalid arguments: missing required property".
 fn fill_required_args(tools: &Option<Vec<Value>>, call: &mut DsmlToolCall) {
@@ -528,8 +542,27 @@ fn fill_required_args(tools: &Option<Vec<Value>>, call: &mut DsmlToolCall) {
         .filter_map(|t| t.get("function"))
         .find(|f| f.get("name").and_then(|n| n.as_str()) == Some(call.name.as_str()))
         .and_then(|f| f.get("parameters")) else { return };
-    let Some(required) = params.get("required").and_then(|r| r.as_array()) else { return };
+    let required: Vec<Value> = params.get("required").and_then(|r| r.as_array()).cloned().unwrap_or_default();
     let Ok(Value::Object(mut args)) = serde_json::from_str::<Value>(&call.arguments) else { return };
+    // ép kiểu theo schema: model viết mọi giá trị là chuỗi, schema đòi số/bool/mảng/object → client báo invalid arguments
+    if let Some(props) = params.get("properties").and_then(|p| p.as_object()) {
+        for (k, sch) in props {
+            let ty = sch.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+            if !matches!(ty, "integer" | "number" | "boolean" | "array" | "object") { continue; }
+            if let Some(Value::String(sv)) = args.get(k) {
+                if let Ok(v) = serde_json::from_str::<Value>(sv.trim()) {
+                    let ok = match ty {
+                        "integer" => v.is_i64() || v.is_u64(),
+                        "number" => v.is_number(),
+                        "boolean" => v.is_boolean(),
+                        "array" => v.is_array(),
+                        _ => v.is_object(),
+                    };
+                    if ok { args.insert(k.clone(), v); }
+                }
+            }
+        }
+    }
     for r in required.iter().filter_map(|r| r.as_str()) {
         if args.contains_key(r) { continue; }
         let is_str = params.get("properties").and_then(|p| p.get(r))
@@ -641,9 +674,11 @@ fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
             let marker = "</｜｜DSML｜｜ parameter";
             let Some(vend) = value_part.find(marker) else { break };
             let value = value_part[..vend].to_string();
+            let is_json = after_pn[..vstart].contains("string=\"false\"");
             // skip junk param rỗng (model nhiều khi emit <parameter name="bash"></parameter>)
             if !pname.is_empty() && !value.is_empty() {
-                args.insert(pname, serde_json::Value::String(value));
+                let v = if is_json { serde_json::from_str(value.trim()).unwrap_or(serde_json::Value::String(value)) } else { serde_json::Value::String(value) };
+                args.insert(pname, v);
             }
             // advance qua '>' kế sau marker (đóng tag, bất kể attr đè vào)
             let after_close = &value_part[vend + marker.len()..];
@@ -1082,10 +1117,24 @@ struct ChatRequest {
 
 // Render tool specs (OpenAI schema) thành hướng dẫn gọi DSML — NHẤN MẠNH: mọi parameter
 // trong "required" PHẢI có mặt trong arguments (dsh schema-reject call thiếu description).
+/// Format tool-call chuẩn — ĐÚNG format DS web tự dùng; hướng dẫn, lịch sử và parser đều bám format này
+/// (trước đây hướng dẫn nói `<dsml:tool_call>{json}` còn lịch sử render DSML → model trộn nhiều biến thể).
+const TOOL_FORMAT_GUIDE: &str = "# Tools\n\
+To call tools, END your reply with exactly one block in this format (nothing after it):\n\
+<｜｜DSML｜｜ calls>\n\
+<｜｜DSML｜｜ invoke name=\"TOOL_NAME\">\n\
+<｜｜DSML｜｜ parameter name=\"PARAM_NAME\" string=\"true\">VALUE</｜｜DSML｜｜ parameter>\n\
+</｜｜DSML｜｜ invoke>\n\
+</｜｜DSML｜｜ calls>\n\
+Use string=\"true\" for text values; for numbers, booleans, arrays and objects use string=\"false\" with a JSON value. \
+Several invoke elements may share one calls block. Include every REQUIRED parameter. \
+Keep any text before the block short. If you need no tool, answer in plain text with no block.\n";
+
 fn render_tools_spec(tools: &Option<Vec<Value>>) -> String {
     let Some(tl) = tools else { return String::new() };
     if tl.is_empty() { return String::new(); }
-    let mut out = String::from("available_tools (call format: <dsml:tool_call>{\"name\": \"<tool>\", \"arguments\": {...}}</dsml:tool_call>):\n");
+    let mut out = String::from(TOOL_FORMAT_GUIDE);
+    out.push_str("\nAvailable tools:\n");
     for t in tl {
         let f = t.get("function").unwrap_or(t);
         let name = f.get("name").and_then(|x| x.as_str()).unwrap_or("?");
@@ -1097,12 +1146,13 @@ fn render_tools_spec(tools: &Option<Vec<Value>>) -> String {
                 .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
                 .unwrap_or_default();
             for (k, v) in params {
-                let req_mark = if required.contains(&k.as_str()) { " REQUIRED" } else { "" };
+                let ty = v.get("type").and_then(|x| x.as_str()).unwrap_or("string");
+                let en = v.get("enum").and_then(|e| e.as_array())
+                    .map(|a| format!(" one of {}", a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("|")))
+                    .unwrap_or_default();
+                let req_mark = if required.contains(&k.as_str()) { ", REQUIRED" } else { "" };
                 let pd = v.get("description").and_then(|x| x.as_str()).unwrap_or("");
-                out.push_str(&format!("  param {}: {}{}\n", k, pd, req_mark));
-            }
-            if !required.is_empty() {
-                out.push_str(&format!("  STRICT: parameters [{}] are REQUIRED — every tool call MUST include all of them or the call will be rejected.\n", required.join(", ")));
+                out.push_str(&format!("  param {} ({}{}{}): {}\n", k, ty, en, req_mark, pd));
             }
         }
     }
@@ -1153,26 +1203,14 @@ fn render_content(m: &Value) -> String {
 }
 
 fn render_tool_calls(m: &Value) -> String {
-    // assistant message có tool_calls → render lại thành DSML để model thấy chính nó đã gọi gì
+    // assistant message có tool_calls → render lại đúng format chuẩn để model thấy chính nó đã gọi gì
     let mut out = String::new();
     if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
-        out.push_str("<｜｜DSML｜｜ calls>");
-        for (ci, tc) in tcs.iter().enumerate() {
-            let name = tc
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("unknown");
-            let call_id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            let id_attr = if call_id.is_empty() { format!("call_{}", ci) } else { call_id.to_string() };
-            out.push_str(&format!(
-                "<｜｜DSML｜｜ invoke id=\"{}\" name=\"{}\">",
-                id_attr, name
-            ));
-            if let Some(args) = tc
-                .get("function")
-                .and_then(|f| f.get("arguments"))
-            {
+        out.push_str("\n<｜｜DSML｜｜ calls>");
+        for tc in tcs {
+            let name = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("unknown");
+            out.push_str(&format!("\n<｜｜DSML｜｜ invoke name=\"{}\">", name));
+            if let Some(args) = tc.get("function").and_then(|f| f.get("arguments")) {
                 // arguments là JSON string — parse rồi render từng parameter
                 let parsed: Option<Value> = args
                     .as_str()
@@ -1180,23 +1218,37 @@ fn render_tool_calls(m: &Value) -> String {
                     .or_else(|| args.as_object().map(|_| args.clone()));
                 if let Some(obj) = parsed.and_then(|v| v.as_object().cloned()) {
                     for (k, v) in obj {
-                        let sv = v.as_str().unwrap_or(&v.to_string()).to_string();
+                        // chuỗi giữ nguyên (kể cả xuống dòng); kiểu khác ghi JSON + string="false"
+                        let (flag, sv) = match &v {
+                            Value::String(x) => ("true", x.clone()),
+                            other => ("false", other.to_string()),
+                        };
                         out.push_str(&format!(
-                            "<｜｜DSML｜｜ parameter name=\"{}\" string=\"true\">{}</｜｜DSML｜｜ parameter>",
-                            k,
-                            sv.replace('\n', " ")
+                            "\n<｜｜DSML｜｜ parameter name=\"{}\" string=\"{}\">{}</｜｜DSML｜｜ parameter>",
+                            k, flag, sv
                         ));
                     }
                 }
             }
-            out.push_str("</｜｜DSML｜｜ invoke>");
+            out.push_str("\n</｜｜DSML｜｜ invoke>");
         }
-        out.push_str("</｜｜DSML｜｜ calls>");
+        out.push_str("\n</｜｜DSML｜｜ calls>");
     }
     out
 }
 
 fn messages_to_prompt(messages: &[Value]) -> String {
+    // id → tên tool, lấy từ các tool_calls của assistant, để gắn nhãn tool_result
+    let mut call_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for m in messages {
+        if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
+            for tc in tcs {
+                if let (Some(id), Some(n)) = (tc.get("id").and_then(|x| x.as_str()), tc.pointer("/function/name").and_then(|x| x.as_str())) {
+                    call_names.insert(id.to_string(), n.to_string());
+                }
+            }
+        }
+    }
     messages
         .iter()
         .filter_map(|m| {
@@ -1218,12 +1270,12 @@ fn messages_to_prompt(messages: &[Value]) -> String {
                     if text.is_empty() {
                         None
                     } else {
-                        // kèm tool_call_id để model khớp result ↔ call (tránh lặp call)
+                        // kèm tên tool + id để model khớp result ↔ call (tránh lặp call)
                         let tcid = m["tool_call_id"].as_str().unwrap_or("");
-                        if tcid.is_empty() {
-                            Some(format!("tool_result: {}", text))
-                        } else {
-                            Some(format!("tool_result [{}]: {}", tcid, text))
+                        match call_names.get(tcid) {
+                            Some(n) => Some(format!("tool_result ({}) [{}]: {}", n, tcid, text)),
+                            None if tcid.is_empty() => Some(format!("tool_result: {}", text)),
+                            None => Some(format!("tool_result [{}]: {}", tcid, text)),
                         }
                     }
                 }
@@ -1424,8 +1476,7 @@ async fn api_chat_completions(
             hdr.push_str(&tools_hdr);
             hdr.push_str("\n");
         }
-        hdr.push_str("system_note: (1) Do NOT greet the user again mid-conversation — history above already contains earlier greetings; reply directly to the task. (2) Keep prose between tool calls minimal, no repeated apologies or re-introductions.");
-        format!("{}\n\n{}\n", hdr, base)
+        format!("{}\n{}\n", hdr, base)
     };
 
     let thinking = req
@@ -1434,6 +1485,10 @@ async fn api_chat_completions(
         .map(|m| m.contains("r1"))
         .unwrap_or(false)
         || req.thinking.unwrap_or(false);
+    // yêu cầu đặt tên phiên của client: không cần thinking, đỡ tốn 4-5s + slot acc
+    let is_title_req = req.tools.as_ref().map_or(true, |t| t.is_empty())
+        && req.messages.iter().any(|m| render_content(m).contains("Create a concise title"));
+    let thinking = thinking && !is_title_req;
     let search = req.search.unwrap_or(false);
 
     // STATELESS trong 1 session cố định: parent_message_id luôn null → mỗi request
@@ -1497,13 +1552,7 @@ async fn api_chat_completions(
     let model_name = req.model.unwrap_or_else(|| "deepseek-web".into());
 
     // DS web trả tool-call dạng DSML text (hoặc XML-tag) → dịch sang tool_calls chuẩn OpenAI
-    let text_norm = normalize_dsml(&text);
-    let mut dsml_parsed = parse_dsml_tool_calls(&text_norm)
-        .or_else(|| parse_dsml_json_tool_calls(&text_norm))
-        .or_else(|| parse_dsml_nested_tool_calls(&text_norm))
-        .or_else(|| {
-            parse_xml_tool_call(&text).map(|(before, call)| (before, vec![call]))
-        });
+    let mut dsml_parsed = parse_any_tool_calls(&text);
     if let Some((_, calls)) = dsml_parsed.as_mut() {
         for c in calls.iter_mut() { fill_required_args(&tools_all, c); }
     }
@@ -1637,10 +1686,7 @@ async fn api_chat_completions(
                             // Done ev có thể mang full text dài hơn full_text (fragment cuối đến muộn)
                             let parse_text = normalize_dsml(&full_text);
                             eprintln!("[dbg done2] pt={:?}", parse_text.chars().take(180).collect::<String>());
-                            if let Some((before, mut calls)) = parse_dsml_tool_calls(&parse_text)
-                                .or_else(|| parse_dsml_json_tool_calls(&parse_text))
-                                .or_else(|| parse_dsml_nested_tool_calls(&parse_text))
-                                .or_else(|| parse_xml_tool_call(&parse_text).map(|(b, c)| (b, vec![c])))
+                            if let Some((before, mut calls)) = parse_any_tool_calls(&parse_text)
                             {
                                 // phần text trước tool-call: chỉ yield PHẦN CHƯA stream
                                 // (trước đó đã flush từng fragment — tránh trùng lặp)
@@ -1660,7 +1706,7 @@ async fn api_chat_completions(
                                     let ev = serde_json::json!({
                                         "id": id, "object": "chat.completion.chunk", "model": model_name2,
                                         "choices": [{"index": 0, "delta": {"tool_calls": [{
-                                            "index": i, "id": format!("call_{}", i), "type": "function",
+                                            "index": i, "id": new_call_id(), "type": "function",
                                             "function": {"name": c.name, "arguments": c.arguments}
                                         }]}, "finish_reason": null}]
                                     });
@@ -1759,7 +1805,7 @@ async fn api_chat_completions(
             .iter()
             .enumerate()
             .map(|(i, c)| json!({
-                "id": format!("call_{}", i),
+                "id": new_call_id(),
                 "type": "function",
                 "function": {"name": c.name, "arguments": c.arguments}
             }))
@@ -2195,6 +2241,43 @@ mod xml_tests {
         assert_eq!((a.thread_session_id.as_deref(), a.thread_uses), (Some("s1"), 2));
         note_session_use(&mut a, "s2"); // xoay vòng: session mới thay thế, đếm lại
         assert_eq!((a.thread_session_id.as_deref(), a.thread_uses), (Some("s2"), 1));
+    }
+
+    #[test]
+    fn typed_args_and_string_false() {
+        let text = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"read\">\n<｜｜DSML｜｜ parameter name=\"file_path\" string=\"true\">/a</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"limit\" string=\"false\">50</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let (_, calls) = parse_any_tool_calls(text).unwrap();
+        let v: Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(v["limit"], 50);
+        // model quên string="false" → ép theo schema
+        let tools = Some(vec![json!({"function":{"name":"read","parameters":{"properties":{"file_path":{"type":"string"},"limit":{"type":"integer"}}}}})]);
+        let mut c = DsmlToolCall { name: "read".into(), arguments: "{\"file_path\":\"/a\",\"limit\":\"50\"}".into(), before: String::new() };
+        fill_required_args(&tools, &mut c);
+        let v: Value = serde_json::from_str(&c.arguments).unwrap();
+        assert_eq!(v["limit"], 50);
+    }
+
+    #[test]
+    fn history_roundtrip_uses_canonical_format() {
+        let msgs = vec![
+            json!({"role":"user","content":"hi"}),
+            json!({"role":"assistant","content":"ok","tool_calls":[{"id":"call_abc","type":"function","function":{"name":"write","arguments":"{\"file_path\":\"/x\",\"content\":\"a\\nb\",\"n\":3}"}}]}),
+            json!({"role":"tool","tool_call_id":"call_abc","content":"done"}),
+        ];
+        let p = messages_to_prompt(&msgs);
+        assert!(p.contains("tool_result (write) [call_abc]: done"));
+        assert!(p.contains("a\nb"), "xuống dòng trong tham số phải được giữ");
+        // model đọc lại lịch sử của chính nó phải parse được bằng đúng parser
+        let (_, calls) = parse_any_tool_calls(&p).expect("lịch sử render phải parse lại được");
+        let v: Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(v["content"], "a\nb");
+        assert_eq!(v["n"], 3);
+        assert!(!p.contains("system_note") && !p.contains("greet"));
+    }
+
+    #[test]
+    fn call_ids_are_unique() {
+        assert_ne!(new_call_id(), new_call_id());
     }
 
     #[test]
