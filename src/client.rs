@@ -65,6 +65,21 @@ impl DsClient {
             .to_string())
     }
 
+    /// Xoá session web (best-effort — endpoint chưa kiểm chứng trên mọi phiên bản web).
+    pub async fn delete_session(&self, session_id: &str) -> Result<()> {
+        let v: Value = self
+            .req(reqwest::Method::POST, "/chat_session/delete")
+            .json(&json!({ "chat_session_id": session_id }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        if v["code"].as_i64().unwrap_or(0) != 0 {
+            anyhow::bail!("delete_session: {}", v);
+        }
+        Ok(())
+    }
+
     pub async fn history_messages(&self, session_id: &str) -> Result<Value> {
         let v: Value = self
             .req(reqwest::Method::GET, &format!("/chat/history_messages?chat_session_id={}", session_id))

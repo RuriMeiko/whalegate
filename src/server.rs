@@ -30,6 +30,9 @@ pub struct Account {
     // Thread stateful: chat tiếp trong cùng conversation (không tạo mới mỗi request)
     pub thread_session_id: Option<String>,
     pub thread_parent_message_id: Option<i64>,
+    // số lượt đã chạy trên thread_session_id hiện tại — quá DS_SESSION_ROTATE thì đổi session mới
+    #[serde(default)]
+    pub thread_uses: u32,
     // ---- Smart rotation metrics ----
     #[serde(default)]
     pub stats: AccStats,
@@ -223,6 +226,7 @@ async fn api_add_account(
         last_verified: Some(now()),
         last_status: Some("ok".into()),
         thread_session_id: None,
+        thread_uses: 0,
         thread_parent_message_id: None,
         stats: Default::default(),
                 pool_enabled: true,
@@ -483,6 +487,36 @@ fn safe_flush_len(buf: &str) -> usize {
     match buf.rfind('<') {
         Some(i) if !buf[i..].contains('>') => i,
         _ => buf.len(),
+    }
+}
+
+/// Số lượt tối đa trên 1 session web trước khi đổi (DS_SESSION_ROTATE, mặc định 30).
+/// Prompt luôn gửi đủ lịch sử, session web không giữ ngữ cảnh → để nó phình vô hạn chỉ tổ chậm/nặng.
+fn session_rotate_limit() -> u32 {
+    std::env::var("DS_SESSION_ROTATE").ok().and_then(|v| v.parse().ok()).unwrap_or(30)
+}
+
+/// Ghi nhận 1 lượt dùng session `sid` cho acc. Session khác session đang lưu (do xoay vòng) → thay mới,
+/// xoá session cũ sau 10 phút (request đang chạy dở trên session cũ còn kịp xong).
+fn note_session_use(a: &mut Account, sid: &str) {
+    match a.thread_session_id.as_deref() {
+        Some(cur) if cur == sid => a.thread_uses += 1,
+        old => {
+            if let Some(old) = old.map(|o| o.to_string()) {
+                let (token, cookies) = (a.token.clone(), cookie_string(&a.cookies));
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                    if let Ok(c) = crate::client::DsClient::new(token, cookies) {
+                        match c.delete_session(&old).await {
+                            Ok(()) => eprintln!("[session] đã xoá session cũ {}", old),
+                            Err(e) => eprintln!("[session] xoá session cũ {} lỗi: {}", old, e),
+                        }
+                    }
+                });
+            }
+            a.thread_session_id = Some(sid.to_string());
+            a.thread_uses = 1;
+        }
     }
 }
 
@@ -1327,7 +1361,7 @@ async fn api_chat_completions(
             drop(in_flight);
             best.map(|(_, i)| {
                 let a = &accs[i];
-                (a.token.clone(), a.cookies.clone(), a.thread_session_id.clone(), a.id.clone())
+                (a.token.clone(), a.cookies.clone(), if a.thread_uses >= session_rotate_limit() { None } else { a.thread_session_id.clone() }, a.id.clone())
             })
         };
 
@@ -1439,9 +1473,7 @@ async fn api_chat_completions(
     {
         let mut store = st.store.write().await;
         if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
-            if a.thread_session_id.is_none() {
-                a.thread_session_id = Some(sid.clone());
-            }
+            note_session_use(a, &sid);
             a.stats.record_call(now);
             if has_content && !text.trim().is_empty() {
                 a.stats.total_ok += 1;
@@ -1697,9 +1729,7 @@ async fn api_chat_completions(
             if let (a_id, Some(s_id)) = (&acc_id2, &sid2) {
                 let mut store = st2.store.write().await;
                 if let Some(a) = store.accounts.iter_mut().find(|a| a.id == *a_id) {
-                    if a.thread_session_id.is_none() {
-                        a.thread_session_id = Some(s_id.clone());
-                    }
+                    note_session_use(a, s_id);
                     let n = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
@@ -1848,6 +1878,7 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                         last_verified: Some(now()),
                         last_status: Some("ok".into()),
                         thread_session_id: None,
+        thread_uses: 0,
                         thread_parent_message_id: None,
                         stats: Default::default(),
                 pool_enabled: true,
@@ -1960,6 +1991,7 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
             last_verified: Some(now()),
             last_status: Some("ok".into()),
             thread_session_id: None,
+        thread_uses: 0,
             thread_parent_message_id: None,
             stats: Default::default(),
                 pool_enabled: true,
@@ -2153,6 +2185,16 @@ mod xml_tests {
         let (_, calls) = parse_dsml_tool_calls(text).expect("parse id-as-name");
         assert_eq!(calls[0].name, "write");
         assert!(calls[0].arguments.contains("/tmp/p.js") && calls[0].arguments.contains("(() => 1)()"));
+    }
+
+    #[tokio::test]
+    async fn session_rotation_bookkeeping() {
+        let mut a: Account = serde_json::from_str(r#"{"id":"x","label":"x","token":"t","cookies":{},"added_at":0,"last_verified":null,"last_status":null,"thread_session_id":null,"thread_parent_message_id":null}"#).unwrap();
+        note_session_use(&mut a, "s1");
+        note_session_use(&mut a, "s1");
+        assert_eq!((a.thread_session_id.as_deref(), a.thread_uses), (Some("s1"), 2));
+        note_session_use(&mut a, "s2"); // xoay vòng: session mới thay thế, đếm lại
+        assert_eq!((a.thread_session_id.as_deref(), a.thread_uses), (Some("s2"), 1));
     }
 
     #[test]
