@@ -18,7 +18,10 @@ use crate::client::DsClient;
 
 /// File acc (DS_ACCOUNTS_PATH ghi đè, tiện chạy bản test với bộ acc riêng).
 fn creds_path() -> String {
-    std::env::var("DS_ACCOUNTS_PATH").unwrap_or_else(|_| "/home/rurimeiko/.ds-harness/accounts.json".into())
+    std::env::var("DS_ACCOUNTS_PATH").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        format!("{}/.ds-harness/accounts.json", home)
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone)]

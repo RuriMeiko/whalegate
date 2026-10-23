@@ -1,3 +1,19 @@
+# Rust
 target/
-*.log
+
+# Secrets — KHÔNG BAO GIỜ commit
 .env
+*.log
+accounts.json
+*.cookie
+*.session
+worker/.wrangler/
+worker/.dev.vars
+.wrangler/
+.dev.vars
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
