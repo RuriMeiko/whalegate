@@ -40,12 +40,26 @@ pub struct DsClient {
     http: reqwest::Client,
     token: String,
     cookies: String,
+    /// ổn định theo từng acc (web thật giữ 1 device id cố định / trình duyệt)
+    device_id: String,
+}
+
+/// UUID-dạng ổn định dẫn xuất từ token (FNV-1a 128 bit giả lập bằng 2 lần băm) — mỗi acc một "thiết bị".
+fn device_id_for(token: &str) -> String {
+    let h = |seed: u64| token.bytes().fold(seed, |a, b| (a ^ b as u64).wrapping_mul(0x100000001b3));
+    let (a, b) = (h(0xcbf29ce484222325), h(0x84222325cbf29ce4));
+    format!("{:08x}-{:04x}-4{:03x}-a{:03x}-{:012x}", (a >> 32) as u32, (a >> 16) as u16, a as u16 & 0xfff, (b >> 52) as u16 & 0xfff, b & 0xffff_ffff_ffff)
+}
+
+/// Lệch múi giờ tính bằng giây như web (UTC+7 → 25200). Đặt DS_TZ_OFFSET để đổi.
+fn tz_offset_secs() -> String {
+    std::env::var("DS_TZ_OFFSET").unwrap_or_else(|_| "25200".into())
 }
 
 impl DsClient {
     pub fn new(token: String, cookies: String) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
             // Chặn treo vô hạn: DS chập chờn mà không có timeout thì request giữ Lease mãi → cạn pool.
             // KHÔNG dùng `.timeout()` toàn cục: nó tính cả thời gian đọc body, sẽ giết stream chat dài.
             // `connect_timeout` chặn lúc bắt tay TCP/TLS; `read_timeout` chặn từng lần đọc socket
@@ -53,7 +67,8 @@ impl DsClient {
             .connect_timeout(std::time::Duration::from_secs(15))
             .read_timeout(std::time::Duration::from_secs(read_timeout_secs()))
             .build()?;
-        Ok(Self { http, token, cookies })
+        let device_id = device_id_for(&token);
+        Ok(Self { http, token, cookies, device_id })
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -63,6 +78,22 @@ impl DsClient {
             .header("cookie", &self.cookies)
             .header("origin", "https://chat.deepseek.com")
             .header("referer", "https://chat.deepseek.com/")
+            // Bộ header web thật (2.7.0) gửi kèm mọi call /api/v0 — thiếu là dấu hiệu "không phải trình duyệt"
+            .header("accept", "*/*")
+            .header("accept-language", "vi,en-US;q=0.9,en;q=0.8")
+            .header("sec-ch-ua", "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"Linux\"")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "same-origin")
+            .header("x-client-platform", "web")
+            .header("x-client-version", "2.7.0")
+            .header("x-client-locale", "vi")
+            .header("x-client-bundle-id", "com.deepseek.chat")
+            .header("x-client-timezone-offset", tz_offset_secs())
+            .header("x-device-model", "")
+            .header("x-device-id", &self.device_id)
     }
 
     pub async fn users_current(&self) -> Result<Value> {
@@ -472,4 +503,16 @@ pub async fn chat_stream(
     Ok((sid, rx))
 }
 
+}
+
+#[cfg(test)]
+mod header_tests {
+    #[test]
+    fn device_id_is_stable_uuid_shape() {
+        let a = super::device_id_for("tok-a");
+        assert_eq!(a, super::device_id_for("tok-a"));
+        assert_ne!(a, super::device_id_for("tok-b"));
+        assert_eq!(a.len(), 36);
+        assert_eq!(a.matches('-').count(), 4);
+    }
 }
