@@ -352,20 +352,65 @@ async fn api_dsh_status() -> Json<Value> {
 }
 
 #[derive(Deserialize, Default)]
-struct DshReq { preset: Option<String> }
+struct DshReq {
+    preset: Option<String>,
+    /// Tên các profile cần cấu hình (desktop, web, headless, ...). Bỏ trống = tất cả profile đang có.
+    profiles: Option<Vec<String>>,
+    /// true = cấu hình mọi profile tìm thấy, kể cả khi profiles có giá trị.
+    all: Option<bool>,
+}
 
-/// Nút "Cấu hình dsh": ghi provider whalegate vào profile dsh của máy đang chạy gateway.
+/// Nút "Cấu hình dsh": ghi provider whalegate vào các profile dsh của máy đang chạy gateway.
+/// Mặc định ghi TẤT CẢ profile đang có — trên Windows/macOS người dùng Desktop app dùng profile
+/// "desktop", không phải "web", nên chỉ ghi web là họ mở app lên vẫn không thấy gateway.
 async fn api_dsh_setup(body: Option<Json<DshReq>>) -> Json<Value> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let mut o = crate::setup_dsh::Opts::defaults();
     if let Some(p) = req.preset.filter(|p| matches!(p.as_str(), "ptc" | "standard")) { o.preset = p; }
-    let profile = crate::setup_dsh::default_profile();
-    match tokio::task::spawn_blocking(move || crate::setup_dsh::configure(&profile, &o)).await {
-        Ok(Ok(r)) => {
-            crate::elog!("[dsh] cấu hình {} (backup: {:?})", r.file.display(), r.backup);
-            Json(json!({"ok": true, "changed": r.backup.is_some() || r.created, "file": r.file.to_string_lossy()}))
+
+    let all = crate::setup_dsh::list_profiles();
+    let wanted: Vec<std::path::PathBuf> = if req.all == Some(true) || req.profiles.is_none() {
+        all.iter().map(|(_, d, _)| d.clone()).collect()
+    } else {
+        let names = req.profiles.unwrap_or_default();
+        names.iter().filter_map(|n| {
+            // chặn path traversal: chỉ nhận tên profile đơn giản
+            if n.is_empty() || n.contains('/') || n.contains('\\') || n == ".." { return None; }
+            all.iter().find(|(name, _, _)| name == n).map(|(_, d, _)| d.clone())
+        }).collect()
+    };
+    if wanted.is_empty() {
+        return Json(json!({
+            "ok": false,
+            "error": format!("không thấy profile dsh nào trong {} — mở dsh (hoặc app Desktop) một lần để nó tạo profile", crate::setup_dsh::profiles_root().display()),
+        }));
+    }
+
+    let results = tokio::task::spawn_blocking(move || crate::setup_dsh::configure_many(&wanted, &o)).await;
+    match results {
+        Ok(list) => {
+            let mut ok = Vec::new();
+            let mut failed = Vec::new();
+            for (path, res) in list {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                match res {
+                    Ok(r) => {
+                        crate::elog!("[dsh] cấu hình {} (backup: {:?})", r.file.display(), r.backup);
+                        ok.push(json!({"profile": name, "file": r.file.to_string_lossy(), "changed": r.backup.is_some() || r.created}));
+                    }
+                    Err(e) => failed.push(json!({"profile": name, "error": format!("{:#}", e)})),
+                }
+            }
+            let err = if ok.is_empty() {
+                Some(failed.first().and_then(|f| f["error"].as_str()).unwrap_or("không cấu hình được profile nào").to_string())
+            } else { None };
+            Json(json!({
+                "ok": !ok.is_empty(),
+                "configured": ok,
+                "failed": failed,
+                "error": err,
+            }))
         }
-        Ok(Err(e)) => Json(json!({"ok": false, "error": format!("{:#}", e)})),
         Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
     }
 }

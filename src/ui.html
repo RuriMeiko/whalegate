@@ -149,6 +149,11 @@
   #updBar.show { display: flex; }
   #updBar .t { flex: 1; min-width: 180px; }
   #updBar b { font-weight: 600; }
+  .dshProf { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--hair); font: 12.5px/1.3 var(--mono); cursor: pointer; }
+  .dshProf:last-child { border-bottom: 0; }
+  .dshProf b { min-width: 74px; }
+  .dshProf .st { flex: 1; color: var(--mute); font-size: 11.5px; }
+  .dshProf .st.ok { color: var(--ok); }
 
   @media (max-width: 860px) { .k { grid-column: span 6; } .c8, .c4 { grid-column: span 12; } }
   @media (max-width: 560px) {
@@ -287,9 +292,11 @@
   <div class="dlg">
     <div class="top"><h2>Cấu hình dsh</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('dshModal')">×</button></div>
     <div class="inner">
-      <p>Ghi provider <b>whalegate</b> vào profile dsh trên máy này (Linux, macOS, Windows), đặt <b>DeepSeek Web</b> làm model mặc định. File cũ được backup trước khi sửa.</p>
-      <table><tbody id="dshInfo"></tbody></table>
-      <p class="sub" style="margin-top:10px">Cửa sổ ngữ cảnh báo cho dsh được tính từ <i>Trần prompt</i>: dsh tự nén ở 80% cửa sổ, nên luôn nén trước khi gateway phải cắt lịch sử.</p>
+      <p>Ghi provider <b>whalegate</b> vào các profile dsh trên máy này, đặt <b>DeepSeek Web</b> làm model mặc định. Mỗi profile được backup trước khi sửa.</p>
+      <div class="lab" style="margin-bottom:8px"><span>Profile tìm thấy</span><span class="bar"><button class="sm" onclick="dshPickAll()">chọn hết</button><button class="sm" onclick="dshPickNone()">bỏ chọn</button></span></div>
+      <div id="dshProfiles"></div>
+      <div class="sub" id="dshHint" style="margin-top:8px"></div>
+      <p class="sub" style="margin-top:12px">Cửa sổ ngữ cảnh báo cho dsh được tính từ <i>Trần prompt</i>: dsh tự nén ở 80% cửa sổ, nên luôn nén trước khi gateway phải cắt lịch sử.</p>
       <div class="btns" style="margin-top:10px">
         <select id="dshPreset" aria-label="Agent preset" style="flex:1;min-width:0">
           <option value="ptc">PTC — nhiều tool trong 1 lượt (khuyên dùng)</option>
@@ -652,118 +659,49 @@ function openSettings() { openModal('setModal'); loadCfg(); }
 
 function openDsh() { openModal('dshModal'); dshLoad(); }
 async function dshLoad() {
-  const body = $('dshInfo'); body.textContent = '';
+  const box = $('dshProfiles'); box.textContent = '';
   try {
     const d = await (await fetch('/api/dsh')).json();
-    const row = (k, v) => { const tr = el('tr'); tr.append(el('td', null, k), el('td', null, v)); body.append(tr); };
-    row('Profile', d.found ? d.profile : d.profile + ' — chưa có (cài dsh rồi mở 1 lần)');
-    row('Trạng thái', d.configured ? 'đã trỏ về gateway này' : d.base_url ? 'đang trỏ ' + d.base_url : 'chưa cấu hình');
-    row('Base URL', d.expected.base_url);
-    row('Cửa sổ ngữ cảnh', fmtTok(d.expected.context_window) + ' token' + (d.context_window && d.context_window !== d.expected.context_window ? ' (hiện ' + fmtTok(d.context_window) + ')' : ''));
-    $('btnDsh').disabled = !d.found;
+    const list = d.profiles || [];
+    if (!list.length) {
+      box.append(el('div', 'empty', 'Chưa có profile dsh nào trong ' + d.profiles_root + ' — cài dsh (hoặc mở app Desktop) một lần để nó tạo profile.'));
+      $('btnDsh').disabled = true;
+      $('dshHint').textContent = '';
+      return;
+    }
+    for (const p of list) {
+      const row = el('label', 'dshProf');
+      const cb = el('input'); cb.type = 'checkbox'; cb.value = p.name; cb.dataset.name = p.name;
+      cb.checked = true;
+      row.append(cb, el('b', null, p.name));
+      const st = el('span', 'st ' + (p.configured ? 'ok' : 'muted'), p.configured ? 'đã trỏ về gateway này' : 'chưa cấu hình');
+      row.append(st);
+      box.append(row);
+    }
+    $('btnDsh').disabled = false;
+    const desktop = list.find((p) => p.name === 'desktop');
+    $('dshHint').textContent = desktop
+      ? 'Có profile desktop: chọn nó nếu bạn dùng app Desktop, chọn web nếu bạn dùng dsh trên terminal — hoặc cả hai.'
+      : 'Chọn profile bạn thực sự dùng. dsh trên terminal thường là web.';
   } catch (e) { say(e.message, 'err'); }
 }
+function dshBoxes() { return Array.from(document.querySelectorAll('#dshProfiles input[type=checkbox]')); }
+function dshPickAll() { dshBoxes().forEach((b) => { b.checked = true; }); }
+function dshPickNone() { dshBoxes().forEach((b) => { b.checked = false; }); }
 async function dshApply() {
+  const names = dshBoxes().filter((b) => b.checked).map((b) => b.value);
+  if (!names.length) return say('Chọn ít nhất một profile', 'err');
   const b = $('btnDsh'); b.disabled = true;
   try {
-    const d = await post('/api/dsh', {preset: $('dshPreset').value});
-    if (!d.ok) return say(d.error, 'err');
-    say(d.changed ? 'Đã cấu hình dsh — mở lại dsh rồi chọn "DeepSeek Web (whalegate, free)"' : 'dsh đã đúng cấu hình, không cần đổi', 'ok');
+    const d = await post('/api/dsh', {preset: $('dshPreset').value, profiles: names});
+    if (!d.ok) return say(d.error || 'không cấu hình được', 'err');
+    const changed = (d.configured || []).filter((x) => x.changed).length;
+    const parts = [];
+    parts.push(changed ? 'Đã cấu hình ' + names.length + ' profile (' + changed + ' thay đổi)' : 'Các profile đã đúng, không cần đổi');
+    if (d.failed && d.failed.length) parts.push('lỗi: ' + d.failed.map((f) => f.profile).join(', '));
+    say(parts.join(' · ') + ' — mở lại dsh / app Desktop rồi chọn "DeepSeek Web (whalegate, free)"', d.failed && d.failed.length ? 'err' : 'ok');
     dshLoad();
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
-}
-function closeSettings() {
-  if (Object.keys(PENDING).length && !BUSY) {
-    const d = document.querySelector('#setModal .dlg'); d.classList.remove('shake'); void d.offsetWidth; d.classList.add('shake');
-    say('Chưa lưu thay đổi — bấm Lưu hoặc Huỷ', 'err'); return;
-  }
-  closeModal('setModal');
-}
-
-function stage(key, value) {
-  const c = CFG.find((x) => x.key === key); if (!c) return;
-  if (String(value) === c.value) delete PENDING[key]; else PENDING[key] = String(value);
-  renderCfg();
-}
-function cfgRow(c) {
-  const v = eff(c), dirty = c.key in PENDING, row = el('div', 'row' + (dirty ? ' dirty' : '')); row.title = c.key;
-  const t = el('div', 't', c.label); if (c.hint) t.append(el('small', null, c.hint));
-  const ctl = el('div', 'ctl'); let unit = null;
-  if (c.kind === 'bool') {
-    const g = el('div', 'seg2'); g.setAttribute('role', 'radiogroup'); g.setAttribute('aria-label', c.label);
-    for (const [val, txt] of [['0', 'TẮT'], ['1', 'BẬT']]) {
-      const b = el('button', v === val ? 'on' : '', txt); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', v === val);
-      b.onclick = () => stage(c.key, val); g.append(b);
-    }
-    ctl.append(g);
-  } else if (c.kind === 'choice') {
-    const sel = el('select'); sel.setAttribute('aria-label', c.label);
-    for (const o of c.choices) { const op = el('option', null, o); op.value = o; if (o === v) op.selected = true; sel.append(op); }
-    sel.onchange = () => stage(c.key, sel.value); ctl.append(sel);
-  } else {
-    const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.value = v; inp.inputMode = 'numeric'; inp.setAttribute('aria-label', c.label);
-    inp.onchange = () => stage(c.key, inp.value); inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
-    ctl.append(inp); unit = c.unit;
-  }
-  ctl.append(el('span', 'u', unit || ''));
-  const undo = el('button', 'undo', '↺'); undo.title = 'Hoàn tác'; undo.setAttribute('aria-label', 'Hoàn tác thay đổi này'); undo.tabIndex = dirty ? 0 : -1;
-  undo.onclick = () => { delete PENDING[c.key]; renderCfg(); };
-  ctl.append(undo);
-  row.append(t, ctl); return row;
-}
-function renderCfg() {
-  const box = $('cfg');
-  if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
-  box.textContent = ''; CFG.forEach((c) => box.append(cfgRow(c)));
-  renderFoot();
-}
-function renderFoot(wait) {
-  const f = $('cfgFoot'), n = Object.keys(PENDING).length; f.textContent = '';
-  if (wait) { f.append(...wait); return; }
-  if (!n) {
-    const def = el('button', 'sm', 'Về mặc định'); def.onclick = resetDefaults;
-    f.append(el('span', null, 'Mặc định đã tối ưu sẵn.'), el('span', 'sp'), def); return;
-  }
-  const idle = el('button', 'sm', 'Lưu · áp dụng khi rảnh'); idle.onclick = () => saveFlow('idle');
-  const now = el('button', 'sm solid', 'Lưu · áp dụng ngay'); now.onclick = () => saveFlow('now');
-  const cancel = el('button', 'ghost sm', 'Huỷ'); cancel.onclick = () => { PENDING = {}; renderCfg(); };
-  f.append(el('span', null, n + ' thay đổi'), el('span', 'sp'), cancel, idle, now);
-}
-async function resetDefaults() {
-  const diff = CFG.filter((c) => c.value !== c.default || c.overridden);
-  if (!diff.length) return say('Đang dùng mặc định rồi', 'ok');
-  if (!(await ask('Về mặc định?', 'Đặt cả 7 cài đặt về giá trị mặc định. Bấm Lưu để áp dụng.', 'Về mặc định'))) return;
-  PENDING = {}; for (const c of diff) PENDING[c.key] = c.default;
-  renderCfg();
-}
-async function loadCfg() { try { CFG = (await (await fetch('/api/settings')).json()).items; renderCfg(); } catch (e) {} }
-
-async function saveFlow(mode) {
-  if (BUSY) return;
-  if (mode === 'now' && !(await ask('Áp dụng ngay?', 'Server khởi động lại ngay và cắt các request đang chạy (dsh tự thử lại). Chọn "áp dụng khi rảnh" nếu muốn chờ chúng xong.', 'Áp dụng ngay', true))) return;
-  BUSY = true;
-  try {
-    const d = await post('/api/settings', PENDING);
-    if (!d.ok) return say(d.error || 'Không lưu được', 'err');
-    PENDING = {}; await loadCfg(); await doRestart(mode);
-  } catch (e) { say(e.message, 'err'); } finally { BUSY = false; }
-}
-async function doRestart(mode) {
-  const boot0 = (await (await fetch('/api/restart')).json()).boot;
-  await post('/api/restart', {mode});
-  const msg = el('span', null, mode === 'idle' ? 'Đã lưu · đang chờ hết request…' : 'Đã lưu · đang khởi động lại…');
-  const cancel = el('button', 'sm', 'Huỷ');
-  cancel.onclick = async () => { await post('/api/restart', {mode: 'cancel'}); clearInterval(timer); renderFoot(); say('Đã huỷ', 'ok'); };
-  renderFoot(mode === 'idle' ? [msg, el('span', 'sp'), cancel] : [msg]);
-  const t0 = Date.now();
-  const timer = setInterval(async () => {
-    try {
-      const s = await (await fetch('/api/restart', {cache: 'no-store'})).json();
-      if (s.boot !== boot0) { clearInterval(timer); location.reload(); return; }
-      if (s.pending) msg.textContent = s.in_flight ? `Đang chờ ${s.in_flight} request xong… ${Math.round((Date.now() - t0) / 1000)}s` : 'Sắp khởi động lại…';
-    } catch (e) { msg.textContent = 'Đang khởi động lại…'; }
-    if (Date.now() - t0 > 180000) { clearInterval(timer); renderFoot(); say('Khởi động lại quá lâu — xem journalctl', 'err'); }
-  }, 700);
 }
 
 /* ---- export / import danh sách tài khoản ---- */

@@ -184,7 +184,7 @@ systemctl --user daemon-reload && systemctl --user enable --now whalegate
 | Command | What it does |
 |---|---|
 | `whalegate` / `whalegate serve` | Run the gateway (default) |
-| `whalegate setup-dsh [--preset ptc\|standard] [--profile <dir>] [--url <base>] [--context <tokens>]` | Point dsh at this gateway |
+| `whalegate setup-dsh [--all] [--preset ptc\|standard] [--profile <dir>]... [--url <base>] [--context <tokens>]` | Point dsh at this gateway (`--all` = every profile on the machine) |
 | `whalegate version` | Print the version |
 | `whalegate whoami` | Print the current user for the first stored account |
 | `whalegate chat "<prompt>"` | Send one raw prompt and dump the SSE stream |
@@ -550,7 +550,7 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `GET` | `/api/stats` · `/api/usage` | Pool state (in-flight, cooldowns, stateful hit rate) / usage, cost and latency |
 | `GET` | `/api/logs` · `/api/logs/stream` | Logs as JSON / SSE |
 | `GET` / `POST` | `/api/settings` | Read or update settings (`null` resets a key) |
-| `GET` / `POST` | `/api/dsh` | dsh status / write the dsh config (`{"preset": "ptc" \| "standard"}`) |
+| `GET` / `POST` | `/api/dsh` | dsh status (lists every profile found) / write the dsh config (`{"preset": "ptc"\|"standard", "profiles": ["desktop","web"]}`; omit `profiles` or set `"all": true` for every profile) |
 | `GET` / `POST` | `/api/restart` | Status / `{"mode": "idle" \| "now" \| "cancel"}` |
 | `GET` | `/api/accounts/export` | Download the whole pool as a JSON bundle (contains tokens — treat as a secret) |
 | `POST` | `/api/accounts/import` | Merge a bundle or `{accounts: [...]}`. `dry_run` previews, `overwrite` replaces tokens of known users |
@@ -565,8 +565,10 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 
 dsh (`@deepseek-ai/dsh`, on Linux, macOS and Windows) reads its model list from the profile's patch file, not from `/v1/models`. whalegate writes that file for you. Use either:
 
-- **Dashboard → dsh → Configure** (choose PTC or standard), or
-- **`whalegate setup-dsh`** (`--preset standard` for the classic preset). The installers run this automatically when dsh is present.
+- **Dashboard → dsh** — it lists every profile under `$DSH_HOME/profiles`, shows which already point here, and writes the ones you tick (choose PTC or standard), or
+- **`whalegate setup-dsh --all`** (`--preset standard` for the classic preset, `--profile <dir>` repeatable to be explicit). The installers run this automatically when dsh is present.
+
+**Which profile?** dsh on a terminal uses `web`. **DeepSeek Harness Desktop** (Windows/macOS) uses `desktop`, a profile the Electron app owns — that is why writing only `web` left Desktop users without the model. Quit the Desktop app while configuring, then reopen it. Other profiles (`headless`, `acp`, custom names) work the same way.
 
 Either way the config is idempotent, backs up `cordis.patch.yml` to `.bak.<timestamp>`, and touches nothing else in the file:
 
