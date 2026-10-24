@@ -1637,7 +1637,7 @@ async fn api_models() -> Json<Value> {
             "id": "deepseek-web", "object": "model", "owned_by": "deepseek-harness",
             "input_modalities": ["text", "image"],
             "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
-            "reasoning_efforts": ["none", "max"],
+            "reasoning_efforts": ["none", "auto", "max"],
             "context_length": std::env::var("DS_CONTEXT_TOKENS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(500_000)
         }]
     }))

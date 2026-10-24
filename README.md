@@ -310,7 +310,9 @@ deploy/setup-dsh.sh ~/.dsh/profiles/web http://127.0.0.1:8790/v1
 DS_CONTEXT_TOKENS=300000 deploy/setup-dsh.sh   # đổi cửa sổ ngữ cảnh báo cho dsh
 ```
 
-Cần PyYAML. Script thêm provider `ds-harness` (1 model `deepseek-web`, nhận ảnh, ctx 500K, `reasoningEfforts` off→none / còn lại→max, usage trong stream) và đặt làm model mặc định. Mở lại dsh rồi chọn **DeepSeek Web (harness, free)**.
+**Mức suy nghĩ:** `none` = Nhanh (flash); `max` = DeepThink mọi bước; `auto` = DeepThink ở lượt người dùng nhưng tắt khi chỉ nối tiếp sau kết quả công cụ (vòng lặp tool nhanh gấp nhiều lần: bước có think 5–25K ký tự mất 10–44s, bước không think ~2s). Trong dsh: off→none, low→auto, high/max→max.
+
+Cần PyYAML. Script thêm provider `ds-harness` (1 model `deepseek-web`, nhận ảnh, ctx 500K, `reasoningEfforts` off→none, low→auto, high/max→max, usage trong stream) và đặt làm model mặc định. Mở lại dsh rồi chọn **DeepSeek Web (harness, free)**.
 
 Làm tay: trong `~/.dsh/profiles/web/cordis.patch.yml`, mục `llm-pi-ai` → `providers.ds-harness.models` chỉ giữ:
 
@@ -320,7 +322,7 @@ Làm tay: trong `~/.dsh/profiles/web/cordis.patch.yml`, mục `llm-pi-ai` → `p
   contextWindow: 500000
   maxTokens: 32768
   input: [text, image]
-  reasoningEfforts: {off: none, low: max, high: max, max: max}
+  reasoningEfforts: {off: none, low: auto, high: max, max: max}
 ```
 
 kèm `compat: {supportsDeveloperRole: false, supportsReasoningEffort: true, supportsUsageInStreaming: true}`, và `agent-default-model` → `model: deepseek-web`. Nếu harness đặt `DS_API_KEY`, khai báo biến môi trường `DS_HARNESS_API_KEY` trong `~/.dsh/.env`.

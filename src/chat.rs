@@ -263,7 +263,8 @@ fn ext_for(mime: &str) -> &'static str {
     match mime { "image/jpeg" | "image/jpg" => "jpg", "image/webp" => "webp", "image/gif" => "gif", "image/bmp" => "bmp", _ => "png" }
 }
 
-/// Mức suy nghĩ → bật DeepThink? "none"/"off" = Nhanh; mọi mức khác ("max", "high"…) = DeepThink.
+/// Mức suy nghĩ → bật DeepThink? "none"/"off" = Nhanh; mọi mức khác ("max", "high"…) = DeepThink;
+/// "auto" = DeepThink nhưng được tắt ở lượt nối tiếp sau tool_result (xử lý ở handler).
 /// Không chỉ định: model cũ `*-r1` / `thinking:true` → bật, còn lại theo DS_DEFAULT_EFFORT (mặc định none).
 pub(crate) fn effort_to_thinking(effort: Option<&str>, legacy_r1: bool, thinking_flag: Option<bool>) -> bool {
     match effort.map(|e| e.trim().to_ascii_lowercase()).as_deref() {
@@ -766,7 +767,12 @@ pub(crate) async fn api_chat_completions(
     let effort = req.reasoning_effort.clone()
         .or_else(|| req.reasoning.as_ref().and_then(|r| r.get("effort")).and_then(|e| e.as_str()).map(|s| s.to_string()))
         .or_else(|| req.model.as_deref().and_then(|m| m.split_once(':')).map(|(_, e)| e.to_string())); // "deepseek-web:max"
+    // "auto": nghĩ ở lượt người dùng, tắt khi chỉ đang nối tiếp sau tool_result (vòng lặp công cụ).
+    // Đo thực tế: bước có think 5–25K ký tự mất 10–44s, bước không think ~2s.
+    let auto_effort = effort.as_deref().is_some_and(|e| e.trim().eq_ignore_ascii_case("auto"));
+    let last_is_tool = req.messages.last().and_then(|m| m.get("role")).and_then(|r| r.as_str()) == Some("tool");
     let thinking = effort_to_thinking(effort.as_deref(), req.model.as_deref().is_some_and(|m| m.contains("r1")), req.thinking)
+        && !(auto_effort && last_is_tool)
         && !is_title_req;
     let search = req.search.unwrap_or(false);
 
@@ -1008,5 +1014,14 @@ mod safety_tests {
             assert!(!url_is_public(&reqwest::Url::parse(u).unwrap()), "{u}");
         }
         assert!(url_is_public(&reqwest::Url::parse("https://example.com/a.png").unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod auto_effort_tests {
+    use super::*;
+    #[test]
+    fn auto_counts_as_thinking_before_tool_gating() {
+        assert!(effort_to_thinking(Some("auto"), false, None));
     }
 }
