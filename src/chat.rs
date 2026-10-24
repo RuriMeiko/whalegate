@@ -315,7 +315,7 @@ fn stateful_enabled() -> bool {
 }
 
 fn conv_max_chars() -> usize {
-    std::env::var("DS_CONV_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(600_000)
+    std::env::var("DS_CONV_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_200_000)
 }
 
 fn spawn_delete_session(acc: Option<(String, String)>, sid: String) {
@@ -684,7 +684,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
     }
 }
 
-/// Rút gọn lịch sử nếu prompt vượt ngân sách (DS_PROMPT_MAX_CHARS, mặc định 400K ký tự):
+/// Rút gọn lịch sử nếu prompt vượt ngân sách (DS_PROMPT_MAX_CHARS, mặc định 1,2M ký tự):
 /// 1) cắt giữa các tool_result cũ, 2) bỏ các lượt cũ nhất (giữ system + tin user đầu).
 ///
 /// Chi phí O(n) thay vì O(n²): render từng message đúng một lần để lấy kích thước, sau đó
@@ -767,7 +767,7 @@ pub(crate) async fn api_chat_completions(
         && !is_title_req;
     let search = req.search.unwrap_or(false);
 
-    let max_chars: usize = std::env::var("DS_PROMPT_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(400_000);
+    let max_chars: usize = std::env::var("DS_PROMPT_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_200_000);
     let msgs = fit_messages(&req.messages, max_chars);
     let tools_hdr = render_tools_spec(&req.tools);
     let prompt = format!("{}\n{}\n", tools_hdr, messages_to_prompt(&msgs));

@@ -188,7 +188,8 @@ Model trả về tool-call sẽ nằm trong `choices[0].message.tool_calls` như
 |---|---|---|
 | `DS_PORT` | `8787` | Cổng nghe (bind `127.0.0.1`) |
 | `DS_STATEFUL` | 1 | nối tiếp hội thoại trong phiên web (chỉ gửi phần mới); 0 = luôn gửi đủ |
-| `DS_CONV_TTL` / `DS_CONV_MAX_CHARS` | 1800 / 600000 | dọn phiên nhàn rỗi (s) / trần ngữ cảnh một phiên (ký tự) |
+| `DS_CONTEXT_TOKENS` | `500000` | `context_length` báo cho client (web nhận được ≥500K token, đo thực tế; ~1,1M thì stream rỗng) |
+| `DS_CONV_TTL` / `DS_CONV_MAX_CHARS` | 1800 / 1200000 | dọn phiên nhàn rỗi (s) / trần ngữ cảnh một phiên (ký tự) |
 | `DS_DEFAULT_EFFORT` | none | mức suy nghĩ khi client không chỉ định |
 | `DS_API_KEY` | (trống) | Đặt thì `/v1/*` yêu cầu `Authorization: Bearer <key>` |
 | `DS_ACCOUNTS_PATH` | `$HOME/.ds-harness/accounts.json` | File lưu account |
@@ -196,7 +197,7 @@ Model trả về tool-call sẽ nằm trong `choices[0].message.tool_calls` như
 | `DS_QUEUE_WAIT_SECS` | `120` | Chờ acc rảnh trước khi trả 429 |
 | `DS_SESSION_ROTATE` | `30` | Số lượt/session web trước khi đổi session mới |
 | `DS_FAIL_COOLDOWN_MAX` | `600` | Trần cooldown (giây) cho acc hỏng liên tiếp |
-| `DS_PROMPT_MAX_CHARS` | `400000` | Vượt ngân sách thì cắt giữa tool_result cũ, rồi bỏ lượt cũ nhất |
+| `DS_PROMPT_MAX_CHARS` | `1200000` | Vượt ngân sách thì cắt giữa tool_result cũ, rồi bỏ lượt cũ nhất |
 | `DS_BURST_LIMIT` / `DS_BURST_WINDOW` | `6` / `30` | Giới hạn burst mỗi acc trong cửa sổ giây |
 | `DS_COOLDOWN` | `10` | Cooldown cơ bản (giây) sau lỗi |
 | `DS_CHROME_BIN` | tự dò | Đường dẫn Chrome/Chromium |
