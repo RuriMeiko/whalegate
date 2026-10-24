@@ -112,6 +112,10 @@
   .sw.on { background: var(--ink); } .sw.on::after { left: 20px; background: var(--bg); }
   .sw:hover:not(:disabled) { background: transparent; } .sw.on:hover:not(:disabled) { background: var(--ink); }
 
+  textarea, #lblIn { font: 12px/1.5 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 8px 10px; width: 100%; outline: none; border-radius: 0; resize: vertical; margin-top: 10px; }
+  #lblIn { margin: 0; flex: 1; min-width: 160px; width: auto; }
+  textarea:focus, #lblIn:focus { background: #f4efe2; }
+  code { font: 12px/1 var(--mono); border: 1px solid var(--hair); padding: 2px 5px; }
   details summary { cursor: pointer; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; list-style: none; padding: 2px 0; }
   details summary::-webkit-details-marker { display: none; }
   details summary::before { content: "+ "; } details[open] summary::before { content: "− "; }
@@ -224,8 +228,14 @@
     </div>
 
     <div class="cell c6">
-      <details><summary>Thêm tài khoản</summary>
-        <p class="note">+ Login mở tab DeepSeek trong Chrome; đăng nhập xong harness tự lưu session và đóng tab. Quét tab lấy session từ Chrome đã đăng nhập sẵn (CDP 9333). Build profile chạy một lần (~40s) để giảm lỗi "Current device environment error".</p>
+      <details id="addBox"><summary>Thêm tài khoản thủ công</summary>
+        <div class="note">Trên tab đã đăng nhập chat.deepseek.com: F12 → Console → gõ <code>copy(localStorage.userToken)</code> → dán vào ô dưới. Chỉ cần token, không cần cookie.</div>
+        <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" placeholder='{"value":"…","__version":"0"}  hoặc token trần'></textarea>
+        <div class="actions" style="margin-top:8px">
+          <input id="lblIn" placeholder="nhãn (bỏ trống = email)" autocomplete="off">
+          <button class="solid sm" id="btnAdd" onclick="addManual()">Thêm</button>
+          <span id="addMsg" class="note" style="margin:0"></span>
+        </div>
       </details>
     </div>
     <div class="cell c6">
@@ -277,6 +287,21 @@ async function captureAll() {
     if (!d.ok) return say(d.error, 'err');
     say(`${d.action}: +${d.added} mới, ${d.refreshed} làm mới${d.email ? ' · ' + d.email : ''}`, 'ok'); loadStats();
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
+async function addManual() {
+  const b = $('btnAdd'), m = $('addMsg');
+  const token = $('tokIn').value.trim();
+  if (!token) { m.textContent = 'dán token trước'; m.className = 'note bad'; return; }
+  b.disabled = true; m.textContent = 'đang kiểm tra token…'; m.className = 'note';
+  try {
+    const r = await fetch('/api/accounts', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token, label: $('lblIn').value})});
+    const d = await r.json();
+    if (!r.ok || d.error) { m.textContent = d.error || ('lỗi ' + r.status); m.className = 'note bad'; return; }
+    m.textContent = 'đã thêm ' + (d.label || ''); m.className = 'note good';
+    $('tokIn').value = ''; $('lblIn').value = '';
+    loadStats();
+  } catch (e) { m.textContent = e.message; m.className = 'note bad'; }
+  finally { b.disabled = false; }
 }
 async function verify(id) { await post('/api/accounts/' + id + '/verify'); loadStats(); }
 async function reset(id) { await post('/api/accounts/' + id + '/reset'); loadStats(); }

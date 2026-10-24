@@ -347,3 +347,7 @@ Các giá trị `DS_*` hay chỉnh (stateful, dự đoán PoW, TTL phiên, trầ
 - Thứ tự ưu tiên: giá trị đã lưu trên dashboard → biến môi trường `DS_*` → mặc định.
 - API: `GET /api/settings` (danh sách, kiểu, khoảng hợp lệ), `POST /api/settings` với `{"DS_STATEFUL":"0","DS_CONV_TTL":600}`; `null` = bỏ giá trị đã lưu. Chỉ gọi được từ loopback như mọi `/api/*`.
 - `DS_API_KEY`, đường dẫn và cổng cố ý không nằm ở đây.
+
+## Thêm tài khoản thủ công
+
+Trên dashboard, mục **Thêm tài khoản thủ công**: mở tab đã đăng nhập chat.deepseek.com, F12 → Console → `copy(localStorage.userToken)`, dán vào ô rồi bấm Thêm. Nhận cả dạng `{"value":"…","__version":"0"}`, chuỗi có nháy, `Bearer …` hoặc token trần. Token được kiểm tra với DeepSeek trước khi lưu; trùng token thì báo đã có. Không cần cookie. Cũng gọi được bằng `POST /api/accounts` với `{"token":"…","label":"tuỳ chọn"}`.

@@ -305,15 +305,35 @@ async fn index() -> Html<&'static str> {
 
 #[derive(Deserialize)]
 struct AddAccount {
+    #[serde(default)]
     label: String,
     token: String,
+    #[serde(default)]
     cookies: std::collections::BTreeMap<String, String>,
+}
+
+/// Nhận token dán tay từ `localStorage.userToken`: JSON `{"value":"…","__version":"0"}`, chuỗi có nháy, `Bearer …` hoặc token trần.
+pub(crate) fn normalize_token(raw: &str) -> String {
+    let mut t = raw.trim().to_string();
+    if let Ok(v) = serde_json::from_str::<Value>(&t) {
+        match v {
+            Value::Object(o) => if let Some(x) = o.get("value").and_then(|x| x.as_str()) { t = x.to_string(); },
+            Value::String(x) => t = x,
+            _ => {}
+        }
+    }
+    let t = t.trim().trim_matches(|c| c == '"' || c == '\'' || c == '`').trim();
+    t.strip_prefix("Bearer ").unwrap_or(t).trim().to_string()
 }
 
 async fn api_add_account(
     State(st): State<Arc<AppState>>,
-    Json(p): Json<AddAccount>,
+    Json(mut p): Json<AddAccount>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    p.token = normalize_token(&p.token);
+    if p.token.len() < 20 || p.token.chars().any(|c| c.is_whitespace()) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "không đọc được token — dán đúng giá trị localStorage.userToken"}))));
+    }
     // verify token trước khi lưu
     let c = DsClient::new(p.token.clone(), cookie_string(&p.cookies))
         .map_err(into_err)?;
@@ -322,22 +342,23 @@ async fn api_add_account(
     if !ok {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("token invalid: {}", v["msg"])})),
+            Json(json!({"error": format!("token không hợp lệ: {}", v["msg"].as_str().unwrap_or("?"))})),
         ));
     }
     let email = v["data"]["biz_data"]["email"].as_str().unwrap_or("?").to_string();
 
+    let label_out = if p.label.trim().is_empty() { email } else { p.label.trim().to_string() };
     let mut store = st.store.write().await;
     // dedupe theo token
     if store.accounts.iter().any(|a| a.token == p.token) {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({"error": "token already added"})),
+            Json(json!({"error": "token này đã có trong pool"})),
         ));
     }
     let acc = Account {
         id: uuid::Uuid::new_v4().to_string(),
-        label: if p.label.is_empty() { email } else { p.label },
+        label: label_out.clone(),
         token: p.token,
         cookies: p.cookies,
         added_at: now(),
@@ -354,7 +375,7 @@ async fn api_add_account(
     drop(store);
     mark_dirty(&st);
     flush_store(&st).await;
-    Ok(Json(json!({"ok": true, "id": id})))
+    Ok(Json(json!({"ok": true, "id": id, "label": label_out})))
 }
 
 async fn api_list_accounts(State(st): State<Arc<AppState>>) -> Json<Value> {
@@ -2368,5 +2389,18 @@ mod bare_close_tests {
         let (_, c) = parse_dsml_tool_calls(t).expect("parse");
         assert_eq!(c[0].name, "bash");
         assert!(c[0].arguments.contains("ls -la"), "{}", c[0].arguments);
+    }
+}
+
+#[cfg(test)]
+mod token_paste_tests {
+    use super::normalize_token;
+    #[test]
+    fn accepts_localstorage_shapes() {
+        let t = "AbCdEf0123456789AbCdEf0123456789AbCdEf0123456789";
+        assert_eq!(normalize_token(&format!("{{\"value\":\"{t}\",\"__version\":\"0\"}}")), t);
+        assert_eq!(normalize_token(&format!("\"{t}\"")), t);
+        assert_eq!(normalize_token(&format!("  Bearer {t}\n")), t);
+        assert_eq!(normalize_token(t), t);
     }
 }
