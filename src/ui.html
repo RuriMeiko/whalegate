@@ -69,6 +69,9 @@
   button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); } button.danger:hover:not(:disabled) { background: #8a2918; }
   button.ghost { border-color: transparent; color: var(--mute); padding-left: 4px; padding-right: 4px; } button.ghost:hover:not(:disabled) { background: transparent; color: var(--ink); text-decoration: underline; }
   button.ghost.bad { color: var(--bad); } button.ghost.bad:hover:not(:disabled) { color: var(--bad); }
+  .bar { display: inline-flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .acc .nm small { font: 11px/1 var(--mono); color: var(--mute); font-weight: 400; margin-left: 8px; }
+  .acc .dupe { font: 11px/1 var(--mono); color: var(--bad); border: 1px solid var(--bad); padding: 3px 6px; white-space: nowrap; }
   .empty { color: var(--mute); font: 12px/1.4 var(--mono); padding: 6px 0; }
 
   /* popup + lớp phủ ASCII */
@@ -96,6 +99,9 @@
   .cmd code { border: 0; padding: 0; font-size: 12.5px; }
   .cmd span { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; }
   .cmd.done span { color: var(--ok); }
+  .fl { display: block; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; margin: 12px 0 6px; }
+  .fl:first-child { margin-top: 0; }
+  .fl small { text-transform: none; letter-spacing: 0; }
   code { font: 12px/1 var(--mono); border: 1px solid var(--hair); padding: 2px 5px; }
 
   /* cài đặt */
@@ -174,7 +180,7 @@
     </div>
 
     <div class="cell c12">
-      <div class="lab"><span>Tài khoản</span><button class="sm solid" onclick="openAdd()">+ Thêm</button></div>
+      <div class="lab"><span>Tài khoản</span><span class="bar"><button class="sm" id="btnBulkV" onclick="bulk('verify')">Verify hết</button><button class="sm" id="btnBulkR" onclick="bulk('reset')">Reset hết</button><button class="sm solid" onclick="openAdd()">+ Thêm</button></span></div>
       <div id="accList"></div>
       <div id="empty" class="empty" style="display:none">Chưa có tài khoản.</div>
     </div>
@@ -199,6 +205,20 @@
       <span class="sp"></span>
       <button class="ghost sm" id="btnBuild" onclick="buildProfile()">Build profile</button>
     </div>
+  </div>
+</div>
+
+<div id="editModal" class="modal" onclick="if(event.target===this)closeEdit()">
+  <div class="dlg">
+    <div class="top"><h2 id="editTitle">Sửa tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeEdit()">×</button></div>
+    <div class="inner">
+      <label class="fl" for="edLabel">Nhãn</label>
+      <input type="text" id="edLabel" style="width:100%" autocomplete="off">
+      <label class="fl" for="edToken">Token mới <small>(để trống = giữ token hiện tại)</small></label>
+      <textarea id="edToken" rows="3" spellcheck="false" autocomplete="off" placeholder='{"value":"…"} hoặc token trần'></textarea>
+      <div class="sub" id="edUid"></div>
+    </div>
+    <div class="foot"><span class="sp"></span><button class="ghost sm" onclick="closeEdit()">Huỷ</button><button class="solid sm" id="btnEdit" onclick="saveEdit()">Lưu</button></div>
   </div>
 </div>
 
@@ -256,6 +276,7 @@ function say(text, kind) {
   t.append(el('span', null, text), x); box.append(t);
   while (box.children.length > 3) box.firstChild.remove();
   if (kind !== 'wait') setTimeout(() => t.remove(), kind === 'err' ? 8000 : 3500);
+  return t;
 }
 
 /* ---- lớp phủ: trang phía sau tan thành lưới ký tự ASCII ---- */
@@ -374,6 +395,51 @@ async function del(id, label) {
   await fetch('/api/accounts/' + id, {method: 'DELETE'}); loadStats(); say('Đã xoá ' + label, 'ok');
 }
 
+
+/* ---- sửa tài khoản ---- */
+let EDIT_ID = null;
+function openEdit(a) {
+  EDIT_ID = a.id; $('editTitle').textContent = 'Sửa tài khoản'; $('edLabel').value = a.label; $('edToken').value = '';
+  $('edUid').textContent = a.uid ? 'ID DeepSeek ' + a.uid : 'ID DeepSeek chưa biết (verify để lấy)';
+  openModal('editModal'); setTimeout(() => $('edLabel').focus(), 60);
+}
+function closeEdit() { closeModal('editModal'); }
+async function saveEdit() {
+  const b = $('btnEdit'); b.disabled = true;
+  try {
+    const body = {label: $('edLabel').value}; const tok = $('edToken').value.trim(); if (tok) body.token = tok;
+    const r = await fetch('/api/accounts/' + EDIT_ID, {method: 'PATCH', headers: J, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok || d.error) return say(d.error || ('lỗi ' + r.status), 'err');
+    say('Đã lưu ' + (d.label || ''), 'ok'); closeEdit(); loadStats();
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
+
+/* ---- hàng loạt: verify / reset toàn bộ, 3 tài khoản song song ---- */
+let BULK = false;
+async function bulk(kind) {
+  if (BULK) return;
+  const accs = (await (await fetch('/api/stats')).json()).accounts;
+  if (!accs.length) return say('Chưa có tài khoản', 'err');
+  const v = kind === 'verify';
+  if (!(await ask(v ? 'Verify tất cả?' : 'Reset tất cả?', v ? `Kiểm tra token của ${accs.length} tài khoản với DeepSeek (mỗi tài khoản một lượt gọi).` : `Xoá lỗi, cooldown và phiên web đang giữ của cả ${accs.length} tài khoản, rồi kiểm tra lại token. Mọi hội thoại stateful đang chạy sẽ gửi lại đủ ngữ cảnh ở bước kế.`, v ? 'Verify tất cả' : 'Reset tất cả', !v))) return;
+  BULK = true; $('btnBulkV').disabled = $('btnBulkR').disabled = true;
+  const t = el('div', 'toast wait'); t.append(el('span', null, '…')); $('toasts').append(t);
+  let done = 0, ok = 0; const bad = [], queue = accs.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const a = queue.shift();
+      try { const d = await post('/api/accounts/' + a.id + '/' + kind); if (d.ok !== false && (v ? d.ok : d.token_alive !== false)) ok++; else bad.push(a.label); }
+      catch (e) { bad.push(a.label); }
+      t.firstChild.textContent = `${v ? 'Verify' : 'Reset'} ${++done}/${accs.length}…`;
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  t.remove(); BULK = false; $('btnBulkV').disabled = $('btnBulkR').disabled = false;
+  say(`${v ? 'Verify' : 'Reset'} xong: ${ok} ok` + (bad.length ? ` · ${bad.length} lỗi (${bad.slice(0, 3).join(', ')}${bad.length > 3 ? '…' : ''})` : ''), bad.length ? 'err' : 'ok');
+  loadStats();
+}
+
 let OPEN_ACC = null;
 function accItem(a, perAcc) {
   const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
@@ -384,12 +450,15 @@ function accItem(a, perAcc) {
   else if (a.in_flight > 0) { kind = 'run'; text = `đang chạy ${a.in_flight}/${perAcc}`; }
   const box = el('div', 'acc' + (OPEN_ACC === a.id ? ' open' : ''));
   const hd = el('button', 'hd'); hd.setAttribute('aria-expanded', OPEN_ACC === a.id);
-  hd.append(el('i', 'sq ' + (kind === 'bad' || kind === 'warn' ? kind : '')), el('span', 'nm', a.label), el('span', 'st ' + kind, text));
+  const nm = el('span', 'nm', a.label); if (a.uid) nm.append(el('small', null, a.uid.slice(0, 6)));
+  hd.append(el('i', 'sq ' + (kind === 'bad' || kind === 'warn' || a.dup ? (a.dup ? 'bad' : kind) : '')), nm);
+  if (a.dup) hd.append(el('span', 'dupe', 'trùng người dùng'));
+  hd.append(el('span', 'st ' + kind, text));
   hd.onclick = () => { OPEN_ACC = OPEN_ACC === a.id ? null : a.id; document.querySelectorAll('.acc').forEach((n) => n.classList.remove('open')); if (OPEN_ACC) box.classList.add('open'); hd.setAttribute('aria-expanded', !!OPEN_ACC); };
   const more = el('div', 'more');
   more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}`), el('span', 'sp'));
   const mk = (t, cls, fn) => { const b = el('button', 'sm ' + cls, t); b.onclick = fn; return b; };
-  more.append(mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label)), mk('xoá', 'del', () => del(a.id, a.label)));
+  more.append(mk('sửa', '', () => openEdit(a)), mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label)), mk('xoá', 'del', () => del(a.id, a.label)));
   box.append(hd, more);
   return box;
 }
@@ -586,7 +655,7 @@ $('logBody').addEventListener('scroll', () => { const b = $('logBody'); LOG.stic
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  for (const [id, fn] of [['cfmModal', () => askDone(false)], ['addModal', closeAdd], ['setModal', closeSettings], ['logModal', closeLog]]) if ($(id).classList.contains('open')) { fn(); break; }
+  for (const [id, fn] of [['cfmModal', () => askDone(false)], ['editModal', closeEdit], ['addModal', closeAdd], ['setModal', closeSettings], ['logModal', closeLog]]) if ($(id).classList.contains('open')) { fn(); break; }
 });
 
 loadStats();

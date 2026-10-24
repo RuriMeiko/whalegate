@@ -359,3 +359,10 @@ Trên dashboard, mục **Thêm tài khoản thủ công**: mở tab đã đăng 
 - **Lưu cấu hình**: sửa trong popup cài đặt chưa lưu ngay, cuối popup hiện nút *Lưu & áp dụng* (có *Hard reset* riêng khi không có thay đổi). Lưu → ghi `settings.json` → đợi đến lúc không còn request nào → server tự khởi động lại (`exec` lại chính binary, cùng PID, nạp luôn bản build mới nếu có) → trang tự tải lại. Hard reset khởi động lại ngay và cắt request đang chạy. Trước khi khởi động lại, harness ghi đĩa và xoá các phiên web đang giữ để không để mồ côi trên DeepSeek.
 - API: `POST /api/restart` với `{"mode":"idle" | "now" | "cancel"}`, `GET /api/restart` trả trạng thái chờ.
 - Log và `/api/*` chỉ cho loopback; nếu đặt reverse proxy trên cùng máy thì mọi request trông như loopback, nên đừng phơi dashboard ra ngoài.
+
+## Sửa tài khoản, hàng loạt, nhận diện trùng
+
+- **Sửa**: mở dòng tài khoản → `sửa` để đổi nhãn và/hoặc thay token (để trống ô token = giữ nguyên). Token mới được kiểm tra với DeepSeek; đổi token thì xoá lỗi/cooldown và mọi phiên web gắn với tài khoản đó. API: `PATCH /api/accounts/{id}` với `{"label":"…","token":"…"}` (trường nào cũng tuỳ chọn).
+- **Verify hết / Reset hết**: cạnh nút `+ Thêm`, chạy 3 tài khoản song song, có hộp xác nhận và báo kết quả ("9 ok · 1 lỗi").
+- **Trùng người dùng**: harness lưu id người dùng DeepSeek (từ `users/current`, hiện 6 ký tự đầu cạnh nhãn). Thêm một token thuộc người đã có trong pool thì báo trùng (dùng `sửa` để thay token). Đăng nhập lại qua Chrome / quét tab với cùng người dùng thì thay token vào tài khoản cũ thay vì thêm bản thứ hai. Tài khoản cũ được bổ sung id lúc khởi động; hai dòng trùng id hiện nhãn đỏ "trùng người dùng".
+

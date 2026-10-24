@@ -13,6 +13,8 @@ pub struct CapturedSession {
     pub token: String,
     pub cookies: std::collections::BTreeMap<String, String>,
     pub email: Option<String>,
+    /// id người dùng DeepSeek (ổn định giữa các lần đăng nhập, dùng để nhận ra cùng một người)
+    pub uid: Option<String>,
 }
 
 const CDP_HTTP: &str = "http://127.0.0.1:9333";
@@ -319,7 +321,8 @@ async fn verify_and_build(
         bail!("token không hợp lệ: {}", me["msg"]);
     }
     let email = me["data"]["biz_data"]["email"].as_str().map(|s| s.to_string());
-    Ok(CapturedSession { token, cookies, email })
+    let uid = me["data"]["biz_data"]["id"].as_str().map(|s| s.to_string());
+    Ok(CapturedSession { token, cookies, email, uid })
 }
 
 /// CANH 1 tab login: poll 2s/lần tới khi tab có token (login xong) hoặc hết giờ.

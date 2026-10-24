@@ -47,6 +47,9 @@ pub struct Account {
     // Tách acc khỏi pool (acc chính dùng tay): true = tool được phép dùng
     #[serde(default = "default_true")]
     pub pool_enabled: bool,
+    /// id người dùng DeepSeek (từ users/current) — nhận ra cùng một người dù token khác nhau
+    #[serde(default)]
+    pub ds_uid: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -458,9 +461,14 @@ async fn api_add_account(
         ));
     }
     let email = v["data"]["biz_data"]["email"].as_str().unwrap_or("?").to_string();
+    let uid = v["data"]["biz_data"]["id"].as_str().map(|s| s.to_string());
 
     let label_out = if p.label.trim().is_empty() { email } else { p.label.trim().to_string() };
     let mut store = st.store.write().await;
+    // cùng người dùng DeepSeek nhưng token khác (đăng nhập lại) → báo trùng, không thêm lần hai
+    if let Some(dup) = uid.as_ref().and_then(|u| store.accounts.iter().find(|a| a.ds_uid.as_deref() == Some(u.as_str()))) {
+        return Err((StatusCode::CONFLICT, Json(json!({"error": format!("người dùng này đã có trong pool ({}) — dùng nút sửa để thay token", dup.label)}))));
+    }
     // dedupe theo token
     if store.accounts.iter().any(|a| a.token == p.token) {
         return Err((
@@ -481,6 +489,7 @@ async fn api_add_account(
         thread_parent_message_id: None,
         stats: Default::default(),
         pool_enabled: true,
+        ds_uid: uid.clone(),
     };
     let id = acc.id.clone();
     store.accounts.push(acc);
@@ -504,6 +513,7 @@ async fn api_list_accounts(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "last_status": a.last_status,
                 "token_prefix": a.token.get(..8).unwrap_or("?"),
                 "pool_enabled": a.pool_enabled,
+                "uid": a.ds_uid,
             })
         })
         .collect();
@@ -538,6 +548,87 @@ async fn api_toggle_pool(
     mark_dirty(&st);
     flush_store(&st).await;
     Ok(Json(json!({"ok": true, "id": id, "pool_enabled": enabled})))
+}
+
+#[derive(Deserialize)]
+struct EditAccount {
+    label: Option<String>,
+    token: Option<String>,
+}
+
+/// Sửa tài khoản đã có: đổi nhãn và/hoặc thay token (kiểm tra token mới với DeepSeek, không trùng tài khoản khác).
+/// Đổi token thì xoá lỗi/cooldown và mọi phiên web gắn với tài khoản này.
+async fn api_edit_account(
+    State(st): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(p): Json<EditAccount>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let bad = |code: StatusCode, msg: &str| Err((code, Json(json!({"error": msg}))));
+    let new_token = p.token.as_deref().map(normalize_token).filter(|t| !t.is_empty());
+    let new_label = p.label.as_deref().map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
+    if new_token.is_none() && new_label.is_none() {
+        return bad(StatusCode::BAD_REQUEST, "không có gì để sửa");
+    }
+    let (old_token, cookies) = {
+        let store = st.store.read().await;
+        let Some(a) = store.accounts.iter().find(|a| a.id == id) else { return bad(StatusCode::NOT_FOUND, "không tìm thấy tài khoản"); };
+        (a.token.clone(), a.cookies.clone())
+    };
+    let mut verified_email = None;
+    let mut verified_uid: Option<String> = None;
+    if let Some(t) = new_token.as_ref().filter(|t| **t != old_token) {
+        if t.len() < 20 || t.chars().any(|c| c.is_whitespace()) {
+            return bad(StatusCode::BAD_REQUEST, "không đọc được token — dán đúng giá trị localStorage.userToken");
+        }
+        let c = DsClient::new(t.clone(), cookie_string(&cookies)).map_err(into_err)?;
+        let v = c.users_current().await.map_err(into_err)?;
+        if v["code"].as_i64() != Some(0) {
+            return bad(StatusCode::BAD_REQUEST, &format!("token không hợp lệ: {}", v["msg"].as_str().unwrap_or("?")));
+        }
+        verified_email = v["data"]["biz_data"]["email"].as_str().map(|e| e.to_string());
+        verified_uid = v["data"]["biz_data"]["id"].as_str().map(|e| e.to_string());
+    }
+    let old_session = {
+        let mut store = st.store.write().await;
+        if let Some(t) = new_token.as_ref() {
+            if store.accounts.iter().any(|a| a.id != id && a.token == *t) {
+                return bad(StatusCode::CONFLICT, "token này đã thuộc tài khoản khác trong pool");
+            }
+            if let Some(u) = verified_uid.as_ref() {
+                if let Some(d) = store.accounts.iter().find(|a| a.id != id && a.ds_uid.as_deref() == Some(u.as_str())) {
+                    return bad(StatusCode::CONFLICT, &format!("token này thuộc người dùng đã có trong pool ({})", d.label));
+                }
+            }
+        }
+        let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) else { return bad(StatusCode::NOT_FOUND, "không tìm thấy tài khoản"); };
+        let mut old_session = None;
+        if let Some(l) = new_label.clone() { a.label = l; }
+        if let Some(t) = new_token.clone().filter(|t| *t != a.token) {
+            old_session = a.thread_session_id.take().map(|sid| (a.token.clone(), sid));
+            a.token = t;
+            if verified_uid.is_some() { a.ds_uid = verified_uid.clone(); }
+            a.thread_uses = 0;
+            a.thread_parent_message_id = None;
+            a.stats.reset();
+            a.last_verified = Some(now());
+            a.last_status = Some("ok".into());
+            if new_label.is_none() { if let Some(e) = verified_email.clone() { a.label = e; } }
+        }
+        old_session
+    };
+    if new_token.is_some_and(|t| t != old_token) {
+        // phiên web cũ thuộc token cũ: bỏ khỏi sổ và xoá nếu còn được
+        st.convs.lk().retain(|_, c| c.acc_id != id);
+        st.sessions.lk().retain(|_, (acc, _)| *acc != id);
+        st.file_cache.lk().retain(|(acc_id, _), _| acc_id != &id);
+        if let Some((tok, sid)) = old_session {
+            tokio::spawn(async move { if let Ok(c) = DsClient::new(tok, String::new()) { let _ = c.delete_session(&sid).await; } });
+        }
+    }
+    mark_dirty(&st);
+    flush_store(&st).await;
+    let label = st.store.read().await.accounts.iter().find(|a| a.id == id).map(|a| a.label.clone()).unwrap_or_default();
+    Ok(Json(json!({"ok": true, "label": label})))
 }
 
 async fn api_delete_account(
@@ -623,6 +714,7 @@ async fn api_verify_account(
         if let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) {
             a.last_verified = Some(now());
             a.last_status = Some(if ok { "ok".into() } else { format!("invalid: {}", v["msg"]) });
+            if ok { if let Some(u) = v["data"]["biz_data"]["id"].as_str() { a.ds_uid = Some(u.to_string()); } }
         }
     }
     mark_dirty(&st);
@@ -1790,6 +1882,8 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "last_used_at": a.stats.last_used_at,
                 "last_status": a.last_status,
                 "pool_enabled": a.pool_enabled,
+                "uid": a.ds_uid,
+                "dup": a.ds_uid.as_ref().is_some_and(|u| store.accounts.iter().filter(|b| b.ds_uid.as_ref() == Some(u)).count() > 1),
             })
         })
         .collect();
@@ -1849,6 +1943,15 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                         a.last_verified = Some(now());
                         a.last_status = Some("ok (refreshed)".into());
                         refreshed += 1;
+                    } else if let Some(a) = s.uid.as_ref().and_then(|u| store.accounts.iter_mut().find(|a| a.ds_uid.as_deref() == Some(u.as_str()))) {
+                        // cùng người dùng đăng nhập lại (token mới): thay token thay vì thêm bản trùng
+                        a.token = s.token.clone();
+                        a.cookies = s.cookies.clone();
+                        a.last_verified = Some(now());
+                        a.last_status = Some("ok (re-login)".into());
+                        a.stats.reset();
+                        a.thread_session_id = None;
+                        refreshed += 1;
                     } else {
                         let acc = Account {
                             id: uuid::Uuid::new_v4().to_string(),
@@ -1863,6 +1966,7 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                             thread_parent_message_id: None,
                             stats: Default::default(),
                             pool_enabled: true,
+                            ds_uid: s.uid.clone(),
                         };
                         emails.push(s.email.clone().unwrap_or_else(|| "unknown".into()));
                         store.accounts.push(acc);
@@ -1967,6 +2071,14 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
             a.last_verified = Some(now());
             a.last_status = Some("ok (re-login)".into());
             a.stats.reset();
+        } else if let Some(a) = session.uid.as_ref().and_then(|u| store.accounts.iter_mut().find(|a| a.ds_uid.as_deref() == Some(u.as_str()))) {
+            // cùng người dùng đăng nhập lại (token mới): thay token thay vì thêm bản trùng
+            a.token = session.token.clone();
+            a.cookies = session.cookies.clone();
+            a.last_verified = Some(now());
+            a.last_status = Some("ok (re-login)".into());
+            a.stats.reset();
+            a.thread_session_id = None;
         } else {
             let acc = Account {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -1981,6 +2093,7 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
                 thread_parent_message_id: None,
                 stats: Default::default(),
                 pool_enabled: true,
+                ds_uid: session.uid.clone(),
             };
             store.accounts.push(acc);
         }
@@ -2101,6 +2214,25 @@ async fn access_guard(
     resp
 }
 
+/// Tài khoản cũ chưa có id người dùng DeepSeek: hỏi users/current một lần (lần lượt, nhẹ) để nhận ra bản trùng.
+async fn backfill_uids(st: Arc<AppState>) {
+    let todo: Vec<(String, String, String)> = {
+        let store = st.store.read().await;
+        store.accounts.iter().filter(|a| a.ds_uid.is_none()).map(|a| (a.id.clone(), a.token.clone(), cookie_string(&a.cookies))).collect()
+    };
+    for (id, token, cookies) in todo {
+        let Ok(c) = DsClient::new(token, cookies) else { continue };
+        let Ok(v) = c.users_current().await else { continue };
+        if v["code"].as_i64() != Some(0) { continue; }
+        if let Some(u) = v["data"]["biz_data"]["id"].as_str() {
+            if let Some(a) = st.store.write().await.accounts.iter_mut().find(|a| a.id == id) { a.ds_uid = Some(u.to_string()); }
+            mark_dirty(&st);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    crate::elog!("[uid] đã nhận id người dùng cho các tài khoản cũ");
+}
+
 /// Dọn phiên web nhàn rỗi quá DS_CONV_TTL (mặc định 1800s): xoá trên DS, khỏi registry phiên và khỏi registry hội thoại.
 async fn conv_sweeper(st: Arc<AppState>) {
     loop {
@@ -2148,7 +2280,7 @@ pub async fn run(port: u16) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/accounts", get(api_list_accounts).post(api_add_account))
-        .route("/api/accounts/{id}", axum::routing::delete(api_delete_account))
+        .route("/api/accounts/{id}", axum::routing::delete(api_delete_account).patch(api_edit_account))
         .route("/api/accounts/{id}/verify", post(api_verify_account))
         .route("/api/accounts/{id}/pool", post(api_toggle_pool))
         .route("/api/accounts/{id}/reset", post(api_reset_account))
@@ -2170,6 +2302,7 @@ pub async fn run(port: u16) -> Result<()> {
     // Background: dọn phiên nhàn rỗi, refresh cookies từ Chrome, ghi store gom lô
     let _ = boot_id();
     crate::usage::spawn_background();
+    tokio::spawn(backfill_uids(st.clone()));
     tokio::spawn(conv_sweeper(st.clone()));
     tokio::spawn(store_flusher(st.clone()));
     tokio::spawn(auto_refresh_loop(st));
@@ -2519,5 +2652,14 @@ mod token_paste_tests {
         assert_eq!(normalize_token(&format!("\"{t}\"")), t);
         assert_eq!(normalize_token(&format!("  Bearer {t}\n")), t);
         assert_eq!(normalize_token(t), t);
+    }
+}
+
+#[cfg(test)]
+mod edit_account_tests {
+    #[test]
+    fn edit_route_accepts_partial_body() {
+        let e: super::EditAccount = serde_json::from_str(r#"{"label":"mới"}"#).unwrap();
+        assert!(e.token.is_none() && e.label.as_deref() == Some("mới"));
     }
 }
