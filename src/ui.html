@@ -168,7 +168,7 @@
   <main class="grid">
     <div class="cell k"><div class="lab">Token hôm nay</div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
     <div class="cell k"><div class="lab">Tiết kiệm hôm nay</div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
-    <div class="cell k"><div class="lab">Giá hiện tại</div><div class="big" id="kNow">—</div><div class="sub" id="kNowSub"></div></div>
+    <div class="cell k"><div class="lab">Độ trễ (1 giờ)</div><div class="big" id="kLat">—</div><div class="sub" id="kLatSub"></div></div>
     <div class="cell k"><div class="lab">Tài khoản</div><div class="big" id="kAcc">—</div><div class="sub" id="kAccSub"></div></div>
 
     <div class="cell c8">
@@ -499,10 +499,10 @@ function renderUsage(u) {
   $('kTokSub').textContent = t.input ? `cache ${Math.round((t.cached / t.input) * 100)}% · ${t.req} lượt` : `${t.req} lượt`;
   $('kSave').textContent = fmtUsd(t.cost);
   $('kSaveSub').textContent = `tháng này ~${fmtUsd(pj.month_cost)}`;
-  const left = u.next_switch ? u.next_switch - Date.now() / 1000 : null;
-  $('kNow').textContent = u.now_peak ? 'CAO ĐIỂM' : 'THẤP ĐIỂM';
-  $('kNow').className = 'big ' + (u.now_peak ? 'bad' : 'good');
-  $('kNowSub').textContent = (u.now_peak ? 'gấp đôi · hết sau ' : 'cao điểm sau ') + (left != null ? dur(left) : '—');
+  const L = u.latency || {}, sec = (ms) => (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's';
+  $('kLat').textContent = L.p50_ms != null ? sec(L.p50_ms) : '—';
+  $('kLatSub').textContent = L.n ? `p90 ${L.p90_ms != null ? sec(L.p90_ms) : '—'} · ${L.n} lượt` + (L.err ? ` · ${L.err} lỗi` : '') : 'chưa có lượt nào';
+  $('kLatSub').className = 'sub' + (L.err ? ' bad' : '');
 
   const cb = $('cBody'); cb.textContent = '';
   for (const [name, a] of [['hôm nay', u.today], ['7 ngày', u.d7], ['30 ngày', u.d30]]) {

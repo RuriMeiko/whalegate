@@ -2,7 +2,7 @@
 // tách giờ cao điểm / thấp điểm, ước tính khoản tiết kiệm so với gọi API trả tiền.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, OnceLock, RwLock};
 
 const PRICING_URL: &str = "https://api-docs.deepseek.com/quick_start/pricing";
@@ -33,6 +33,29 @@ impl Pricing {
     fn fallback() -> Self {
         Pricing { model: "deepseek-flash".into(), hit: (0.003, 0.006), miss: (0.15, 0.30), out: (0.6, 1.2), source: "fallback".into(), fetched_at: 0 }
     }
+}
+
+/// Độ trễ các request gần đây (toàn bộ thời gian từ lúc nhận đến lúc xong, gồm retry/chờ tài khoản).
+fn recent() -> &'static Mutex<VecDeque<(u64, u64, bool)>> {
+    static R: OnceLock<Mutex<VecDeque<(u64, u64, bool)>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(VecDeque::with_capacity(400)))
+}
+
+pub fn record_request(ms: u64, ok: bool) {
+    let mut r = recent().lock().unwrap_or_else(|e| e.into_inner());
+    if r.len() == 400 { r.pop_front(); }
+    r.push_back((now_secs(), ms, ok));
+}
+
+/// p50/p90 (ms) của các request thành công trong `window_secs` gần nhất + số request lỗi.
+fn latency_report(window_secs: u64) -> Value {
+    let cut = now_secs().saturating_sub(window_secs);
+    let r = recent().lock().unwrap_or_else(|e| e.into_inner());
+    let mut ok: Vec<u64> = r.iter().filter(|(t, _, o)| *t >= cut && *o).map(|(_, ms, _)| *ms).collect();
+    let err = r.iter().filter(|(t, _, o)| *t >= cut && !*o).count();
+    ok.sort_unstable();
+    let pct = |p: f64| if ok.is_empty() { Value::Null } else { json!(ok[(((ok.len() - 1) as f64) * p).round() as usize]) };
+    json!({"n": ok.len() + err, "ok": ok.len(), "err": err, "p50_ms": pct(0.5), "p90_ms": pct(0.9), "window_secs": window_secs})
 }
 
 struct Store {
@@ -289,6 +312,7 @@ pub fn report() -> Value {
                        "month_tokens": per_day_tokens * 30.0, "month_cost": per_day_cost * 30.0, "peak_cost_share": per_day_peak_share,
                        "month_cost_if_offpeak": a_7d.cost_if_off / span_days * 30.0},
         "hours": hours, "daily": daily, "schedule": schedule,
+        "latency": latency_report(3600),
     })
 }
 
@@ -320,6 +344,15 @@ mod tests {
         let p = parse_pricing(page, 1).expect("parse");
         assert_eq!((p.hit, p.miss, p.out), ((0.003, 0.006), (0.15, 0.30), (0.6, 1.2)));
         assert_eq!(p.model, "deepseek-flash");
+    }
+
+    #[test]
+    fn latency_percentiles() {
+        for ms in [1000, 2000, 3000, 4000, 10_000] { record_request(ms, true); }
+        record_request(500, false);
+        let l = latency_report(60);
+        assert!(l["ok"].as_u64().unwrap() >= 5 && l["err"].as_u64().unwrap() >= 1);
+        assert!(l["p50_ms"].as_u64().unwrap() >= 1000 && l["p90_ms"].as_u64().unwrap() <= 10_000);
     }
 
     #[test]

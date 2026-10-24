@@ -368,3 +368,5 @@ Trên dashboard, mục **Thêm tài khoản thủ công**: mở tab đã đăng 
 
 - **Bật/tắt tài khoản**: mở dòng tài khoản → công tắc TẮT/BẬT. Tài khoản tắt không được pool dùng (dòng mờ, "đã tắt"); dành cho acc bạn muốn dùng tay. Request đang chạy trên nó vẫn chạy nốt; hội thoại stateful gắn với nó chuyển sang gửi đủ ngữ cảnh ở tài khoản khác. API: `POST /api/accounts/{id}/pool` với `{"pool_enabled": false}`.
 
+- **Độ trễ**: ô thứ ba trên dashboard hiện p50/p90 thời gian xử lý mỗi request trong 1 giờ gần nhất (từ lúc nhận đến lúc xong, gồm chờ tài khoản và retry) cùng số request lỗi. Chỉ giữ trong bộ nhớ (400 request gần nhất), mất khi restart. `GET /api/usage` trả trường `latency`.
+

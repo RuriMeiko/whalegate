@@ -468,6 +468,7 @@ fn register_conv(st: &Arc<AppState>, ctx: &ChatCtx, was_stateful: bool, acc_id: 
 /// Lõi: retry tối đa 3 lượt, mỗi lượt lỗi/rỗng/cụt thì đổi sang acc khác.
 fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item = Out> {
     async_stream::stream! {
+        let t_req = Instant::now();
         let mut lease = Some(lease0);
         let mut failed: Vec<String> = Vec::new();
         let mut last_err: Option<String> = None;
@@ -638,6 +639,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &ids, full_text.chars().count(), real_usage.unwrap_or(0));
                             yield Out::ToolCalls(calls, ids);
                             crate::usage::record(prompt_tokens.max(0) as u64, cached_tokens.max(0) as u64, completion_tokens.max(0) as u64);
+                            crate::usage::record_request(t_req.elapsed().as_millis() as u64, true);
                             yield Out::Finish { reason: "tool_calls", prompt_tokens, completion_tokens, cached_tokens };
                             finished = true;
                             }
@@ -648,6 +650,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                                 // lượt cuối: trả phần đã có, báo 'length' để client biết bị cắt
                                 if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
                                 crate::usage::record(prompt_tokens.max(0) as u64, cached_tokens.max(0) as u64, completion_tokens.max(0) as u64);
+                            crate::usage::record_request(t_req.elapsed().as_millis() as u64, true);
                             yield Out::Finish { reason: "length", prompt_tokens, completion_tokens, cached_tokens };
                                 finished = true;
                             } else {
@@ -672,6 +675,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             ok_acc(&st, &acc_id, &sid, !own_session).await;
                             register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &[], full_text.chars().count(), real_usage.unwrap_or(0));
                             crate::usage::record(prompt_tokens.max(0) as u64, cached_tokens.max(0) as u64, completion_tokens.max(0) as u64);
+                            crate::usage::record_request(t_req.elapsed().as_millis() as u64, true);
                             yield Out::Finish { reason: "stop", prompt_tokens, completion_tokens, cached_tokens };
                             finished = true;
                         }
@@ -686,6 +690,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
         if !finished {
             let msg = last_err.unwrap_or_else(|| "DeepSeek web không trả dữ liệu".into());
             crate::elog!("[ds-fail] {}", msg);
+            crate::usage::record_request(t_req.elapsed().as_millis() as u64, false);
             yield Out::Error(msg);
         }
     }
