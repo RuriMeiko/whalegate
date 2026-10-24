@@ -556,6 +556,34 @@ pub(crate) fn new_call_id() -> String {
     format!("call_{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
 }
 
+/// Suy tên tool cho call bị mất tên: tool có đủ mọi khoá args trong schema, ưu tiên tool thoả hết `required`.
+pub(crate) fn infer_tool_name(tools: &Option<Vec<Value>>, call: &mut DsmlToolCall) {
+    if !call.name.is_empty() { return; }
+    let Some(tools) = tools else { return };
+    let Ok(Value::Object(args)) = serde_json::from_str::<Value>(&call.arguments) else { return };
+    let mut best: Option<(usize, String)> = None;
+    for f in tools.iter().filter_map(|t| t.get("function")) {
+        let Some(name) = f.get("name").and_then(|n| n.as_str()) else { continue };
+        let props = f.pointer("/parameters/properties").and_then(|p| p.as_object());
+        let Some(props) = props else { continue };
+        if !args.keys().all(|k| props.contains_key(k)) { continue; }
+        let req_ok = f.pointer("/parameters/required").and_then(|r| r.as_array())
+            .map_or(true, |r| r.iter().filter_map(|x| x.as_str()).all(|k| args.contains_key(k) || k == "description"));
+        let score = args.len() * 2 + usize::from(req_ok) * 100;
+        if best.as_ref().map_or(true, |(b, _)| score > *b) { best = Some((score, name.to_string())); }
+    }
+    if let Some((_, n)) = best { call.name = n; }
+}
+
+/// Call có hợp lệ theo schema không (tên có trong tools, đủ `required` kiểu string/số…). Lỗi → đừng gửi cho client.
+pub(crate) fn call_is_valid(tools: &Option<Vec<Value>>, call: &DsmlToolCall) -> bool {
+    let Some(tools) = tools else { return true };
+    let Some(f) = tools.iter().filter_map(|t| t.get("function")).find(|f| f.get("name").and_then(|n| n.as_str()) == Some(call.name.as_str())) else { return false };
+    let Ok(Value::Object(args)) = serde_json::from_str::<Value>(&call.arguments) else { return false };
+    f.pointer("/parameters/required").and_then(|r| r.as_array())
+        .map_or(true, |r| r.iter().filter_map(|x| x.as_str()).all(|k| args.contains_key(k)))
+}
+
 /// Điền các property string bắt buộc mà model bỏ sót (vd bash.description) theo schema tools của client,
 /// thay vì để client trả "invalid arguments: missing required property".
 pub(crate) fn fill_required_args(tools: &Option<Vec<Value>>, call: &mut DsmlToolCall) {
@@ -619,11 +647,66 @@ fn space_dsml_tags(text: &str) -> String {
     out
 }
 
-fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
+/// Chuẩn hoá số thanh dọc quanh 'DSML': model hay nhả '<｜DSML｜｜ calls>' / '</｜DSML｜｜ invoke>' (1-3 gạch) → luôn 2 gạch mỗi bên.
+fn fix_dsml_bars(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
+    while let Some(p) = rest.find("DSML") {
+        let before = &rest[..p];
+        let n1 = before.chars().rev().take_while(|c| *c == '｜').count();
+        let after = &rest[p + 4..];
+        let n2 = after.chars().take_while(|c| *c == '｜').count();
+        if n1 == 0 && n2 == 0 {
+            out.push_str(&rest[..p + 4]);
+            rest = after;
+            continue;
+        }
+        out.push_str(&before[..before.len() - n1 * '｜'.len_utf8()]);
+        out.push_str("｜｜DSML｜｜");
+        rest = &after[n2 * '｜'.len_utf8()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// '<｜｜DSML｜｜ file_path" string="true">' (mất 'parameter name="') → dạng chuẩn.
+fn fix_mangled_param_tags(text: &str) -> String {
+    const OPEN: &str = "<｜｜DSML｜｜ ";
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut rest = text;
+    while let Some(p) = rest.find(OPEN) {
+        out.push_str(&rest[..p + OPEN.len()]);
+        let after = &rest[p + OPEN.len()..];
+        let ident: String = after.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        let tail = &after[ident.len()..];
+        let is_tool_tag = matches!(ident.as_str(), "calls" | "invoke" | "parameter" | "tool_calls");
+        if !ident.is_empty() && !is_tool_tag && tail.starts_with("\" string=") {
+            out.push_str(&format!("parameter name=\"{}", ident));
+            rest = tail;
+        } else {
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Xoá mảnh markup DSML còn sót khỏi phần prose.
+fn strip_dsml_fragments(text: &str) -> String {
+    let mut t = text.to_string();
+    while let Some(p) = t.find("DSML") {
+        let start = t[..p].rfind('<').unwrap_or(p);
+        let end = t[p..].find('>').map(|e| p + e + 1).unwrap_or(t.len());
+        t.replace_range(start..end, "");
+    }
+    t.trim().to_string()
+}
+
+pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
     // DS web đổi format theo phiên bản: '<｜｜DSML｜｜ calls>' / '<｜｜DSML｜｜tool_calls>' /
     // '<｜｜DSML｜｜ calls>' có space — normalize mọi biến thể về '<｜｜DSML｜｜ calls>' trước parse
     let mut norm: String = {
-        let mut out = space_dsml_tags(text)
+        let mut out = fix_mangled_param_tags(&space_dsml_tags(&fix_dsml_bars(text)))
             .replace("<｜｜DSML｜｜tool_calls>", "<｜｜DSML｜｜ calls>")
             .replace("</｜｜DSML｜｜tool_calls>", "</｜｜DSML｜｜ calls>")
             .replace("<｜｜DSML｜｜invoke name=", "<｜｜DSML｜｜ invoke name=")
@@ -645,6 +728,13 @@ fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
     while let Some(i) = norm.find(dup) {
         norm.replace_range(i..i + single.len(), "");
     }
+    // model bỏ thẻ mở invoke (calls → parameter… → /invoke): chèn invoke không tên, tên suy ra từ schema sau
+    if let Some(pp) = norm.find("<｜｜DSML｜｜ parameter") {
+        let inv = norm.find("<｜｜DSML｜｜ invoke");
+        if inv.map_or(true, |i| pp < i) && norm.contains("</｜｜DSML｜｜ invoke>") {
+            norm.insert_str(pp, "<｜｜DSML｜｜ invoke name=\"\">");
+        }
+    }
     // thẻ <parameter name=...> trơn lẫn trong khối DSML → đưa về dạng DSML
     if norm.contains("<｜｜DSML｜｜ invoke") {
         norm = norm.replace("<parameter name=\"", "<｜｜DSML｜｜ parameter name=\"");
@@ -655,7 +745,7 @@ fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
     let close_calls = text.find("</｜｜DSML｜｜ calls>");
     let had_close = close_calls.is_some();
     let end_block = close_calls.unwrap_or(text.len());
-    let before = text[..start].trim().to_string();
+    let before = strip_dsml_fragments(&text[..start]);
     let block = &text[start..end_block];
 
     let mut calls = Vec::new();
@@ -695,7 +785,14 @@ fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
             let value_part = &after_pn[vstart + 1..];
             let marker = "</｜｜DSML｜｜ parameter";
             let Some(vend) = value_part.find(marker) else { break };
-            let value = value_part[..vend].to_string();
+            let mut value = value_part[..vend].to_string();
+            // thẻ mở param lặp ('<parameter name="command">' rồi lại '<parameter name="command" string="true">giá trị') → lấy sau thẻ mở cuối
+            while let Some(np) = value.find("<｜｜DSML｜｜ parameter") {
+                match value[np..].find('>') {
+                    Some(g) => value = value[np + g + 1..].to_string(),
+                    None => break,
+                }
+            }
             let is_json = after_pn[..vstart].contains("string=\"false\"");
             // skip junk param rỗng (model nhiều khi emit <parameter name="bash"></parameter>)
             if !pname.is_empty() && !value.is_empty() {
@@ -1792,6 +1889,32 @@ mod xml_tests {
         assert_eq!(st.cooldown_until, 1600); // trần 600s
         st.mark_ok();
         assert_eq!((st.fail_streak, st.cooldown_until), (0, 0));
+    }
+
+    #[test]
+    fn parse_malformed_real_samples() {
+        // 1) mở '<｜DSML｜｜ calls>' 1 gạch + đóng 1 gạch: không được để lọt vào 'before'
+        let t1 = "Xong.\n<｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>\n</｜DSML｜｜ invoke>\n</｜DSML｜｜ calls>";
+        let (b, c) = parse_any_tool_calls(t1).unwrap();
+        assert_eq!(c[0].name, "bash"); assert_eq!(b, "Xong.");
+        // 2) thiếu invoke mở → tên rỗng, suy ra từ schema
+        let t2 = "ok\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">pwd</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">cwd</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let (_, mut c) = parse_any_tool_calls(t2).unwrap();
+        let tools = Some(vec![
+            json!({"function":{"name":"write","parameters":{"properties":{"file_path":{},"content":{}},"required":["file_path","content"]}}}),
+            json!({"function":{"name":"bash","parameters":{"properties":{"command":{},"description":{}},"required":["command","description"]}}})]);
+        infer_tool_name(&tools, &mut c[0]);
+        assert_eq!(c[0].name, "bash"); assert!(call_is_valid(&tools, &c[0]));
+        // 3) thẻ param bị mất 'parameter name='
+        let t3 = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"write\">\n<｜｜DSML｜｜ file_path\" string=\"true\">/a/.gitignore</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let (_, c) = parse_any_tool_calls(t3).unwrap();
+        assert!(c[0].arguments.contains("/a/.gitignore"));
+        assert!(!call_is_valid(&tools, &c[0]), "thiếu content → không hợp lệ, để harness retry");
+        // 4) param mở lặp
+        let t4 = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">echo hi</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let (_, c) = parse_any_tool_calls(t4).unwrap();
+        let v: Value = serde_json::from_str(&c[0].arguments).unwrap();
+        assert_eq!(v["command"], "echo hi");
     }
 
     #[test]

@@ -205,6 +205,8 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             let mut has_content = false;
             let mut truncated: Option<String> = None;
             let mut attempt_done = false;
+            #[allow(unused_assignments)]
+            let mut continue_attempt = false;
 
             while let Some(ev) = rx.recv().await {
                 match ev {
@@ -251,11 +253,20 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                                 let rem: String = before.chars().skip(yielded_len).collect();
                                 if !rem.is_empty() { yield Out::Content(rem); }
                             }
-                            for c in calls.iter_mut() { fill_required_args(&ctx.tools, c); }
+                            for c in calls.iter_mut() { infer_tool_name(&ctx.tools, c); fill_required_args(&ctx.tools, c); }
+                            // call sai schema (thiếu tham số bắt buộc/tool lạ): retry trong harness (2-3s) thay vì bắt client trả lỗi rồi model sửa (1 step)
+                            let bad = calls.iter().find(|c| !call_is_valid(&ctx.tools, c)).map(|c| c.name.clone());
+                            if let (Some(n), true) = (bad, attempt < 2) {
+                                eprintln!("[toolcall-invalid] attempt {} tool={:?} args thiếu/không hợp lệ — retry; raw={:?}", attempt, n, full_text);
+                                last_err = Some(format!("tool-call không hợp lệ ({})", n));
+                                attempt_done = true;
+                                continue_attempt = true;
+                            } else {
                             ok_acc(&st, &acc_id, &sid).await;
                             yield Out::ToolCalls(calls);
                             yield Out::Finish { reason: "tool_calls", prompt_tokens, completion_tokens };
                             finished = true;
+                            }
                         } else if let Some(why) = truncated.clone() {
                             eprintln!("[ds-truncated] attempt {}: {}", attempt, why);
                             last_err = Some(why);
@@ -275,14 +286,9 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         } else if has_tool_marker(&full_text) {
                             // có marker tool-call nhưng parse trượt: log nguyên văn để vá, retry; lỗi do model nên không phạt acc
                             eprintln!("[toolcall-unparsed] attempt {}; raw={:?}", attempt, full_text);
-                            if attempt == 2 {
-                                // bỏ mảnh markup, không để lọt ra client
-                                yield Out::Finish { reason: "stop", prompt_tokens, completion_tokens };
-                                finished = true;
-                            } else {
-                                last_err = Some("tool-call không parse được".into());
-                                fail_acc(&st, &acc_id, "unparsed", false).await;
-                            }
+                            // lượt cuối vẫn trượt → báo lỗi rõ (không trả completion rỗng làm client 'Stopped' im lặng)
+                            last_err = Some("tool-call không parse được sau 3 lần thử".into());
+                            fail_acc(&st, &acc_id, "unparsed", false).await;
                         } else {
                             if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
                             ok_acc(&st, &acc_id, &sid).await;
