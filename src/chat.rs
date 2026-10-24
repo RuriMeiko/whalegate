@@ -41,8 +41,16 @@ enum Out {
     Error(String),
 }
 
+/// Ảnh đính kèm lấy từ messages (đã giải mã); upload lên DS theo từng acc khi cần.
+pub(crate) struct Image {
+    hash: String,
+    bytes: Vec<u8>,
+    mime: String,
+}
+
 struct ChatCtx {
     prompt: String,
+    images: Vec<Image>,
     thinking: bool,
     search: bool,
     tools: Option<Vec<Value>>,
@@ -54,6 +62,88 @@ fn save_sample(kind: &str, raw: &str) {
     let path = std::path::Path::new(&creds_dir()).join("samples.jsonl");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{}", json!({"t": now(), "kind": kind, "raw": raw}));
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    // sha256 không có crate sẵn: dùng hash 128-bit nhẹ (đủ để khử trùng ảnh trong 1 phiên, không dùng cho bảo mật)
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h1);
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    (bytes.len(), bytes.iter().rev().take(64).collect::<Vec<_>>()).hash(&mut h2);
+    format!("{:016x}{:016x}{}", h1.finish(), h2.finish(), bytes.len())
+}
+
+/// Giải mã 1 phần nội dung ảnh (OpenAI `image_url`, Anthropic `image`/base64, `input_image`) → bytes + mime.
+async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    // Anthropic: {type:"image", source:{type:"base64", media_type, data}}
+    if let Some(src) = part.get("source") {
+        if let (Some(mt), Some(d)) = (src.get("media_type").and_then(|x| x.as_str()), src.get("data").and_then(|x| x.as_str())) {
+            return b64.decode(d.trim()).ok().map(|b| (b, mt.to_string()));
+        }
+    }
+    let url = part.pointer("/image_url/url").and_then(|x| x.as_str())
+        .or_else(|| part.get("image_url").and_then(|x| x.as_str()))
+        .or_else(|| part.get("url").and_then(|x| x.as_str()))?;
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (meta, data) = rest.split_once(',')?;
+        let mime = meta.split(';').next().unwrap_or("image/png").to_string();
+        return b64.decode(data.trim()).ok().map(|b| (b, mime));
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let r = reqwest::get(url).await.ok()?;
+        let mime = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("image/png").split(';').next().unwrap_or("image/png").to_string();
+        let b = r.bytes().await.ok()?;
+        return Some((b.to_vec(), mime));
+    }
+    None
+}
+
+/// Mọi ảnh trong hội thoại (kể cả trong kết quả tool như read_image), khử trùng, giữ tối đa `max` ảnh mới nhất.
+pub(crate) async fn collect_images(messages: &[Value], max: usize) -> Vec<Image> {
+    let mut found: Vec<Image> = Vec::new();
+    for m in messages {
+        let Some(parts) = m.get("content").and_then(|c| c.as_array()) else { continue };
+        let mut stack: Vec<&Value> = parts.iter().collect();
+        while let Some(p) = stack.pop() {
+            match p.get("type").and_then(|t| t.as_str()) {
+                Some("image_url") | Some("image") | Some("input_image") => {
+                    if let Some((bytes, mime)) = decode_image_part(p).await {
+                        let hash = sha256_hex(&bytes);
+                        found.retain(|i| i.hash != hash); // ảnh lặp lại → coi như mới nhất
+                        found.push(Image { hash, bytes, mime });
+                    }
+                }
+                Some("tool_result") => {
+                    if let Some(inner) = p.get("content").and_then(|c| c.as_array()) { stack.extend(inner.iter()); }
+                }
+                _ => {}
+            }
+        }
+    }
+    let n = found.len();
+    if n > max { found.drain(..n - max); }
+    found
+}
+
+fn ext_for(mime: &str) -> &'static str {
+    match mime { "image/jpeg" | "image/jpg" => "jpg", "image/webp" => "webp", "image/gif" => "gif", "image/bmp" => "bmp", _ => "png" }
+}
+
+/// Mức suy nghĩ → bật DeepThink? "none"/"off" = Nhanh; mọi mức khác ("max", "high"…) = DeepThink.
+/// Không chỉ định: model cũ `*-r1` / `thinking:true` → bật, còn lại theo DS_DEFAULT_EFFORT (mặc định none).
+pub(crate) fn effort_to_thinking(effort: Option<&str>, legacy_r1: bool, thinking_flag: Option<bool>) -> bool {
+    match effort.map(|e| e.trim().to_ascii_lowercase()).as_deref() {
+        Some("none") | Some("off") | Some("minimal") | Some("false") | Some("0") => false,
+        Some("") | None => {
+            if legacy_r1 || thinking_flag == Some(true) { return true; }
+            let d = std::env::var("DS_DEFAULT_EFFORT").unwrap_or_else(|_| "none".into()).to_ascii_lowercase();
+            !matches!(d.as_str(), "none" | "off" | "")
+        }
+        Some(_) => true,
     }
 }
 
@@ -147,6 +237,18 @@ async fn fail_acc(st: &Arc<AppState>, acc_id: &str, why: &str, penalize: bool) {
     let _ = save_store(&store).await;
 }
 
+/// Token chết (code 40003): cách ly acc lâu, gắn nhãn cần đăng nhập lại; đăng nhập lại/Reset sẽ gỡ.
+async fn mark_auth_invalid(st: &Arc<AppState>, acc_id: &str) {
+    let mut store = st.store.write().await;
+    if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
+        a.stats.total_error += 1;
+        a.stats.fail_streak = a.stats.fail_streak.max(5);
+        a.stats.cooldown_until = now() + 1800;
+        a.last_status = Some("invalid token — cần login lại".into());
+    }
+    let _ = save_store(&store).await;
+}
+
 async fn ok_acc(st: &Arc<AppState>, acc_id: &str, sid: &str) {
     let mut store = st.store.write().await;
     if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
@@ -191,7 +293,24 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             touch_acc(&st, &acc_id).await;
 
             let stream_res = match DsClient::new(l.token.clone(), cookie_string(&l.cookies)) {
-                Ok(c) => c.chat_stream(&ctx.prompt, l.thread_sid.as_deref(), None, ctx.thinking, ctx.search).await,
+                Ok(c) => {
+                    // ảnh: upload (cache theo acc) rồi tham chiếu bằng ref_file_ids
+                    let mut file_ids: Vec<String> = Vec::new();
+                    let mut up_err: Option<anyhow::Error> = None;
+                    for img in &ctx.images {
+                        let key = (acc_id.clone(), img.hash.clone());
+                        let cached = st.file_cache.lock().unwrap().get(&key).cloned();
+                        if let Some(id) = cached { file_ids.push(id); continue; }
+                        match c.upload_file(img.bytes.clone(), &format!("image-{}.{}", &img.hash[..8], ext_for(&img.mime)), &img.mime).await {
+                            Ok(id) => { st.file_cache.lock().unwrap().insert(key, id.clone()); file_ids.push(id); }
+                            Err(e) => { up_err = Some(e); break; }
+                        }
+                    }
+                    match up_err {
+                        Some(e) => Err(e),
+                        None => c.chat_stream(&ctx.prompt, l.thread_sid.as_deref(), None, ctx.thinking, ctx.search, &file_ids).await,
+                    }
+                }
                 Err(e) => Err(e),
             };
             let (sid, mut rx) = match stream_res {
@@ -199,7 +318,11 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                 Err(e) => {
                     eprintln!("[ds-error] attempt {} acc {}: {:#}", attempt, &acc_id[..8.min(acc_id.len())], e);
                     last_err = Some(format!("{:#}", e));
-                    fail_acc(&st, &acc_id, "error", true).await;
+                    if format!("{:#}", e).contains("AUTH_INVALID") {
+                        mark_auth_invalid(&st, &acc_id).await;
+                    } else {
+                        fail_acc(&st, &acc_id, "error", true).await;
+                    }
                     failed.push(acc_id);
                     continue;
                 }
@@ -377,7 +500,10 @@ pub(crate) async fn api_chat_completions(
     // yêu cầu đặt tên phiên của client: không cần thinking (đỡ 4-5s + slot acc)
     let is_title_req = req.tools.as_ref().map_or(true, |t| t.is_empty())
         && req.messages.iter().any(|m| render_content(m).contains("Create a concise title"));
-    let thinking = (req.model.as_deref().map(|m| m.contains("r1")).unwrap_or(false) || req.thinking.unwrap_or(false))
+    let effort = req.reasoning_effort.clone()
+        .or_else(|| req.reasoning.as_ref().and_then(|r| r.get("effort")).and_then(|e| e.as_str()).map(|s| s.to_string()))
+        .or_else(|| req.model.as_deref().and_then(|m| m.split_once(':')).map(|(_, e)| e.to_string())); // "deepseek-web:max"
+    let thinking = effort_to_thinking(effort.as_deref(), req.model.as_deref().map_or(false, |m| m.contains("r1")), req.thinking)
         && !is_title_req;
     let search = req.search.unwrap_or(false);
 
@@ -393,7 +519,9 @@ pub(crate) async fn api_chat_completions(
 
     let deadline = Instant::now() + Duration::from_secs(queue_wait_secs());
     let lease = acquire(&st, &[], deadline).await?;
-    let ctx = ChatCtx { prompt, thinking, search, tools: req.tools.clone() };
+    let images = collect_images(&msgs, 4).await;
+    if !images.is_empty() { eprintln!("[req] {} ảnh đính kèm", images.len()); }
+    let ctx = ChatCtx { prompt, images, thinking, search, tools: req.tools.clone() };
     let mut outs = Box::pin(run_chat(st, ctx, lease));
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 

@@ -60,6 +60,7 @@ impl DsClient {
             .await?
             .json()
             .await?;
+        Self::check_auth(&v)?;
         Ok(v["data"]["biz_data"]["chat_session"]["id"]
             .as_str()
             .context("no session id")?
@@ -91,15 +92,92 @@ impl DsClient {
         Ok(v)
     }
 
-    async fn fetch_pow_challenge(&self) -> Result<Value> {
+    /// Lỗi xác thực của DS web: HTTP 200 nhưng `code` 40003 ("invalid token") — phải đăng nhập lại, không retry mù.
+    fn check_auth(v: &Value) -> Result<()> {
+        if v["code"].as_i64() == Some(40003) {
+            anyhow::bail!("AUTH_INVALID: {}", v["msg"].as_str().unwrap_or("invalid token"));
+        }
+        Ok(())
+    }
+
+    async fn fetch_pow_challenge_for(&self, target_path: &str) -> Result<Value> {
         let v: Value = self
             .req(reqwest::Method::POST, "/chat/create_pow_challenge")
-            .json(&json!({ "target_path": "/api/v0/chat/completion" }))
+            .json(&json!({ "target_path": target_path }))
             .send()
             .await?
             .json()
             .await?;
+        Self::check_auth(&v)?;
         Ok(v["data"]["biz_data"]["challenge"].clone())
+    }
+
+    async fn fetch_pow_challenge(&self) -> Result<Value> {
+        self.fetch_pow_challenge_for("/api/v0/chat/completion").await
+    }
+
+    /// Lấy challenge cho `target_path`, giải PoW, trả header `x-ds-pow-response` (base64).
+    async fn pow_header(&self, target_path: &str) -> Result<String> {
+        let ch = self.fetch_pow_challenge_for(target_path).await?;
+        let challenge_hex = ch["challenge"].as_str().context("no challenge")?.to_string();
+        let salt = ch["salt"].as_str().context("no salt")?.to_string();
+        let expire_at = ch["expire_at"].as_u64().context("no expire_at")?;
+        let difficulty = ch["difficulty"].as_u64().context("no difficulty")?;
+        let signature = ch["signature"].as_str().context("no signature")?.to_string();
+        let t0 = std::time::Instant::now();
+        let answer = solve_pow(&challenge_hex, &salt, expire_at, difficulty)
+            .context("PoW solve failed within difficulty bound")?;
+        eprintln!("[pow] difficulty={} answer={} solve_ms={}", difficulty, answer, t0.elapsed().as_millis());
+        let payload = json!({
+            "algorithm": ch["algorithm"], "challenge": challenge_hex, "salt": salt,
+            "answer": answer, "signature": signature, "target_path": ch["target_path"],
+        });
+        Ok(base64::engine::general_purpose::STANDARD.encode(payload.to_string()))
+    }
+
+    /// Upload ảnh/file lên DS web (multipart + PoW riêng cho upload_file), chờ xử lý xong, trả file id.
+    pub async fn upload_file(&self, bytes: Vec<u8>, filename: &str, mime: &str) -> Result<String> {
+        let pow = self.pow_header("/api/v0/file/upload_file").await?;
+        let size = bytes.len();
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(mime)?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let v: Value = self
+            .req(reqwest::Method::POST, "/file/upload_file")
+            .header("x-ds-pow-response", pow)
+            .header("x-file-size", size.to_string())
+            .header("x-model-type", "default")
+            .multipart(form)
+            .send()
+            .await?
+            .json()
+            .await?;
+        Self::check_auth(&v)?;
+        let id = v["data"]["biz_data"]["id"].as_str()
+            .with_context(|| format!("upload_file thất bại: {}", v))?.to_string();
+        // PENDING → SUCCESS (~2s với ảnh nhỏ)
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let f: Value = self
+                .req(reqwest::Method::GET, &format!("/file/fetch_files?file_ids={}", id))
+                .send().await?.json().await?;
+            let st = f["data"]["biz_data"]["files"][0]["status"].as_str().unwrap_or("");
+            match st {
+                "SUCCESS" => return Ok(id),
+                "FAILED" | "ERROR" | "CONTENT_EMPTY" | "UNSAFE" => {
+                    anyhow::bail!("DS từ chối file: status={} err={}", st, f["data"]["biz_data"]["files"][0]["error_code"])
+                }
+                _ => {}
+            }
+        }
+        anyhow::bail!("upload_file quá thời gian chờ xử lý ({})", id)
+    }
+
+    /// Xác thực nhẹ: token còn sống không (khác với cookie WAF).
+    pub async fn token_alive(&self) -> Result<bool> {
+        let v = self.users_current().await?;
+        Ok(v["code"].as_i64() == Some(0))
     }
 
     /// Full flow: challenge -> solve -> completion (SSE). Returns (session_id, sse, last_message_id).
@@ -205,6 +283,7 @@ pub async fn chat_stream(
     parent_message_id: Option<i64>,
     thinking: bool,
     search: bool,
+    ref_file_ids: &[String],
 ) -> Result<(String, tokio::sync::mpsc::UnboundedReceiver<StreamEv>)> {
     use tokio::sync::mpsc;
     use futures::StreamExt;
@@ -215,27 +294,7 @@ pub async fn chat_stream(
         None => self.create_session().await?,
     };
 
-    let ch = self.fetch_pow_challenge().await?;
-    let challenge_hex = ch["challenge"].as_str().context("no challenge")?.to_string();
-    let salt = ch["salt"].as_str().context("no salt")?.to_string();
-    let expire_at = ch["expire_at"].as_u64().context("no expire_at")?;
-    let difficulty = ch["difficulty"].as_u64().context("no difficulty")?;
-    let signature = ch["signature"].as_str().context("no signature")?.to_string();
-
-    let t0 = std::time::Instant::now();
-    let answer = solve_pow(&challenge_hex, &salt, expire_at, difficulty)
-        .context("PoW solve failed within difficulty bound")?;
-    eprintln!("[pow] difficulty={} answer={} solve_ms={}", difficulty, answer, t0.elapsed().as_millis());
-
-    let pow_payload = json!({
-        "algorithm": ch["algorithm"],
-        "challenge": challenge_hex,
-        "salt": salt,
-        "answer": answer,
-        "signature": signature,
-        "target_path": ch["target_path"],
-    });
-    let pow_header = base64::engine::general_purpose::STANDARD.encode(pow_payload.to_string());
+    let pow_header = self.pow_header("/api/v0/chat/completion").await?;
 
     let resp = self
         .req(reqwest::Method::POST, "/chat/completion")
@@ -243,9 +302,12 @@ pub async fn chat_stream(
         .json(&json!({
             "chat_session_id": sid,
             "parent_message_id": parent_message_id,
-            "ref_file_ids": [],
+            "model_type": "default",
+            "ref_file_ids": ref_file_ids,
             "thinking_enabled": thinking,
             "search_enabled": search,
+            "action": null,
+            "preempt": false,
             "prompt": prompt,
         }))
         .send()

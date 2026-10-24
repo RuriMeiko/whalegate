@@ -117,6 +117,14 @@ impl AccStats {
         now >= self.cooldown_until && !self.burst_active(now)
     }
 
+    /// Xoá sạch trạng thái lỗi/cooldown/burst (nút Reset trên UI, hoặc sau khi đăng nhập lại).
+    pub(crate) fn reset(&mut self) {
+        self.fail_streak = 0;
+        self.cooldown_until = 0;
+        self.burst_count = 0;
+        self.burst_window_start = 0;
+    }
+
     pub(crate) fn mark_ok(&mut self) {
         self.fail_streak = 0;
         self.cooldown_until = 0;
@@ -203,6 +211,8 @@ pub(crate) struct AppState {
     pub(crate) in_flight: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
     // đang canh 1 tab login (chặn double-start)
     pub(crate) login_watching: std::sync::Mutex<bool>,
+    // (acc_id, sha256 ảnh) -> file id DS đã upload (id gắn theo acc nên cache theo acc)
+    pub(crate) file_cache: std::sync::Mutex<std::collections::HashMap<(String, String), String>>,
 }
 
 // ---------- handlers ----------
@@ -323,6 +333,41 @@ async fn api_delete_account(
 }
 
 // verify lại 1 account (health check + refresh trạng thái)
+/// Reset acc: xoá lỗi/cooldown/burst + session web đang giữ (xoá luôn trên DS), rồi kiểm tra lại token.
+async fn api_reset_account(
+    State(st): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<Value> {
+    let acc = {
+        let mut store = st.store.write().await;
+        let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) else {
+            return Json(json!({"ok": false, "error": "not found"}));
+        };
+        a.stats.reset();
+        let old = a.thread_session_id.take();
+        a.thread_uses = 0;
+        let snap = (a.token.clone(), cookie_string(&a.cookies));
+        let _ = save_store(&store).await;
+        (snap, old)
+    };
+    let ((token, cookies), old_sid) = acc;
+    st.file_cache.lock().unwrap().retain(|(acc_id, _), _| acc_id != &id);
+    let alive = match DsClient::new(token, cookies) {
+        Ok(c) => {
+            if let Some(sid) = old_sid { let _ = c.delete_session(&sid).await; }
+            c.token_alive().await.unwrap_or(false)
+        }
+        Err(_) => false,
+    };
+    let mut store = st.store.write().await;
+    if let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) {
+        a.last_verified = Some(now());
+        a.last_status = Some(if alive { "ok (reset)".into() } else { "invalid token — cần login lại".into() });
+    }
+    let _ = save_store(&store).await;
+    Json(json!({"ok": true, "token_alive": alive}))
+}
+
 async fn api_verify_account(
     State(st): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1233,6 +1278,11 @@ pub(crate) struct ChatRequest {
     // Bật DeepThink (thinking) / Tìm kiếm thông minh (websearch). Mặc định cả hai OFF.
     pub(crate) thinking: Option<bool>,
     pub(crate) search: Option<bool>,
+    // mức suy nghĩ kiểu OpenAI: "none" = Nhanh, "max"/khác = DeepThink
+    #[serde(default)]
+    pub(crate) reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub(crate) reasoning: Option<Value>,
     // OpenAI tools schema từ client (dsh) — render thành hướng dẫn DSML cho model
     #[serde(default)]
     pub(crate) tools: Option<Vec<Value>>,
@@ -1296,6 +1346,10 @@ pub(crate) fn render_content(m: &Value) -> String {
                             out.push('\n');
                         }
                     }
+                    // ảnh: nội dung thật được upload riêng, trong prompt chỉ để dấu vị trí
+                    Some("image_url") | Some("image") | Some("input_image") => {
+                        out.push_str("[hình ảnh đính kèm]\n");
+                    }
                     // tool result: text lồng [{type:"text",text:"..."}]
                     Some("tool_result") => {
                         if let Some(inner) = part.get("content") {
@@ -1309,6 +1363,8 @@ pub(crate) fn render_content(m: &Value) -> String {
                                         if let Some(t) = it.get("text").and_then(|x| x.as_str()) {
                                             out.push_str(t);
                                             out.push('\n');
+                                        } else if matches!(it.get("type").and_then(|t| t.as_str()), Some("image_url") | Some("image") | Some("input_image")) {
+                                            out.push_str("[hình ảnh đính kèm]\n");
                                         }
                                     }
                                 }
@@ -1461,12 +1517,16 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
 }
 
 async fn api_models() -> Json<Value> {
+    // MỘT model duy nhất; mức suy nghĩ chọn bằng `reasoning_effort`: "none" = Nhanh (flash), còn lại ("max"…) = DeepThink.
     Json(json!({
         "object": "list",
-        "data": [
-            {"id": "deepseek-web", "object": "model", "owned_by": "deepseek-harness"},
-            {"id": "deepseek-web-r1", "object": "model", "owned_by": "deepseek-harness"}
-        ]
+        "data": [{
+            "id": "deepseek-web", "object": "model", "owned_by": "deepseek-harness",
+            "input_modalities": ["text", "image"],
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+            "reasoning_efforts": ["none", "max"],
+            "context_length": 300000
+        }]
     }))
 }
 
@@ -1604,6 +1664,7 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
         a.cookies = session.cookies.clone();
         a.last_verified = Some(now());
         a.last_status = Some("ok (re-login)".into());
+        a.stats.reset();
     } else {
         let acc = Account {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1724,6 +1785,7 @@ pub async fn run(port: u16) -> Result<()> {
         rr: std::sync::atomic::AtomicU64::new(0),
         in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
         login_watching: std::sync::Mutex::new(false),
+        file_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let app = Router::new()
@@ -1732,6 +1794,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/accounts/{id}", axum::routing::delete(api_delete_account))
         .route("/api/accounts/{id}/verify", post(api_verify_account))
         .route("/api/accounts/{id}/pool", post(api_toggle_pool))
+        .route("/api/accounts/{id}/reset", post(api_reset_account))
         .route("/api/capture", post(api_capture_from_chrome))
         .route("/api/login_start", post(api_login_start))
         .route("/api/build_profile", post(api_build_profile))
