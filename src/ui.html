@@ -1,268 +1,255 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="vi">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DeepSeek Harness — Quản lý account</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ds-harness</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: system-ui, -apple-system, sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; padding: 24px; }
-  .container { max-width: 920px; margin: 0 auto; }
-  h1 { font-size: 22px; margin-bottom: 4px; }
-  .sub { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 20px; margin-bottom: 16px; }
-  .card h2 { font-size: 15px; margin-bottom: 12px; color: #79c0ff; }
-  label { display: block; font-size: 12px; color: #8b949e; margin: 10px 0 4px; }
-  input, textarea { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; color: #e6edf3; font-size: 13px; font-family: ui-monospace, monospace; }
-  textarea { min-height: 70px; resize: vertical; }
-  button { background: #238636; color: #fff; border: none; border-radius: 6px; padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 12px; }
-  button:hover { background: #2ea043; }
-  button:disabled { opacity: .5; cursor: wait; }
-  button.ghost { background: transparent; border: 1px solid #30363d; color: #e6edf3; }
-  button.danger { background: transparent; border: 1px solid #f85149; color: #f85149; padding: 5px 10px; font-size: 12px; margin: 0; }
-  .hint { background: #1c2128; border-left: 3px solid #1f6feb; padding: 12px 14px; border-radius: 0 6px 6px 0; font-size: 13px; color: #aab8c5; margin-bottom: 16px; line-height: 1.6; }
-  .hint a { color: #58a6ff; }
-  .hint code { background: #0d1117; padding: 1px 5px; border-radius: 4px; }
-  .steplist { list-style: none; counter-reset: step; }
-  .steplist li { counter-increment: step; margin: 6px 0; padding-left: 26px; position: relative; }
-  .steplist li::before { content: counter(step); position: absolute; left: 0; top: 1px; width: 18px; height: 18px; background: #1f6feb; border-radius: 50%; color: #fff; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; color: #8b949e; font-weight: 500; padding: 8px; border-bottom: 1px solid #30363d; font-size: 12px; }
-  td { padding: 10px 8px; border-bottom: 1px solid #21262d; font-family: ui-monospace, monospace; font-size: 12.5px; }
-  td.name { font-family: inherit; font-size: 13px; }
-  .status-ok { color: #3fb950; } .status-bad { color: #f85149; } .status-warn { color: #d29922; }
-  .mini { color: #8b949e; font-size: 11.5px; }
-  .actions { display: flex; gap: 6px; }
-  #msg { font-size: 13px; margin-top: 10px; min-height: 18px; }
-  .ok { color: #3fb950; } .err { color: #f85149; }
-  .empty { color: #8b949e; font-size: 13px; padding: 16px; text-align: center; }
-  .api-sample { background: #0d1117; border-radius: 6px; padding: 12px; font-family: ui-monospace, monospace; font-size: 12px; color: #a5d6ff; overflow-x: auto; white-space: pre; margin-top: 8px; }
-  .poolstat { display: inline-block; background: #1c2128; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12.5px; margin-right: 8px; }
-  .poolstat b { color: #79c0ff; }
+  :root {
+    --bg: #ebe4d3;
+    --ink: #1d1b17;
+    --mute: #7a725f;
+    --line: #1d1b17;
+    --hair: #cfc5ad;
+    --ok: #2f5d3a;
+    --warn: #8f6200;
+    --bad: #a8321f;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: "Inter", "Helvetica Neue", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; border-radius: 0 !important; }
+  html { background: var(--bg); }
+  body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 64px; }
+
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 28px 0 14px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font: 600 15px/1 var(--mono); letter-spacing: .02em; }
+  .live { font: 12px/1 var(--mono); color: var(--mute); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; background: var(--ink); display: inline-block; }
+  .dot.off { background: transparent; border: 1px solid var(--mute); }
+
+  .stats { display: grid; grid-template-columns: repeat(6, 1fr); border-bottom: 1px solid var(--line); }
+  .stat { padding: 18px 16px 16px 0; border-right: 1px solid var(--hair); margin-right: 16px; min-width: 0; }
+  .stat:last-child { border-right: 0; margin-right: 0; }
+  .stat b { display: block; font: 500 30px/1.05 var(--mono); letter-spacing: -.02em; }
+  .stat span { display: block; margin-top: 6px; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; }
+
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+  button { font: 500 12px/1 var(--mono); letter-spacing: .04em; color: var(--ink); background: transparent; border: 1px solid var(--line); padding: 9px 14px; cursor: pointer; transition: background .12s, color .12s; }
+  button:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.solid { background: var(--ink); color: var(--bg); }
+  button.solid:hover:not(:disabled) { background: transparent; color: var(--ink); }
+  button.sm { padding: 6px 10px; font-size: 11px; }
+  button.del { border-color: var(--hair); color: var(--bad); }
+  button.del:hover:not(:disabled) { background: var(--bad); border-color: var(--bad); color: var(--bg); }
+  #msg { font: 12px/1.4 var(--mono); color: var(--mute); margin-left: auto; text-align: right; }
+  #msg.ok { color: var(--ok); } #msg.err { color: var(--bad); }
+
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; padding: 14px 12px 10px 0; border-bottom: 1px solid var(--line); font-weight: 400; white-space: nowrap; }
+  td { padding: 14px 12px 14px 0; border-bottom: 1px solid var(--hair); vertical-align: middle; }
+  tr:last-child td { border-bottom: 1px solid var(--line); }
+  td.name { font-weight: 500; word-break: break-all; }
+  .id { font: 11px/1 var(--mono); color: var(--mute); margin-top: 4px; }
+  .mono { font: 12px/1.3 var(--mono); }
+  .tag { display: inline-flex; align-items: center; gap: 7px; font: 12px/1 var(--mono); }
+  .tag i { width: 7px; height: 7px; background: var(--ink); display: inline-block; }
+  .tag.ok i { background: var(--ok); } .tag.warn i { background: var(--warn); } .tag.bad i { background: var(--bad); }
+  .tag.warn { color: var(--warn); } .tag.bad { color: var(--bad); }
+  .meter { display: inline-block; width: 64px; height: 6px; border: 1px solid var(--line); vertical-align: middle; margin-right: 8px; position: relative; }
+  .meter u { position: absolute; inset: 0 auto 0 0; background: var(--ink); }
+  td.act { text-align: right; white-space: nowrap; }
+  td.act button { margin-left: 4px; }
+  .empty { padding: 28px 0; color: var(--mute); font: 12px/1 var(--mono); border-bottom: 1px solid var(--line); display: none; }
+
+  details { border-bottom: 1px solid var(--line); }
+  summary { cursor: pointer; padding: 14px 0; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "+ "; } details[open] summary::before { content: "− "; }
+  pre { margin: 0 0 16px; padding: 14px; border: 1px solid var(--hair); font: 12px/1.6 var(--mono); overflow-x: auto; white-space: pre; }
+  .note { font: 12px/1.6 var(--mono); color: var(--mute); margin: 0 0 16px; }
+
+  @media (max-width: 760px) {
+    .stats { grid-template-columns: repeat(3, 1fr); }
+    .stat:nth-child(3) { border-right: 0; margin-right: 0; }
+    .stat:nth-child(n+4) { border-top: 1px solid var(--hair); }
+    #msg { margin-left: 0; width: 100%; text-align: left; }
+  }
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>DeepSeek Harness</h1>
-  <div class="sub">Pool session DeepSeek Web → API OpenAI-compatible, thông minh xoay vòng, không cần browser lúc chạy</div>
+<div class="wrap">
+  <header>
+    <h1>ds-harness</h1>
+    <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
+  </header>
 
-  <div class="card">
-    <h2>🔐 Thêm account — login 1 nút</h2>
-    <ol class="steplist">
-      <li>Bấm <b>➕ Login account mới</b> — phần mềm tự mở tab DeepSeek trong Chrome</li>
-      <li>Login trong tab đó kiểu gì cũng được (Google / email / passkey)</li>
-      <li><b>Khum cần bấm gì nữa</b> — login xong phần mềm TỰ lưu session + TỰ tắt tab</li>
-      <li>Acc mới hiện ngay trong bảng dưới → làm lại từ bước 1 cho acc kế</li>
-    </ol>
-    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
-      <button style="background:#8957e5;margin-top:0" id="btnBuild" onclick="buildProfile()">🏗️ Build profile (nuôi như real user)</button>
-      <button style="background:#1f6feb;margin-top:0" id="btnLogin" onclick="loginStart()">➕ Login account mới</button>
-      <button style="background:#238636;margin-top:0" id="btnScan" onclick="captureAll()">🔍 Quét tabs & lưu session</button>
-    </div>
-    <div class="mini" style="margin-top:8px;color:#8b949e;font-size:12px">Quét tabs: lấy session từ Chrome đang login sẵn (CDP 9333), không mở tab mới. Build profile 1 lần đầu: Chrome login tự dạo web thật (~40s) để fingerprint trông tin cậy — đỡ lỗi "Current device environment error". Profile giữ nguyên giữa các lần login.</div>
+  <section class="stats" id="stats"></section>
+
+  <div class="bar">
+    <button class="solid" id="btnLogin" onclick="loginStart()">+ Login</button>
+    <button id="btnScan" onclick="captureAll()">Quét tab</button>
+    <button id="btnBuild" onclick="buildProfile()">Build profile</button>
     <div id="msg"></div>
   </div>
 
-  <div class="card">
-    <h2>Pool status</h2>
-    <div id="poolStats"></div>
-  </div>
-
-  <div class="card">
-    <h2>Accounts</h2>
+  <div class="tablewrap">
     <table>
-      <thead><tr><th>Account</th><th>Metrics</th><th>Trạng thái</th><th></th></tr></thead>
+      <thead><tr><th>Tài khoản</th><th>Tải</th><th>Trạng thái</th><th>ok / rỗng / lỗi</th><th></th></tr></thead>
       <tbody id="accBody"></tbody>
     </table>
-    <div id="empty" class="empty">Chưa có account nào — thêm bằng flow Google login ở trên.</div>
   </div>
+  <div id="empty" class="empty">Chưa có tài khoản. Bấm + Login.</div>
 
-  <div class="card">
-    <h2>API endpoint (OpenAI-compatible)</h2>
-    <div class="api-sample">curl http://127.0.0.1:8790/v1/chat/completions \
+  <details>
+    <summary>Thêm tài khoản</summary>
+    <p class="note">+ Login mở tab DeepSeek trong Chrome. Đăng nhập xong harness tự lưu session và tự đóng tab. Quét tab lấy session từ Chrome đang đăng nhập sẵn (CDP 9333). Build profile chạy một lần đầu (~40s) để giảm lỗi "Current device environment error".</p>
+  </details>
+
+  <details>
+    <summary>API</summary>
+<pre>curl http://127.0.0.1:8790/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-web","messages":[{"role":"user","content":"hello"}]}'
 
-# thinking: thêm "reasoning_effort":"max"  |  search: thêm "search": true</div>
-    <div class="sub" style="margin-top:10px">Model duy nhất: <code>deepseek-web</code> — mức suy nghĩ qua <code>reasoning_effort</code>: <code>none</code> (Nhanh) / <code>max</code> (DeepThink). Hỗ trợ ảnh.</div>
-  </div>
+model            deepseek-web   (text + ảnh)
+reasoning_effort none | auto | max
+search           true</pre>
+    <p class="note">none = nhanh · auto = nghĩ ở lượt người dùng, tắt khi nối tiếp sau tool · max = nghĩ mọi bước</p>
+  </details>
 </div>
 
 <script>
-const SIGN_IN_URL = 'https://chat.deepseek.com/sign_in';
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
-function copyLink(btn) {
-  navigator.clipboard.writeText(SIGN_IN_URL).then(() => {
-    btn.textContent = '✓ Đã copy';
-    setTimeout(() => btn.textContent = '📋 Copy link', 1500);
-  });
+function say(text, kind) { const m = $('msg'); m.textContent = text || ''; m.className = kind || ''; }
+
+async function post(url) {
+  const r = await fetch(url, {method: 'POST'});
+  return r.json();
 }
 
 async function buildProfile() {
-  const msg = document.getElementById('msg');
-  const btn = document.getElementById('btnBuild');
-  btn.disabled = true; btn.textContent = '⏳ Đang nuôi profile (~40s)…';
+  const b = $('btnBuild'); b.disabled = true; say('đang build ~40s…');
   try {
-    const r = await fetch('/api/build_profile', {method: 'POST'});
-    const d = await r.json();
-    if (!d.ok) { msg.textContent = '✗ ' + d.error; msg.className = 'err'; return; }
-    msg.textContent = '✓ ' + d.note; msg.className = 'ok';
-    setTimeout(() => {
-      btn.disabled = false; btn.textContent = '🏗️ Build profile (nuôi như real user)';
-      msg.textContent = '✓ Build profile xong (xem log) — giờ bấm Login account mới'; msg.className = 'ok';
-    }, 45000);
-  } catch (e) {
-    msg.textContent = 'Lỗi: ' + e.message; msg.className = 'err';
-    btn.disabled = false; btn.textContent = '🏗️ Build profile (nuôi như real user)';
-  }
+    const d = await post('/api/build_profile');
+    if (!d.ok) return say(d.error, 'err');
+    say(d.note || 'đã build', 'ok');
+  } catch (e) { say(e.message, 'err'); }
+  finally { setTimeout(() => { b.disabled = false; }, 45000); }
 }
 
 async function loginStart() {
-  const msg = document.getElementById('msg');
-  const btn = document.getElementById('btnLogin');
-  btn.disabled = true; btn.textContent = '⏳ Đang mở tab…';
+  const b = $('btnLogin'); b.disabled = true; say('đang mở tab…');
   try {
-    const r = await fetch('/api/login_start', {method: 'POST'});
-    const d = await r.json();
-    if (!d.ok) { msg.textContent = '✗ ' + d.error; msg.className = 'err'; return; }
-    msg.textContent = '✓ Tab DS đã mở — login trong đó, xong phần mềm tự lưu + tự tắt tab (canh tối đa 10 phút)';
-    msg.className = 'ok';
-    // poll accounts để thấy acc mới khi flow capture xong
+    const d = await post('/api/login_start');
+    if (!d.ok) return say(d.error, 'err');
+    say('tab DeepSeek đã mở — đăng nhập trong đó (tối đa 10 phút)', 'ok');
     const t = setInterval(loadStats, 2000);
     setTimeout(() => clearInterval(t), 660000);
-  } catch (e) {
-    msg.textContent = 'Lỗi: ' + e.message; msg.className = 'err';
-  } finally {
-    btn.disabled = false; btn.textContent = '➕ Login account mới';
-  }
-}
-
-async function loadStats() {
-  try {
-    const r = await fetch('/api/stats');
-    const d = await r.json();
-    const p = d.pool;
-    document.getElementById('poolStats').innerHTML =
-      `<span class="poolstat">Accounts: <b>${p.total}</b></span>` +
-      `<span class="poolstat">Available: <b>${p.available}</b></span>` +
-      `<span class="poolstat">Đang chạy: <b>${d.accounts.reduce((n, a) => n + (a.in_flight || 0), 0)}/${p.available * p.max_conc_per_acc}</b></span>` +
-      `<span class="poolstat">Capacity hint: <b>~${p.capacity_now_rpm_hint} calls/30s</b></span>`;
-    const tbody = document.getElementById('accBody');
-    tbody.innerHTML = '';
-    document.getElementById('empty').style.display = d.accounts.length ? 'none' : 'block';
-    for (const a of d.accounts) {
-      const tr = document.createElement('tr');
-      const st = a.last_status === 'ok' ? '<span class="status-ok">● ok</span>'
-        : (a.last_status || '').includes('refresh') ? '<span class="status-ok">● ok (refreshed)</span>'
-        : `<span class="status-bad">● ${a.last_status || '?'}</span>`;
-      const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
-      const cd = relogin
-        ? `<span class="status-bad">⚠ lỗi ${a.fail_streak} lần liên tiếp — nên đăng nhập lại</span>`
-        : a.cooldown_left_secs > 0
-          ? `<span class="status-warn">cooldown ${a.cooldown_left_secs}s${a.fail_streak ? ' · lỗi liên tiếp ' + a.fail_streak : ''}</span>`
-          : (a.in_flight > 0 ? `<span class="status-ok">đang chạy ${a.in_flight}</span>` : 'sẵn sàng');
-      const mini = `<div class="mini">ok ${a.total_ok} · empty ${a.total_empty} · err ${a.total_error}</div>`;
-      tr.innerHTML =
-        `<td class="name">${a.label}<div class="mini">id ${a.id.slice(0,8)}</div></td>` +
-        `<td>burst ${a.burst_count}/${a.burst_limit}<div class="mini">${cd}</div></td>` +
-        `<td>${st}${mini}</td>`;
-      const td = document.createElement('td');
-      const actions = document.createElement('div');
-      actions.className = 'actions';
-      const vbtn = document.createElement('button');
-      vbtn.className = 'ghost'; vbtn.style.cssText = 'padding:5px 10px;font-size:12px;margin:0';
-      vbtn.textContent = 'Verify'; vbtn.onclick = () => verify(a.id);
-      const rbtn = document.createElement('button');
-      rbtn.className = 'ghost'; rbtn.style.cssText = 'padding:5px 10px;font-size:12px;margin:0';
-      rbtn.title = 'Xoá lỗi/cooldown + phiên web đang giữ, kiểm tra lại token';
-      rbtn.textContent = 'Reset'; rbtn.onclick = async () => { await fetch('/api/accounts/' + a.id + '/reset', {method: 'POST'}); loadStats(); };
-      const dbtn = document.createElement('button');
-      dbtn.className = 'danger'; dbtn.textContent = 'Xoá'; dbtn.onclick = () => del(a.id);
-      actions.append(vbtn, rbtn, dbtn); td.append(actions); tr.append(td);
-      tbody.append(tr);
-    }
-  } catch (e) {}
-}
-
-async function loadAccounts() {
-  const r = await fetch('/api/accounts');
-  const d = await r.json();
-  const tbody = document.getElementById('accBody');
-  tbody.innerHTML = '';
-  document.getElementById('empty').style.display = d.accounts.length ? 'none' : 'block';
-  for (const a of d.accounts) {
-    const tr = document.createElement('tr');
-    const st = a.last_status === 'ok' ? '<span class="status-ok">● hoạt động</span>'
-      : '<span class="status-bad">● ' + (a.last_status || '?') + '</span>';
-    tr.innerHTML = `<td class="name">${a.label}</td><td><code>${a.token_prefix}…</code></td><td>${st}</td><td>${a.last_verified ? new Date(a.last_verified*1000).toLocaleTimeString() : '—'}</td>`;
-    const td = document.createElement('td');
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    const vbtn = document.createElement('button');
-    vbtn.className = 'ghost'; vbtn.style.cssText = 'padding:5px 10px;font-size:12px;margin:0';
-    vbtn.textContent = 'Verify'; vbtn.onclick = () => verify(a.id);
-    const dbtn = document.createElement('button');
-    dbtn.className = 'danger'; dbtn.textContent = 'Xoá'; dbtn.onclick = () => del(a.id);
-    actions.append(vbtn, dbtn); td.append(actions); tr.append(td);
-    tbody.append(tr);
-  }
+  } catch (e) { say(e.message, 'err'); }
+  finally { b.disabled = false; }
 }
 
 async function captureAll() {
-  const msg = document.getElementById('msg');
-  const btn = document.getElementById('btnScan');
-  btn.disabled = true; btn.textContent = '⏳ Đang quét…';
-  msg.textContent = ''; msg.className = '';
+  const b = $('btnScan'); b.disabled = true; say('đang quét…');
   try {
-    const r = await fetch('/api/capture', {method: 'POST'});
-    const d = await r.json();
-    if (!d.ok) { msg.textContent = '✗ ' + d.error; msg.className = 'err'; return; }
-    msg.textContent = `✓ ${d.action}: +${d.added} acc mới, ${d.refreshed} refresh — ${d.email || ''}`;
-    msg.className = 'ok';
+    const d = await post('/api/capture');
+    if (!d.ok) return say(d.error, 'err');
+    say(`${d.action}: +${d.added} mới, ${d.refreshed} làm mới${d.email ? ' · ' + d.email : ''}`, 'ok');
     loadStats();
-  } catch (e) {
-    msg.textContent = 'Lỗi: ' + e.message; msg.className = 'err';
-  } finally {
-    btn.disabled = false; btn.textContent = '🔍 Quét tabs & lưu session';
-  }
+  } catch (e) { say(e.message, 'err'); }
+  finally { b.disabled = false; }
 }
 
-async function addAccount() {
-  const msg = document.getElementById('msg');
-  msg.textContent = 'Đang verify token…'; msg.className = '';
-  try {
-    const session = JSON.parse(document.getElementById('session').value);
-    const label = document.getElementById('label').value;
-    const r = await fetch('/api/accounts', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({label, token: session.token, cookies: session.cookies || {}}),
-    });
-    const d = await r.json();
-    if (!r.ok) { msg.textContent = 'Lỗi: ' + (d.error || r.status); msg.className = 'err'; return; }
-    msg.textContent = 'Đã thêm account ✓'; msg.className = 'ok';
-    document.getElementById('session').value = '';
-    document.getElementById('label').value = '';
-    loadStats();
-  } catch (e) {
-    msg.textContent = 'JSON không hợp lệ: ' + e.message; msg.className = 'err';
-  }
-}
-
-async function verify(id) {
-  await fetch('/api/accounts/' + id + '/verify', {method: 'POST'});
-  loadStats();
-}
-
+async function verify(id) { await post('/api/accounts/' + id + '/verify'); loadStats(); }
+async function reset(id) { await post('/api/accounts/' + id + '/reset'); loadStats(); }
 async function del(id) {
-  if (!confirm('Xoá account này?')) return;
+  if (!confirm('Xoá tài khoản này?')) return;
   await fetch('/api/accounts/' + id, {method: 'DELETE'});
   loadStats();
 }
 
+function stat(value, label) {
+  const s = el('div', 'stat');
+  s.append(el('b', null, value), el('span', null, label));
+  return s;
+}
+
+function tag(kind, text) {
+  const t = el('span', 'tag ' + kind);
+  t.append(el('i'), document.createTextNode(text));
+  return t;
+}
+
+function row(a, perAcc) {
+  const tr = el('tr');
+
+  const name = el('td', 'name', a.label);
+  name.append(el('div', 'id', a.id.slice(0, 8)));
+
+  const load = el('td', 'mono');
+  const meter = el('span', 'meter'); const u = el('u');
+  u.style.width = Math.min(100, Math.round(((a.in_flight || 0) / perAcc) * 100)) + '%';
+  meter.append(u);
+  load.append(meter, document.createTextNode(`${a.in_flight || 0}/${perAcc}`));
+
+  const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
+  const st = el('td');
+  if (relogin) st.append(tag('bad', `lỗi ${a.fail_streak}× · đăng nhập lại`));
+  else if (a.cooldown_left_secs > 0) st.append(tag('warn', `nghỉ ${a.cooldown_left_secs}s` + (a.fail_streak ? ` · lỗi ${a.fail_streak}×` : '')));
+  else if (/ok/.test(a.last_status || '')) st.append(tag('ok', a.in_flight > 0 ? 'đang chạy' : 'sẵn sàng'));
+  else st.append(tag('bad', a.last_status || '?'));
+
+  const cnt = el('td', 'mono', `${a.total_ok} / ${a.total_empty} / ${a.total_error}`);
+
+  const act = el('td', 'act');
+  const mk = (text, cls, fn, title) => { const b = el('button', 'sm ' + cls, text); if (title) b.title = title; b.onclick = fn; return b; };
+  act.append(
+    mk('verify', '', () => verify(a.id)),
+    mk('reset', '', () => reset(a.id), 'xoá lỗi/cooldown và phiên web đang giữ, kiểm tra lại token'),
+    mk('xoá', 'del', () => del(a.id)),
+  );
+
+  tr.append(name, load, st, cnt, act);
+  return tr;
+}
+
+async function loadStats() {
+  try {
+    const d = await (await fetch('/api/stats')).json();
+    const p = d.pool, sf = p.stateful || {};
+    const running = d.accounts.reduce((n, a) => n + (a.in_flight || 0), 0);
+    const total = (sf.hits || 0) + (sf.misses || 0);
+    const hit = total ? Math.round((sf.hits / total) * 100) + '%' : '—';
+
+    const box = $('stats'); box.textContent = '';
+    box.append(
+      stat(`${p.available}/${p.total}`, 'tài khoản'),
+      stat(`${running}/${p.available * p.max_conc_per_acc}`, 'đang chạy'),
+      stat(String(p.capacity_now_rpm_hint), 'lượt / 30s'),
+      stat(hit, 'stateful hit'),
+      stat(String(sf.active_conversations ?? 0), 'hội thoại'),
+      stat(String(sf.open_sessions ?? 0), 'phiên web'),
+    );
+
+    const body = $('accBody'); body.textContent = '';
+    $('empty').style.display = d.accounts.length ? 'none' : 'block';
+    for (const a of d.accounts) body.append(row(a, p.max_conc_per_acc));
+
+    $('dot').className = 'dot';
+    $('liveTxt').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    $('dot').className = 'dot off';
+    $('liveTxt').textContent = 'mất kết nối';
+  }
+}
+
 loadStats();
-setInterval(loadStats, 15000);
+setInterval(loadStats, 5000);
 </script>
 </body>
 </html>
