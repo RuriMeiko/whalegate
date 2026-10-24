@@ -341,7 +341,7 @@ Dashboard (`/`) đếm token mỗi lượt hoàn tất (input không trúng cach
 
 ## Cấu hình trên dashboard
 
-Các giá trị `DS_*` hay chỉnh (stateful, dự đoán PoW, TTL phiên, trần ngữ cảnh, đồng thời mỗi acc, cooldown, múi giờ…) đổi được ngay trong mục **Cấu hình** của dashboard, có hiệu lực **không cần restart** (trừ khoản ghi "cần restart"). Hai nút ở đầu trang bật/tắt nhanh *stateful* và *dự đoán pow*.
+Nút **cài đặt** trên dashboard chỉ hiện các mục đã kiểm chứng hiệu lực: Stateful, Dự đoán PoW, Mức suy nghĩ mặc định, Cửa sổ ngữ cảnh, Trần prompt, Đồng thời mỗi tài khoản, Múi giờ. Các `DS_*` còn lại (burst, cooldown, TTL, hàng đợi…) vẫn chỉnh được bằng biến môi trường nhưng không hiện và không đặt được qua API, vì chưa được thử hiệu lực thật.
 
 - Lưu ở `settings.json` cạnh `accounts.json`; nút ↺ trả khoá về mặc định.
 - Thứ tự ưu tiên: giá trị đã lưu trên dashboard → biến môi trường `DS_*` → mặc định.
@@ -356,6 +356,6 @@ Trên dashboard, mục **Thêm tài khoản thủ công**: mở tab đã đăng 
 
 - **Log**: nút `log` ở đầu dashboard mở popup log realtime (SSE `GET /api/logs/stream`, vòng đệm 3000 dòng, lọc lỗi/req/conv/pow, tìm chữ, tạm dừng, copy). Mọi dòng vẫn ra stderr như cũ. `GET /api/logs?after=<seq>` để lấy dạng JSON.
 - **Popup**: log, thêm tài khoản và hộp xác nhận (xoá / reset / verify / hard reset / build profile) là popup; phía sau tan thành lưới ASCII thay vì blur (tắt hiệu ứng khi hệ điều hành bật "giảm chuyển động").
-- **Lưu cấu hình**: sửa trong mục Cấu hình chưa lưu ngay, hiện thanh *Lưu & khởi động lại khi rảnh* hoặc *Hard reset*. Lưu → ghi `settings.json` → đợi đến lúc không còn request nào → server tự khởi động lại (`exec` lại chính binary, cùng PID, nạp luôn bản build mới nếu có) → trang tự tải lại. Hard reset khởi động lại ngay và cắt request đang chạy. Trước khi khởi động lại, harness ghi đĩa và xoá các phiên web đang giữ để không để mồ côi trên DeepSeek.
+- **Lưu cấu hình**: sửa trong popup cài đặt chưa lưu ngay, cuối popup hiện nút *Lưu & áp dụng* (có *Hard reset* riêng khi không có thay đổi). Lưu → ghi `settings.json` → đợi đến lúc không còn request nào → server tự khởi động lại (`exec` lại chính binary, cùng PID, nạp luôn bản build mới nếu có) → trang tự tải lại. Hard reset khởi động lại ngay và cắt request đang chạy. Trước khi khởi động lại, harness ghi đĩa và xoá các phiên web đang giữ để không để mồ côi trên DeepSeek.
 - API: `POST /api/restart` với `{"mode":"idle" | "now" | "cancel"}`, `GET /api/restart` trả trạng thái chờ.
 - Log và `/api/*` chỉ cho loopback; nếu đặt reverse proxy trên cùng máy thì mọi request trông như loopback, nên đừng phơi dashboard ra ngoài.

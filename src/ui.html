@@ -6,727 +6,257 @@
 <title>ds-harness</title>
 <style>
   :root {
-    --bg: #ebe4d3;
-    --ink: #1d1b17;
-    --mute: #7a725f;
-    --hair: #cfc5ad;
-    --ok: #2f5d3a;
-    --warn: #8f6200;
-    --bad: #a8321f;
+    --bg: #ebe4d3; --ink: #1d1b17; --mute: #5f5846; --hair: #cfc5ad;
+    --ok: #2f5d3a; --warn: #7a5200; --bad: #a8321f;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     --sans: "Inter", "Helvetica Neue", system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   * { box-sizing: border-box; border-radius: 0 !important; }
   html { background: var(--bg); }
   body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
-  .wrap { max-width: 1280px; margin: 0 auto; padding: 0 16px 48px; padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px 40px; }
 
-  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 20px 0 12px; }
-  h1 { margin: 0; font: 600 15px/1 var(--mono); letter-spacing: .02em; }
-  .live { font: 12px/1 var(--mono); color: var(--mute); display: flex; align-items: center; gap: 8px; }
+  /* thanh trên */
+  header { display: flex; align-items: center; gap: 10px; padding: 18px 0 12px; }
+  h1 { margin: 0; font: 600 15px/1 var(--mono); flex: 1; }
+  .live { font: 12px/1 var(--mono); color: var(--mute); display: flex; align-items: center; gap: 7px; margin-right: 6px; }
   .dot { width: 8px; height: 8px; background: var(--ink); display: inline-block; }
   .dot.off { background: transparent; border: 1px solid var(--mute); }
 
-  /* lưới dashboard: các ô chung đường kẻ 1px */
-  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 0; border-top: 1px solid var(--ink); border-left: 1px solid var(--ink); }
+  /* ô */
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); border-top: 1px solid var(--ink); border-left: 1px solid var(--ink); }
   .cell { border-right: 1px solid var(--ink); border-bottom: 1px solid var(--ink); padding: 14px 16px 16px; min-width: 0; }
-  .c2 { grid-column: span 2; } .c3 { grid-column: span 3; } .c4 { grid-column: span 4; } .c5 { grid-column: span 5; }
-  .c6 { grid-column: span 6; } .c7 { grid-column: span 7; } .c8 { grid-column: span 8; } .c12 { grid-column: span 12; }
-
-  .lab { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; display: flex; justify-content: space-between; gap: 8px; }
+  .k { grid-column: span 3; } .c8 { grid-column: span 8; } .c4 { grid-column: span 4; } .c12 { grid-column: span 12; }
+  .lab { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 20px; }
   .lab em { font-style: normal; text-transform: none; letter-spacing: 0; }
   .big { font: 500 28px/1.05 var(--mono); letter-spacing: -.02em; word-break: break-all; }
   .sub { font: 12px/1.4 var(--mono); color: var(--mute); margin-top: 8px; }
   .good { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
 
-  /* biểu đồ cột */
-  .bars { display: flex; align-items: flex-end; gap: 3px; height: 110px; }
+  /* biểu đồ */
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 96px; }
   .bars .col { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
-  .bars .seg { width: 100%; }
   .seg.in { background: var(--ink); } .seg.hit { background: var(--hair); } .seg.out { background: var(--bad); }
-  .bars .tick { height: 3px; margin-top: 3px; background: var(--hair); flex: none; }
-  .bars .tick.pk { background: var(--bad); }
+  .bars .tick { height: 3px; margin-top: 3px; background: var(--hair); flex: none; } .bars .tick.pk { background: var(--bad); }
   .axis { display: flex; gap: 3px; margin-top: 4px; font: 10px/1 var(--mono); color: var(--mute); }
-  .axis span { flex: 1; text-align: left; white-space: nowrap; overflow: visible; min-width: 0; }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; font: 11px/1 var(--mono); color: var(--mute); margin-top: 10px; }
-  .legend i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; vertical-align: -1px; }
-
-  /* lịch giá */
-  .sched { display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; }
-  .sched b { height: 22px; background: var(--hair); display: block; }
-  .sched b.pk { background: repeating-linear-gradient(135deg, var(--bad) 0 3px, transparent 3px 6px); border: 1px solid var(--bad); }
-  .sched b.now { outline: 2px solid var(--ink); outline-offset: 1px; }
+  .axis span { flex: 1; white-space: nowrap; min-width: 0; }
 
   table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; padding: 0 10px 10px 0; border-bottom: 1px solid var(--ink); font-weight: 400; white-space: nowrap; }
-  th.r, td.r { text-align: right; padding-right: 0; }
-  td { padding: 10px 10px 10px 0; border-bottom: 1px solid var(--hair); vertical-align: middle; font: 12.5px/1.3 var(--mono); }
-  tr:last-child td { border-bottom: 0; }
-  td.name { font: 500 13px/1.3 var(--sans); word-break: break-all; }
-  .id { font: 11px/1 var(--mono); color: var(--mute); margin-top: 3px; }
-  .tag { display: inline-flex; align-items: center; gap: 7px; font: 12px/1 var(--mono); white-space: nowrap; }
-  .tag i { width: 7px; height: 7px; background: var(--ink); display: inline-block; }
-  .tag.ok i { background: var(--ok); } .tag.warn i { background: var(--warn); } .tag.bad i { background: var(--bad); }
-  .tag.warn { color: var(--warn); } .tag.bad { color: var(--bad); }
-  .meter { display: inline-block; width: 44px; height: 6px; border: 1px solid var(--ink); vertical-align: middle; margin-right: 8px; position: relative; }
-  .meter u { position: absolute; inset: 0 auto 0 0; background: var(--ink); }
-  td.act { text-align: right; white-space: nowrap; }
-  td.act button { margin-left: 4px; }
-  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .empty { color: var(--mute); font: 12px/1 var(--mono); padding: 12px 0 0; display: none; }
+  td { padding: 8px 0; border-bottom: 1px solid var(--hair); font: 12.5px/1.3 var(--mono); }
+  tr:last-child td { border-bottom: 0; } td.r { text-align: right; }
+
+  /* tài khoản: một dòng, bấm để mở thao tác */
+  .acc { border-bottom: 1px solid var(--hair); }
+  .acc:last-child { border-bottom: 0; }
+  .acc > .hd { display: flex; align-items: center; gap: 10px; padding: 11px 0; cursor: pointer; min-height: 44px; width: 100%; text-align: left; background: none; border: 0; font: inherit; color: inherit; letter-spacing: 0; }
+  .acc > .hd:hover:not(:disabled) { background: none; color: inherit; }
+  .acc .nm { flex: 1; min-width: 0; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acc .st { font: 12px/1 var(--mono); color: var(--mute); white-space: nowrap; }
+  .acc .st.bad { color: var(--bad); } .acc .st.warn { color: var(--warn); } .acc .st.run { color: var(--ink); }
+  .sq { width: 8px; height: 8px; background: var(--ok); flex: none; } .sq.bad { background: var(--bad); } .sq.warn { background: var(--warn); }
+  .acc .more { display: none; padding: 0 0 12px 18px; gap: 8px; align-items: center; flex-wrap: wrap; font: 12px/1.3 var(--mono); color: var(--mute); }
+  .acc.open .more { display: flex; }
+  .acc .more .sp { flex: 1; min-width: 12px; }
 
   button { font: 500 12px/1 var(--mono); letter-spacing: .04em; color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 9px 14px; cursor: pointer; transition: background .12s, color .12s; touch-action: manipulation; }
   button:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
   button:disabled { opacity: .4; cursor: default; }
-  button.solid { background: var(--ink); color: var(--bg); }
-  button.solid:hover:not(:disabled) { background: transparent; color: var(--ink); }
-  button.sm { padding: 6px 10px; font-size: 11px; }
-  button.del { border-color: var(--hair); color: var(--bad); }
-  button.del:hover:not(:disabled) { background: var(--bad); border-color: var(--bad); color: var(--bg); }
-  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-
-
-  /* cấu hình */
-  .chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .chip { font: 500 11px/1 var(--mono); letter-spacing: .06em; padding: 7px 10px; border: 1px solid var(--ink); background: transparent; color: var(--ink); cursor: pointer; text-transform: uppercase; }
-  .chip i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; background: transparent; border: 1px solid var(--ink); vertical-align: 0; }
-  .chip.on { background: var(--ink); color: var(--bg); } .chip.on i { background: var(--bg); border-color: var(--bg); }
-  .chip.dirty { outline: 2px solid var(--warn); outline-offset: 1px; }
-  .cfg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
-  .cfg > div { padding: 0 16px 0 0; }
-  .cfg h4 { margin: 0 0 6px; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; font-weight: 400; padding-bottom: 8px; border-bottom: 1px solid var(--ink); }
-  .row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 9px 0; border-bottom: 1px solid var(--hair); align-items: center; }
-  .row .t { font: 12px/1.35 var(--sans); }
-  .row .k { font: 10px/1 var(--mono); color: var(--mute); margin-top: 3px; word-break: break-all; }
-  .row .k b { color: var(--warn); font-weight: 400; }
-  .ctl { display: flex; align-items: center; gap: 6px; }
-  .ctl input, .ctl select { font: 12px/1 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 6px 7px; width: 96px; text-align: right; outline: none; border-radius: 0; }
-  .ctl select { width: auto; text-align: left; }
-  .ctl input:focus, .ctl select:focus { background: #f4efe2; }
-  .ctl input.bad { border-color: var(--bad); color: var(--bad); }
-  .ctl .u { font: 10px/1 var(--mono); color: var(--mute); min-width: 28px; }
-  .ctl .x { border: 0; padding: 4px 6px; font-size: 12px; color: var(--mute); }
-  .sw { width: 38px; height: 20px; border: 1px solid var(--ink); background: transparent; padding: 0; position: relative; }
-  .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; background: var(--ink); transition: left .12s; }
-  .sw.on { background: var(--ink); } .sw.on::after { left: 20px; background: var(--bg); }
-  .sw:hover:not(:disabled) { background: transparent; } .sw.on:hover:not(:disabled) { background: var(--ink); }
-
-  textarea, #lblIn { font: 12px/1.5 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 8px 10px; width: 100%; outline: none; border-radius: 0; resize: vertical; margin-top: 10px; }
-  #lblIn { margin: 0; flex: 1; min-width: 160px; width: auto; }
-  textarea:focus, #lblIn:focus { background: #f4efe2; }
-  code { font: 12px/1 var(--mono); border: 1px solid var(--hair); padding: 2px 5px; }
-
-  /* thông báo nổi (không chen vào thanh nút) */
-  #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: min(420px, calc(100vw - 32px)); pointer-events: none; }
-  .toast { pointer-events: auto; background: var(--bg); border: 1px solid var(--ink); border-left-width: 6px; padding: 10px 12px; font: 12px/1.45 var(--mono); display: flex; gap: 12px; align-items: flex-start; box-shadow: 4px 4px 0 var(--ink); }
-  .toast.ok { border-left-color: var(--ok); } .toast.err { border-left-color: var(--bad); } .toast.wait { border-left-color: var(--warn); }
-  .toast span { flex: 1; word-break: break-word; }
-  .toast b { cursor: pointer; font-weight: 400; color: var(--mute); padding: 0 2px; }
+  button.solid { background: var(--ink); color: var(--bg); } button.solid:hover:not(:disabled) { background: transparent; color: var(--ink); }
+  button.sm { padding: 7px 11px; font-size: 11px; }
+  button.del { border-color: var(--bad); color: var(--bad); } button.del:hover:not(:disabled) { background: var(--bad); color: var(--bg); }
+  button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); } button.danger:hover:not(:disabled) { background: transparent; color: var(--bad); }
+  button.ghost { border-color: transparent; color: var(--mute); padding-left: 4px; padding-right: 4px; } button.ghost:hover:not(:disabled) { background: transparent; color: var(--ink); text-decoration: underline; }
+  button.ghost.bad { color: var(--bad); } button.ghost.bad:hover:not(:disabled) { color: var(--bad); }
+  .empty { color: var(--mute); font: 12px/1.4 var(--mono); padding: 6px 0; }
 
   /* popup + lớp phủ ASCII */
   #veil { position: fixed; inset: 0; z-index: 39; pointer-events: none; display: none; }
   .modal { position: fixed; inset: 0; z-index: 40; display: none; padding: 24px; align-items: center; justify-content: center; }
   .modal.open { display: flex; animation: pop .18s steps(4) both; }
+  #cfmModal { z-index: 42; }
   @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-  @media (prefers-reduced-motion: reduce) { .modal.open { animation: none; } }
-  .dlg { background: var(--bg); border: 1px solid var(--ink); width: min(560px, 100%); box-shadow: 6px 6px 0 var(--ink); padding: 0; }
-  .dlg .top { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--ink); }
-  .dlg .top h2 { margin: 0; font: 600 13px/1 var(--mono); flex: 1; }
-  .dlg .inner { padding: 14px 14px 16px; }
-  .dlg .inner .note { margin: 0 0 4px; }
-  .lp { background: var(--bg); border: 1px solid var(--ink); height: 100%; width: 100%; display: flex; flex-direction: column; box-shadow: 6px 6px 0 var(--ink); max-width: 1400px; margin: 0 auto; }
-  .lp .top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--ink); }
-  .lp .top h2 { margin: 0 8px 0 0; font: 600 13px/1 var(--mono); }
-  .lp .top .sp { flex: 1; }
-  .lp input[type=text] { font: 12px/1 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 7px 9px; width: 180px; outline: none; border-radius: 0; }
-  .lp input[type=text]:focus { background: #f4efe2; }
-  .lp .body { flex: 1; overflow: auto; padding: 8px 12px 12px; font: 12px/1.55 var(--mono); -webkit-overflow-scrolling: touch; position: relative; }
+  @media (prefers-reduced-motion: reduce) { .modal.open { animation: none; } button { transition: none; } }
+  .dlg { background: var(--bg); border: 1px solid var(--ink); width: min(540px, 100%); max-height: 100%; display: flex; flex-direction: column; box-shadow: 6px 6px 0 var(--ink); }
+  .dlg.log { width: min(1280px, 100%); height: 100%; }
+  .dlg .top { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--ink); flex-wrap: wrap; }
+  .dlg .top h2 { margin: 0; font: 600 13px/1 var(--mono); flex: 1; white-space: nowrap; }
+  .dlg .inner { padding: 14px; overflow: auto; flex: 1; -webkit-overflow-scrolling: touch; }
+  .dlg .foot { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--ink); font: 12px/1.4 var(--mono); flex-wrap: wrap; }
+  .dlg .foot .sp, .sp { flex: 1; min-width: 6px; }
+  .dlg p { margin: 0 0 12px; font: 13px/1.55 var(--sans); }
+  .dlg .btns { display: flex; justify-content: flex-end; gap: 8px; }
+  textarea, input[type=text], input[type=number], select { font: 12px/1.4 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 8px 10px; outline: none; }
+  textarea:focus, input:focus, select:focus { background: #f4efe2; outline: 2px solid var(--ink); outline-offset: 1px; }
+  textarea { width: 100%; resize: vertical; }
+  code { font: 12px/1 var(--mono); border: 1px solid var(--hair); padding: 2px 5px; }
+
+  /* cài đặt */
+  .row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--hair); min-height: 48px; }
+  .row:last-child { border-bottom: 0; }
+  .row .t { flex: 1; font: 13px/1.35 var(--sans); min-width: 0; }
+  .row .t small { display: block; font: 11px/1.3 var(--mono); color: var(--mute); margin-top: 2px; }
+  .row.dirty { border-left: 3px solid var(--warn); padding-left: 8px; }
+  .row .u { font: 11px/1 var(--mono); color: var(--mute); }
+  .row input[type=number] { width: 112px; text-align: right; } .row select { padding: 7px 8px; }
+  .row .x { border: 0; padding: 6px; color: var(--mute); }
+  .sw { width: 40px; height: 22px; padding: 0; position: relative; flex: none; }
+  .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; background: var(--ink); transition: left .12s; }
+  .sw.on { background: var(--ink); } .sw.on::after { left: 21px; background: var(--bg); }
+  .sw:hover:not(:disabled), .sw.on:hover:not(:disabled) { background: transparent; } .sw.on:hover:not(:disabled) { background: var(--ink); }
+
+  /* log */
+  .lbody { flex: 1; overflow: auto; padding: 8px 12px 12px; font: 12px/1.55 var(--mono); position: relative; -webkit-overflow-scrolling: touch; }
   .ll { display: flex; gap: 10px; padding: 1px 0; border-bottom: 1px dotted var(--hair); }
-  .ll time { color: var(--mute); flex: none; }
-  .ll span { white-space: pre-wrap; word-break: break-word; min-width: 0; }
+  .ll time { color: var(--mute); flex: none; } .ll span { white-space: pre-wrap; word-break: break-word; min-width: 0; }
   .ll.err span { color: var(--bad); } .ll.warn span { color: var(--warn); } .ll.dim span { color: var(--mute); }
-  .lp .foot2 { display: flex; justify-content: space-between; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--ink); font: 11px/1 var(--mono); color: var(--mute); }
   #logJump { position: absolute; right: 16px; bottom: 12px; display: none; }
   .fchip.on { background: var(--ink); color: var(--bg); }
-  .tuned { font: 12px/1.6 var(--mono); color: var(--mute); border: 1px solid var(--hair); padding: 8px 10px; margin-bottom: 14px; }
-  .tuned b { color: var(--warn); font-weight: 500; }
-  @media (max-width: 720px) {
-    #saveBar { left: 12px; right: 12px; transform: none; bottom: 12px; }
-    .modal { padding: 0; } .dlg { width: 100%; box-shadow: none; } .lp { box-shadow: none; border: 0; } .lp input[type=text] { width: 100%; }
-    #toasts { left: 12px; right: 12px; bottom: 12px; max-width: none; } .ll { flex-direction: column; gap: 0; }
+  #logQ { width: 160px; }
+
+  /* thông báo */
+  #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: min(400px, calc(100vw - 32px)); pointer-events: none; }
+  .toast { pointer-events: auto; background: var(--bg); border: 1px solid var(--ink); border-left-width: 6px; padding: 10px 12px; font: 12px/1.45 var(--mono); display: flex; gap: 12px; align-items: flex-start; box-shadow: 4px 4px 0 var(--ink); }
+  .toast.ok { border-left-color: var(--ok); } .toast.err { border-left-color: var(--bad); } .toast.wait { border-left-color: var(--warn); }
+  .toast span { flex: 1; word-break: break-word; } .toast b { cursor: pointer; font-weight: 400; color: var(--mute); padding: 0 4px; }
+
+  @media (max-width: 860px) { .k { grid-column: span 6; } .c8, .c4 { grid-column: span 12; } }
+  @media (max-width: 560px) {
+    .wrap { padding: 0 12px 32px; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
+    .modal { padding: 0; } .dlg, .dlg.log { width: 100%; height: 100%; max-height: none; box-shadow: none; border: 0; }
+    .modal:not(#logModal):not(#setModal) .dlg { height: auto; max-height: 100%; align-self: flex-end; border-top: 1px solid var(--ink); }
+    .ll { flex-direction: column; gap: 0; } #logQ { width: 100%; order: 9; }
+    #toasts { left: 12px; right: 12px; bottom: 12px; max-width: none; }
   }
-
-
-  #cfmModal { z-index: 42; }
-  .dlg .inner p { margin: 0 0 14px; font: 13px/1.55 var(--sans); }
-  .dlg .btns { display: flex; justify-content: flex-end; gap: 8px; }
-  button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); }
-  button.danger:hover:not(:disabled) { background: transparent; color: var(--bad); }
-  #saveBar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 45; background: var(--bg); border: 1px solid var(--ink); box-shadow: 5px 5px 0 var(--ink); padding: 10px 12px; display: none; align-items: center; gap: 10px; flex-wrap: wrap; font: 12px/1.4 var(--mono); max-width: calc(100vw - 24px); }
-  #saveBar.show { display: flex; }
-  #saveBar .sp { flex: 1; min-width: 8px; }
-  .row.dirty { border-left: 3px solid var(--warn); padding-left: 8px; }
-  .lab .links { display: flex; gap: 8px; }
-
-  details summary { cursor: pointer; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; list-style: none; padding: 2px 0; }
-  details summary::-webkit-details-marker { display: none; }
-  details summary::before { content: "+ "; } details[open] summary::before { content: "− "; }
-  pre { margin: 12px 0 0; padding: 12px; border: 1px solid var(--hair); font: 12px/1.6 var(--mono); overflow-x: auto; white-space: pre; }
-  .note { font: 12px/1.6 var(--mono); color: var(--mute); margin: 12px 0 0; }
-  .foot { font: 11px/1.5 var(--mono); color: var(--mute); margin-top: 14px; }
-
-  @media (max-width: 1100px) {
-    .cfg { grid-template-columns: repeat(2, 1fr); gap: 18px 0; }
-    .c8, .c7, .c5, .c4 { grid-column: span 6; }
-    .c3 { grid-column: span 6; }
-    .c2 { grid-column: span 4; }
-  }
-  @media (max-width: 720px) {
-    .c2, .c3, .c4, .c5, .c6, .c7, .c8 { grid-column: span 12; }
-    .k { grid-column: span 6; }            /* ô số liệu nhỏ: 2 cột trên điện thoại */
-    .big { font-size: 24px; }
-    .cell { padding: 12px 12px 14px; }
-    .bars { height: 90px; }
-    .hide-s { display: none; }
-    .cfg { grid-template-columns: 1fr; gap: 18px; } .cfg > div { padding-right: 0; }
-    /* bảng tài khoản → mỗi tài khoản là một khối, không phải cuộn ngang */
-    #accTable thead { display: none; }
-    #accTable tr { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--hair); align-items: center; }
-    #accTable tr:last-child { border-bottom: 0; }
-    #accTable td { padding: 0; border: 0; }
-    #accTable td.n { grid-column: 1 / -1; }
-    #accTable td.a { grid-column: 1 / -1; text-align: left; }
-    #accTable td.a button { margin: 0 6px 0 0; }
-  }
+  @media (pointer: coarse) { button { min-height: 44px; } button.sm { min-height: 40px; } }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>ds-harness</h1>
-    <div class="chips">
-      <button class="chip" id="chipStateful" onclick="toggleCfg('DS_STATEFUL')"><i></i>stateful</button>
-      <button class="chip" id="chipPow" onclick="toggleCfg('DS_POW_PREFETCH')"><i></i>dự đoán pow</button>
-      <button class="chip" onclick="openLog()">log</button>
-    </div>
     <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
+    <button class="sm" onclick="openLog()">log</button>
+    <button class="sm" onclick="openSettings()">cài đặt</button>
   </header>
 
   <main class="grid">
-    <!-- hàng 1: số liệu chính -->
-    <div class="cell c2 k"><div class="lab">Token hôm nay</div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
-    <div class="cell c2 k"><div class="lab">Tiết kiệm hôm nay</div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
-    <div class="cell c2 k"><div class="lab">Dự toán tháng</div><div class="big good" id="kMonth">—</div><div class="sub" id="kMonthSub"></div></div>
-    <div class="cell c2 k"><div class="lab">Giá hiện tại</div><div class="big" id="kNow">—</div><div class="sub" id="kNowSub"></div></div>
-    <div class="cell c2 k"><div class="lab">Cache hit</div><div class="big" id="kHit">—</div><div class="sub" id="kHitSub"></div></div>
-    <div class="cell c2 k"><div class="lab">Tài khoản</div><div class="big" id="kAcc">—</div><div class="sub" id="kAccSub"></div></div>
+    <div class="cell k"><div class="lab">Token hôm nay</div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
+    <div class="cell k"><div class="lab">Tiết kiệm hôm nay</div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
+    <div class="cell k"><div class="lab">Giá hiện tại</div><div class="big" id="kNow">—</div><div class="sub" id="kNowSub"></div></div>
+    <div class="cell k"><div class="lab">Tài khoản</div><div class="big" id="kAcc">—</div><div class="sub" id="kAccSub"></div></div>
 
-    <!-- hàng 2: biểu đồ + bảng giá -->
     <div class="cell c8">
       <div class="lab">24 giờ qua <em id="h24sum"></em></div>
       <div class="bars" id="bars24"></div>
       <div class="axis" id="axis24"></div>
-      <div class="legend"><span><i style="background:var(--ink)"></i>input</span><span><i style="background:var(--hair)"></i>cached</span><span><i style="background:var(--bad)"></i>output</span><span><i style="background:var(--bad);height:3px;vertical-align:2px"></i>cao điểm</span></div>
     </div>
     <div class="cell c4">
-      <div class="lab">Giá API rẻ nhất <em id="pSrc"></em></div>
-      <table>
-        <thead><tr><th id="pModel">model</th><th class="r">thấp</th><th class="r">cao</th></tr></thead>
-        <tbody id="pBody"></tbody>
-      </table>
-      <div class="foot">USD / 1M token</div>
-    </div>
-
-    <!-- hàng 3: chi phí -->
-    <div class="cell c5">
-      <div class="lab">Chi phí tương đương <em>nếu trả tiền API</em></div>
-      <div class="scroll"><table>
-        <thead><tr><th></th><th class="r">token</th><th class="r">chi phí</th><th class="r hide-s">cao điểm</th></tr></thead>
-        <tbody id="cBody"></tbody>
-      </table></div>
-      <div class="foot" id="cFoot"></div>
-    </div>
-    <div class="cell c4">
-      <div class="lab">14 ngày <em id="d14sum"></em></div>
-      <div class="bars" id="bars14"></div>
-      <div class="axis" id="axis14"></div>
-    </div>
-    <div class="cell c3">
-      <div class="lab">Lịch giá 24h tới <em id="schedSum"></em></div>
-      <div class="sched" id="sched"></div>
-      <div class="axis" id="schedAxis" style="margin-top:6px"></div>
-      <div class="legend"><span><i style="background:var(--hair)"></i>thấp điểm</span><span><i style="background:var(--bad)"></i>cao điểm ×2</span></div>
-    </div>
-
-    <!-- hàng 4: tài khoản -->
-    <div class="cell c12">
-      <div class="actions" style="margin-bottom:14px">
-        <div class="lab" style="margin:0;flex:1">Tài khoản</div>
-        <button class="solid sm" id="btnLogin" onclick="loginStart()">+ Login</button>
-        <button class="sm" onclick="openAdd()">+ Thêm tay</button>
-        <button class="sm" id="btnScan" onclick="captureAll()">Quét tab</button>
-        <button class="sm" id="btnBuild" onclick="buildProfile()">Build profile</button>
-      </div>
-      <div class="scroll"><table id="accTable">
-        <thead><tr><th>Tài khoản</th><th>Tải</th><th>Trạng thái</th><th class="hide-s">ok / rỗng / lỗi</th><th></th></tr></thead>
-        <tbody id="accBody"></tbody>
-      </table></div>
-      <div id="empty" class="empty">Chưa có tài khoản. Bấm + Login.</div>
+      <div class="lab">Chi phí nếu trả API</div>
+      <table><tbody id="cBody"></tbody></table>
+      <div class="sub" id="pLine"></div>
     </div>
 
     <div class="cell c12">
-      <div class="lab"><span>Cấu hình</span><span class="links"><button class="sm" onclick="restartFlow('idle')">Khởi động lại khi rảnh</button><button class="sm del" onclick="restartFlow('now')">Hard reset</button></span></div>
-      <div class="tuned"><b>Mặc định đã được tối ưu sẵn</b> và đã đo trên dsh thật (stateful, dự đoán PoW, mức suy nghĩ, ngữ cảnh 500K…). Đổi giá trị = tự chịu: tăng đồng thời mỗi tài khoản hay nới burst dễ bị DeepSeek giới hạn/khoá; hạ TTL hay trần ngữ cảnh làm mất stateful, chậm hơn. Sửa xong bấm <b>Lưu</b>: server đợi hết request rồi tự khởi động lại để áp dụng; hoặc Hard reset để khởi động lại ngay (cắt các request đang chạy). Nút ↺ trả về mặc định.</div>
-      <div class="cfg" id="cfg"></div>
-    </div>
-
-
-    <div class="cell c12">
-      <details><summary>API</summary>
-<pre>curl http://127.0.0.1:8790/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-web","messages":[{"role":"user","content":"hello"}]}'
-
-model            deepseek-web   (text + ảnh)
-reasoning_effort none | auto | max</pre>
-        <p class="note">none = nhanh · auto = nghĩ ở lượt người dùng, tắt khi nối tiếp sau tool · max = nghĩ mọi bước</p>
-      </details>
+      <div class="lab"><span>Tài khoản</span><button class="sm solid" onclick="openAdd()">+ Thêm</button></div>
+      <div id="accList"></div>
+      <div id="empty" class="empty" style="display:none">Chưa có tài khoản.</div>
     </div>
   </main>
 </div>
 
+<canvas id="veil"></canvas>
+
+<!-- thêm tài khoản -->
 <div id="addModal" class="modal" onclick="if(event.target===this)closeAdd()">
   <div class="dlg">
-    <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" onclick="closeAdd()">×</button></div>
+    <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeAdd()">×</button></div>
     <div class="inner">
-      <p class="note">Trên tab đã đăng nhập chat.deepseek.com: F12 → Console → gõ <code>copy(localStorage.userToken)</code> → dán vào ô dưới. Chỉ cần token, không cần cookie.</p>
-      <textarea id="tokIn" rows="4" spellcheck="false" autocomplete="off" placeholder='{"value":"…","__version":"0"}  hoặc token trần'></textarea>
-      <div class="actions" style="margin-top:10px">
-        <input id="lblIn" placeholder="nhãn (bỏ trống = email)" autocomplete="off">
-        <button class="solid sm" id="btnAdd" onclick="addManual()">Thêm</button>
-      </div>
+      <p>Dán <code>localStorage.userToken</code> từ tab đã đăng nhập chat.deepseek.com (Console: <code>copy(localStorage.userToken)</code>).</p>
+      <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder='{"value":"…"} hoặc token trần'></textarea>
+      <div class="btns" style="margin-top:10px"><input type="text" id="lblIn" style="flex:1;min-width:0" placeholder="nhãn (tuỳ chọn)" aria-label="Nhãn" autocomplete="off"><button class="solid" id="btnAdd" onclick="addManual()">Thêm</button></div>
+    </div>
+    <div class="foot">
+      <button class="ghost sm" id="btnLogin" onclick="loginStart()">Đăng nhập qua Chrome</button>
+      <button class="ghost sm" id="btnScan" onclick="captureAll()">Quét tab Chrome</button>
+      <span class="sp"></span>
+      <button class="ghost sm" id="btnBuild" onclick="buildProfile()">Build profile</button>
     </div>
   </div>
 </div>
-<div id="cfmModal" class="modal" onclick="if(event.target===this)askDone(false)">
+
+<!-- cài đặt -->
+<div id="setModal" class="modal" onclick="if(event.target===this)closeSettings()">
   <div class="dlg">
-    <div class="top"><h2 id="cfmTitle"></h2><button class="sm" onclick="askDone(false)">×</button></div>
-    <div class="inner"><p id="cfmText"></p><div class="btns"><button class="sm" onclick="askDone(false)">Huỷ</button><button class="sm solid" id="cfmOk" onclick="askDone(true)">OK</button></div></div>
+    <div class="top"><h2>Cài đặt</h2><button class="sm solid" aria-label="Đóng" onclick="closeSettings()">×</button></div>
+    <div class="inner" id="cfg"></div>
+    <div class="foot" id="cfgFoot"></div>
   </div>
 </div>
-<div id="saveBar"></div>
-<div id="toasts"></div>
-<canvas id="veil"></canvas>
+
+<!-- log -->
 <div id="logModal" class="modal" onclick="if(event.target===this)closeLog()">
-  <div class="lp">
+  <div class="dlg log">
     <div class="top">
       <h2>log <span id="logState" style="font-weight:400;color:var(--mute)"></span></h2>
       <button class="sm fchip on" data-f="all" onclick="logFilter(this)">tất cả</button>
       <button class="sm fchip" data-f="err" onclick="logFilter(this)">lỗi</button>
-      <button class="sm fchip" data-f="req" onclick="logFilter(this)">req</button>
-      <button class="sm fchip" data-f="conv" onclick="logFilter(this)">conv</button>
-      <button class="sm fchip" data-f="pow" onclick="logFilter(this)">pow</button>
-      <input type="text" id="logQ" placeholder="lọc…" oninput="logRender()" autocomplete="off">
-      <span class="sp"></span>
+      <input type="text" id="logQ" placeholder="lọc…" aria-label="Lọc log" oninput="logRender()" autocomplete="off">
       <button class="sm" id="logPause" onclick="logTogglePause()">tạm dừng</button>
-      <button class="sm" onclick="logClear()">xoá</button>
       <button class="sm" onclick="logCopy()">copy</button>
-      <button class="sm solid" onclick="closeLog()">×</button>
+      <button class="sm solid" aria-label="Đóng" onclick="closeLog()">×</button>
     </div>
-    <div class="body" id="logBody"><button class="sm solid" id="logJump" onclick="logBottom(true)">↓ mới</button></div>
-    <div class="foot2"><span id="logCount"></span><span>Esc để đóng</span></div>
+    <div class="lbody" id="logBody"><button class="sm solid" id="logJump" onclick="logBottom(true)">↓ mới</button></div>
   </div>
 </div>
+
+<!-- xác nhận -->
+<div id="cfmModal" class="modal" role="alertdialog" aria-labelledby="cfmTitle" onclick="if(event.target===this)askDone(false)">
+  <div class="dlg">
+    <div class="top"><h2 id="cfmTitle"></h2></div>
+    <div class="inner"><p id="cfmText"></p><div class="btns"><button onclick="askDone(false)">Huỷ</button><button id="cfmOk" onclick="askDone(true)">OK</button></div></div>
+  </div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const J = {'Content-Type': 'application/json'};
+const post = async (url, body) => (await fetch(url, {method: 'POST', headers: J, body: body === undefined ? undefined : JSON.stringify(body)})).json();
+
+const fmtTok = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
+const fmtUsd = (v) => '$' + (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
+const hh = (t) => String(new Date(t * 1000).getHours()).padStart(2, '0');
+const dur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h >= 24 ? Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : h ? h + 'h' + String(m).padStart(2, '0') : m + 'm'; };
+
+/* ---- thông báo ---- */
 function say(text, kind) {
   if (!text) return;
   const box = $('toasts'), t = el('div', 'toast ' + (kind === 'err' ? 'err' : kind === 'ok' ? 'ok' : 'wait'));
   const x = el('b', null, '×'); x.onclick = () => t.remove();
   t.append(el('span', null, text), x); box.append(t);
-  while (box.children.length > 4) box.firstChild.remove();
-  if (kind !== 'wait') setTimeout(() => t.remove(), kind === 'err' ? 9000 : 5000);
-  return t;
+  while (box.children.length > 3) box.firstChild.remove();
+  if (kind !== 'wait') setTimeout(() => t.remove(), kind === 'err' ? 8000 : 3500);
 }
 
-const fmtTok = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
-const fmtUsd = (v) => '$' + (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
-const fmtPrice = (v) => '$' + (+v.toPrecision(3));
-const hh = (t) => String(new Date(t * 1000).getHours()).padStart(2, '0');
-const dur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h >= 24 ? Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : h ? h + 'h' + String(m).padStart(2, '0') : m + 'm'; };
-
-async function post(url) { return (await fetch(url, {method: 'POST'})).json(); }
-
-async function buildProfile() {
-  if (!(await ask('Build profile?', 'Mở Chrome login riêng và dạo web khoảng 40 giây để nuôi fingerprint. Làm một lần đầu tiên là đủ.', 'Build'))) return;
-  const b = $('btnBuild'); b.disabled = true; say('đang build ~40s…');
-  try { const d = await post('/api/build_profile'); say(d.ok ? (d.note || 'đã build') : d.error, d.ok ? 'ok' : 'err'); }
-  catch (e) { say(e.message, 'err'); }
-  finally { setTimeout(() => { b.disabled = false; }, 45000); }
-}
-async function loginStart() {
-  const b = $('btnLogin'); b.disabled = true; say('đang mở tab…');
-  try {
-    const d = await post('/api/login_start');
-    if (!d.ok) return say(d.error, 'err');
-    say('tab DeepSeek đã mở — đăng nhập trong đó (tối đa 10 phút)', 'ok');
-    const t = setInterval(loadStats, 2000); setTimeout(() => clearInterval(t), 660000);
-  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
-}
-async function captureAll() {
-  const b = $('btnScan'); b.disabled = true; say('đang quét…');
-  try {
-    const d = await post('/api/capture');
-    if (!d.ok) return say(d.error, 'err');
-    say(`${d.action}: +${d.added} mới, ${d.refreshed} làm mới${d.email ? ' · ' + d.email : ''}`, 'ok'); loadStats();
-  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
-}
-async function addManual() {
-  const b = $('btnAdd');
-  const token = $('tokIn').value.trim();
-  if (!token) return say('dán token trước', 'err');
-  b.disabled = true;
-  try {
-    const r = await fetch('/api/accounts', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token, label: $('lblIn').value})});
-    const d = await r.json();
-    if (!r.ok || d.error) return say(d.error || ('lỗi ' + r.status), 'err');
-    say('đã thêm ' + (d.label || 'tài khoản'), 'ok');
-    $('tokIn').value = ''; $('lblIn').value = '';
-    closeAdd(); loadStats();
-  } catch (e) { say(e.message, 'err'); }
-  finally { b.disabled = false; }
-}
-async function verify(id, label) {
-  if (!(await ask('Verify tài khoản?', `Gọi DeepSeek kiểm tra token của ${label}. Nếu token chết, tài khoản bị đánh dấu cần đăng nhập lại.`, 'Verify'))) return;
-  await post('/api/accounts/' + id + '/verify'); loadStats(); say('đã verify ' + label, 'ok');
-}
-async function reset(id, label) {
-  if (!(await ask('Reset tài khoản?', `Xoá lỗi/cooldown của ${label}, xoá các phiên web đang giữ và kiểm tra lại token. Hội thoại stateful đang dùng tài khoản này sẽ gửi lại đủ ngữ cảnh ở bước kế.`, 'Reset', true))) return;
-  await post('/api/accounts/' + id + '/reset'); loadStats(); say('đã reset ' + label, 'ok');
-}
-async function del(id, label) {
-  if (!(await ask('Xoá tài khoản?', `Xoá ${label} khỏi pool. Không hoàn tác được; muốn dùng lại phải thêm lại token.`, 'Xoá', true))) return;
-  await fetch('/api/accounts/' + id, {method: 'DELETE'}); loadStats(); say('đã xoá ' + label, 'ok');
-}
-
-function tag(kind, text) { const t = el('span', 'tag ' + kind); t.append(el('i'), document.createTextNode(text)); return t; }
-
-function accRow(a, perAcc) {
-  const tr = el('tr');
-  const name = el('td', 'name n', a.label); name.append(el('div', 'id', a.id.slice(0, 8)));
-  const load = el('td', 'l');
-  const meter = el('span', 'meter'), u = el('u');
-  u.style.width = Math.min(100, Math.round(((a.in_flight || 0) / perAcc) * 100)) + '%';
-  meter.append(u); load.append(meter, document.createTextNode(`${a.in_flight || 0}/${perAcc}`));
-  const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
-  const st = el('td', 's');
-  if (relogin) st.append(tag('bad', `lỗi ${a.fail_streak}× · đăng nhập lại`));
-  else if (a.cooldown_left_secs > 0) st.append(tag('warn', `nghỉ ${a.cooldown_left_secs}s` + (a.fail_streak ? ` · lỗi ${a.fail_streak}×` : '')));
-  else if (/ok/.test(a.last_status || '')) st.append(tag('ok', a.in_flight > 0 ? 'đang chạy' : 'sẵn sàng'));
-  else st.append(tag('bad', a.last_status || '?'));
-  const cnt = el('td', 'hide-s', `${a.total_ok} / ${a.total_empty} / ${a.total_error}`);
-  const act = el('td', 'act a');
-  const mk = (text, cls, fn, title) => { const b = el('button', 'sm ' + cls, text); if (title) b.title = title; b.onclick = fn; return b; };
-  act.append(mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label), 'xoá lỗi/cooldown và phiên web đang giữ, kiểm tra lại token'), mk('xoá', 'del', () => del(a.id, a.label)));
-  tr.append(name, load, st, cnt, act);
-  return tr;
-}
-
-/* ---- biểu đồ ---- */
-function drawBars(box, items) {
-  box.textContent = '';
-  const max = Math.max(1, ...items.map((i) => i.input + i.output));
-  const H = box.clientHeight - 6; // chừa chỗ cho vạch giờ
-  const px = (n) => Math.round((n / max) * H);
-  for (const it of items) {
-    const col = el('div', 'col');
-    const out = px(it.output), hit = px(it.cached || 0), inp = Math.max(0, px(it.input) - hit);
-    col.title = `${it.title}\n${fmtTok(it.input + it.output)} token · ${fmtUsd(it.cost)}`;
-    const sOut = el('div', 'seg out'); sOut.style.height = out + 'px';
-    const sIn = el('div', 'seg in'); sIn.style.height = inp + 'px';
-    const sHit = el('div', 'seg hit'); sHit.style.height = hit + 'px';
-    col.append(sOut, sIn, sHit);
-    if (it.peak != null) col.append(el('div', 'tick' + (it.peak ? ' pk' : '')));
-    box.append(col);
-  }
-}
-function drawAxis(box, labels) { box.textContent = ''; labels.forEach((l) => box.append(el('span', null, l))); }
-
-function renderUsage(u) {
-  const t = u.today, pr = u.pricing, pj = u.projection;
-  $('kTok').textContent = fmtTok(t.tokens);
-  $('kTokSub').textContent = `${t.req} lượt · in ${fmtTok(t.input)} · out ${fmtTok(t.output)}`;
-  $('kSave').textContent = fmtUsd(t.cost);
-  $('kSaveSub').textContent = t.cost_peak > 0 ? `cao điểm ${fmtUsd(t.cost_peak)} · phụ phí ${fmtUsd(t.peak_surcharge)}` : 'chưa phát sinh giờ cao điểm';
-  $('kMonth').textContent = fmtUsd(pj.month_cost);
-  $('kMonthSub').textContent = `${fmtTok(pj.month_tokens)} token · TB ${fmtUsd(pj.cost_per_day)}/ngày (${pj.days_basis < 1.5 ? '1' : pj.days_basis.toFixed(1)}d)`;
-  const left = u.next_switch ? u.next_switch - Date.now() / 1000 : null;
-  $('kNow').textContent = u.now_peak ? 'CAO ĐIỂM' : 'THẤP ĐIỂM';
-  $('kNow').className = 'big ' + (u.now_peak ? 'bad' : 'good');
-  $('kNowSub').textContent = (u.now_peak ? 'giá gấp đôi · hết sau ' : 'giá −50% · cao điểm sau ') + (left != null ? dur(left) : '—');
-  const inTot = t.input;
-  $('kHit').textContent = inTot ? Math.round((t.cached / inTot) * 100) + '%' : '—';
-  $('kHitSub').textContent = `${fmtTok(t.cached)} / ${fmtTok(inTot)} input`;
-
-  // giá live
-  $('pModel').textContent = pr.model;
-  $('pSrc').textContent = pr.source === 'live' ? 'live ' + dur(Date.now() / 1000 - pr.fetched_at) + ' trước' : 'bảng giá dự phòng';
-  $('pSrc').className = pr.source === 'live' ? '' : 'bad';
-  const pb = $('pBody'); pb.textContent = '';
-  for (const [name, v] of [['input cache hit', pr.hit], ['input cache miss', pr.miss], ['output', pr.out]]) {
-    const tr = el('tr'); tr.append(el('td', null, name), el('td', 'r', fmtPrice(v[0])), el('td', 'r', fmtPrice(v[1]))); pb.append(tr);
-  }
-
-  // chi phí
-  const cb = $('cBody'); cb.textContent = '';
-  for (const [name, a] of [['hôm nay', u.today], ['7 ngày', u.d7], ['30 ngày', u.d30], ['tổng', u.all]]) {
-    const tr = el('tr');
-    tr.append(el('td', null, name), el('td', 'r', fmtTok(a.tokens)), el('td', 'r', fmtUsd(a.cost)), el('td', 'r hide-s', a.cost > 0 ? `${fmtUsd(a.cost_peak)} · ${Math.round((a.cost_peak / a.cost) * 100)}%` : '—'));
-    cb.append(tr);
-  }
-  const ratio = pj.month_cost > 0 ? (1 - pj.month_cost_if_offpeak / pj.month_cost) * 100 : 0;
-  $('cFoot').textContent = pj.month_cost > 0
-    ? `Dồn hết sang giờ thấp điểm: ${fmtUsd(pj.month_cost_if_offpeak)}/tháng (−${ratio.toFixed(0)}%). Cache miss tính đủ giá nên con số nghiêng về phía cao.`
-    : 'Chưa có dữ liệu — số liệu bắt đầu tính từ lúc server khởi động.';
-
-  // 24 giờ
-  const h = u.hours;
-  drawBars($('bars24'), h.map((x) => ({input: x.input, output: x.output, cached: x.cached, peak: x.peak, cost: x.cost, title: hh(x.t) + ':00'})));
-  drawAxis($('axis24'), h.map((x, i) => (i % 3 === 0 ? hh(x.t) : '')));
-  $('h24sum').textContent = fmtTok(h.reduce((a, x) => a + x.input + x.output, 0)) + ' token';
-
-  // 14 ngày
-  const d = u.daily;
-  drawBars($('bars14'), d.map((x) => ({input: x.tokens, output: 0, cached: 0, peak: null, cost: x.cost, title: new Date(x.t * 1000).toLocaleDateString()})));
-  drawAxis($('axis14'), d.map((x, i) => (i % 2 === 0 ? String(new Date(x.t * 1000).getDate()) : '')));
-  $('d14sum').textContent = fmtUsd(d.reduce((a, x) => a + x.cost, 0));
-
-  // lịch giá
-  const sc = $('sched'); sc.textContent = '';
-  const sa = $('schedAxis'); sa.textContent = ''; sa.style.display = 'grid'; sa.style.gridTemplateColumns = 'repeat(24, 1fr)'; sa.style.gap = '2px';
-  u.schedule.forEach((s, i) => { const b = el('b', (s.peak ? 'pk' : '') + (i === 0 ? ' now' : '')); b.title = hh(s.t) + ':00 · ' + (s.peak ? 'cao điểm' : 'thấp điểm'); sc.append(b); sa.append(el('span', null, i % 6 === 0 ? hh(s.t) : '')); });
-  const peaks = u.schedule.filter((s) => s.peak).length;
-  $('schedSum').textContent = peaks ? `${peaks}h cao điểm` : 'không có cao điểm';
-}
-
-async function loadStats() {
-  try {
-    const [d, u] = await Promise.all([fetch('/api/stats').then((r) => r.json()), fetch('/api/usage').then((r) => r.json())]);
-    const p = d.pool, sf = p.stateful || {};
-    const running = d.accounts.reduce((n, a) => n + (a.in_flight || 0), 0);
-    $('kAcc').textContent = `${p.available}/${p.total}`;
-    const tot = (sf.hits || 0) + (sf.misses || 0);
-    $('kAccSub').textContent = `chạy ${running}/${p.available * p.max_conc_per_acc} · stateful ${tot ? Math.round((sf.hits / tot) * 100) + '%' : '—'} · ${sf.open_sessions ?? 0} phiên`;
-    const body = $('accBody'); body.textContent = '';
-    $('empty').style.display = d.accounts.length ? 'none' : 'block';
-    for (const a of d.accounts) body.append(accRow(a, p.max_conc_per_acc));
-    if (u && u.pricing) renderUsage(u);
-    $('dot').className = 'dot'; $('liveTxt').textContent = new Date().toLocaleTimeString();
-  } catch (e) { $('dot').className = 'dot off'; $('liveTxt').textContent = 'mất kết nối'; }
-}
-
-
-/* ---- hộp xác nhận (thay confirm() của trình duyệt) ---- */
-let ASK = null;
-function ask(title, text, okLabel, danger) {
-  return new Promise((resolve) => {
-    $('cfmTitle').textContent = title; $('cfmText').textContent = text;
-    const ok = $('cfmOk'); ok.textContent = okLabel || 'OK'; ok.className = 'sm ' + (danger ? 'danger' : 'solid');
-    ASK = resolve; openModal('cfmModal'); setTimeout(() => ok.focus(), 50);
-  });
-}
-function askDone(v) { if (!ASK) return; const r = ASK; ASK = null; closeModal('cfmModal'); r(v); }
-
-/* ---- cấu hình: sửa → chờ Lưu → (đợi rảnh) khởi động lại để áp dụng ---- */
-let CFG = [], PENDING = {}, BUSY = false;
-const eff = (c) => (c.key in PENDING ? (PENDING[c.key] === null ? c.default : PENDING[c.key]) : c.value);
-
-function stage(key, value) {
-  const c = CFG.find((x) => x.key === key); if (!c) return;
-  // trùng giá trị đang chạy (và không đang ép về mặc định) thì bỏ khỏi danh sách chờ
-  if (value !== null && String(value) === c.value) delete PENDING[key]; else PENDING[key] = value;
-  renderCfg(); renderBar();
-}
-function toggleCfg(key) { const c = CFG.find((x) => x.key === key); if (c) stage(key, eff(c) === '1' ? '0' : '1'); }
-
-function cfgRow(c) {
-  const v = eff(c), dirty = c.key in PENDING;
-  const row = el('div', 'row' + (dirty ? ' dirty' : ''));
-  const left = el('div'); left.append(el('div', 't', c.label));
-  const k = el('div', 'k', c.key + (c.unit ? ' · ' + c.unit : '') + ' · mặc định ' + c.default);
-  if (!c.live) k.append(document.createTextNode(' · '), el('b', null, 'cần restart'));
-  if (c.env && !c.overridden) k.append(document.createTextNode(' · env'));
-  left.append(k);
-  const ctl = el('div', 'ctl');
-  if (c.kind === 'bool') {
-    const b = el('button', 'sw' + (v === '1' ? ' on' : '')); b.title = v === '1' ? 'đang bật' : 'đang tắt';
-    b.onclick = () => stage(c.key, v === '1' ? '0' : '1'); ctl.append(b);
-  } else if (c.kind === 'choice') {
-    const sel = el('select'); for (const o of c.choices) { const op = el('option', null, o); op.value = o; if (o === v) op.selected = true; sel.append(op); }
-    sel.onchange = () => stage(c.key, sel.value); ctl.append(sel);
-  } else {
-    const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.value = v; inp.inputMode = 'numeric';
-    inp.onchange = () => stage(c.key, inp.value); inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
-    ctl.append(inp);
-  }
-  if (c.overridden || dirty) { const x = el('button', 'x', '↺'); x.title = 'về mặc định'; x.onclick = () => stage(c.key, null); ctl.append(x); }
-  row.append(left, ctl);
-  return row;
-}
-
-function renderCfg() {
-  const box = $('cfg');
-  if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return; // đang gõ: không vẽ lại
-  box.textContent = '';
-  for (const g of [...new Set(CFG.map((c) => c.group))]) {
-    const col = el('div'); col.append(el('h4', null, g));
-    for (const c of CFG.filter((x) => x.group === g)) col.append(cfgRow(c));
-    box.append(col);
-  }
-  for (const [id, key] of [['chipStateful', 'DS_STATEFUL'], ['chipPow', 'DS_POW_PREFETCH']]) {
-    const c = CFG.find((x) => x.key === key);
-    $(id).className = 'chip' + (c && eff(c) === '1' ? ' on' : '') + (c && key in PENDING ? ' dirty' : '');
-  }
-}
-
-async function loadCfg() {
-  try { CFG = (await (await fetch('/api/settings')).json()).items; renderCfg(); } catch (e) {}
-}
-
-function renderBar(extra) {
-  const bar = $('saveBar'), n = Object.keys(PENDING).length;
-  bar.textContent = '';
-  if (extra) { bar.className = 'show'; bar.append(...extra); return; }
-  if (!n) { bar.className = ''; return; }
-  bar.className = 'show';
-  const save = el('button', 'sm solid', 'Lưu & khởi động lại khi rảnh'); save.onclick = () => saveFlow('idle');
-  const hard = el('button', 'sm del', 'Hard reset'); hard.onclick = () => saveFlow('now');
-  const cancel = el('button', 'sm', 'Huỷ'); cancel.onclick = () => { PENDING = {}; renderCfg(); renderBar(); };
-  bar.append(el('span', null, n + ' thay đổi chưa lưu'), el('span', 'sp'), save, hard, cancel);
-}
-
-async function saveChanges() {
-  const r = await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(PENDING)});
-  const d = await r.json();
-  if (!d.ok) { say(d.error || 'không lưu được', 'err'); return false; }
-  PENDING = {}; await loadCfg(); return true;
-}
-
-async function restartFlow(mode) {
-  if (Object.keys(PENDING).length) return saveFlow(mode);
-  if (mode === 'now') {
-    const ok = await ask('Hard reset?', 'Khởi động lại server ngay. Mọi request đang chạy bị cắt (dsh sẽ tự thử lại); hội thoại stateful đang giữ mất, bước kế gửi lại đủ ngữ cảnh.', 'Hard reset', true);
-    if (!ok) return;
-  }
-  doRestart(mode);
-}
-
-async function saveFlow(mode) {
-  if (BUSY) return;
-  if (mode === 'now') {
-    const ok = await ask('Lưu và hard reset?', 'Lưu cấu hình rồi khởi động lại server ngay. Mọi request đang chạy bị cắt (dsh sẽ tự thử lại).', 'Lưu & hard reset', true);
-    if (!ok) return;
-  }
-  BUSY = true;
-  try { if (!(await saveChanges())) return; say('đã lưu cấu hình', 'ok'); await doRestart(mode); }
-  catch (e) { say(e.message, 'err'); }
-  finally { BUSY = false; }
-}
-
-async function doRestart(mode) {
-  const boot0 = (await (await fetch('/api/restart')).json()).boot;
-  await fetch('/api/restart', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode})});
-  const cancel = el('button', 'sm', 'Huỷ');
-  const msg = el('span', null, mode === 'idle' ? 'đang chờ hết request để khởi động lại…' : 'đang khởi động lại…');
-  cancel.onclick = async () => { await fetch('/api/restart', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: 'cancel'})}); renderBar(); say('đã huỷ khởi động lại', 'ok'); clearInterval(timer); };
-  renderBar(mode === 'idle' ? [msg, el('span', 'sp'), cancel] : [msg]);
-  const t0 = Date.now();
-  const timer = setInterval(async () => {
-    try {
-      const s = await (await fetch('/api/restart', {cache: 'no-store'})).json();
-      if (s.boot !== boot0) { clearInterval(timer); location.reload(); return; }
-      if (s.pending) msg.textContent = s.in_flight ? `đang chờ ${s.in_flight} request chạy xong để khởi động lại… ${Math.round((Date.now() - t0) / 1000)}s` : 'sắp khởi động lại…';
-    } catch (e) { msg.textContent = 'đang khởi động lại…'; } // server đang tắt/mở
-    if (Date.now() - t0 > 180000) { clearInterval(timer); renderBar(); say('khởi động lại lâu quá — kiểm tra journalctl', 'err'); }
-  }, 700);
-}
-
-/* ---- popup log realtime ---- */
-const LOG = {es: null, lines: [], paused: false, filter: 'all', stick: true, max: 3000};
-const FILTERS = {
-  err: /ds-fail|ds-error|ds-stall|ds-stream|ds-truncated|toolcall-(invalid|unparsed)|lỗi|error|panic|failed/i,
-  req: /^\[req\]/, conv: /^\[conv\]/, pow: /^\[pow\]/,
-};
-const logClass = (s) => FILTERS.err.test(s) ? 'err' : /miss|bận|truncated|cooldown|nghỉ/i.test(s) ? 'warn' : /^\[(usage|ds-timing|pow|pricing)\]/.test(s) ? 'dim' : '';
-const logTime = (ms) => new Date(ms).toLocaleTimeString([], {hour12: false}) + '.' + String(ms % 1000).padStart(3, '0');
-
-function logVisible(l) {
-  if (LOG.filter !== 'all' && !FILTERS[LOG.filter].test(l.line)) return false;
-  const q = $('logQ').value.trim().toLowerCase();
-  return !q || l.line.toLowerCase().includes(q);
-}
-function logNode(l) {
-  const d = el('div', 'll ' + logClass(l.line)); d.append(el('time', null, logTime(l.t)), el('span', null, l.line)); return d;
-}
-function logRender() {
-  const body = $('logBody'), jump = $('logJump');
-  [...body.querySelectorAll('.ll')].forEach((n) => n.remove());
-  const frag = document.createDocumentFragment();
-  let shown = 0;
-  for (const l of LOG.lines) if (logVisible(l)) { frag.append(logNode(l)); shown++; }
-  body.insertBefore(frag, jump);
-  $('logCount').textContent = `${shown} / ${LOG.lines.length} dòng`;
-  logBottom(false);
-}
-function logAdd(l) {
-  LOG.lines.push(l);
-  if (LOG.lines.length > LOG.max) LOG.lines.splice(0, LOG.lines.length - LOG.max);
-  if (LOG.paused || !logVisible(l)) return;
-  const body = $('logBody');
-  body.insertBefore(logNode(l), $('logJump'));
-  const nodes = body.querySelectorAll('.ll');
-  if (nodes.length > LOG.max) nodes[0].remove();
-  $('logCount').textContent = `${nodes.length} / ${LOG.lines.length} dòng`;
-  if (LOG.stick) logBottom(false); else $('logJump').style.display = 'block';
-}
-function logBottom(force) {
-  const body = $('logBody');
-  if (force) LOG.stick = true;
-  if (LOG.stick) { body.scrollTop = body.scrollHeight; $('logJump').style.display = 'none'; }
-}
-function openLog() {
-  openModal('logModal');
-  if (LOG.es) return;
-  LOG.lines = []; logRender();
-  const es = new EventSource('/api/logs/stream?backlog=400');
-  LOG.es = es;
-  es.onopen = () => { $('logState').textContent = '● trực tiếp'; };
-  es.onmessage = (e) => { try { logAdd(JSON.parse(e.data)); } catch (_) {} };
-  es.onerror = () => { $('logState').textContent = '○ mất kết nối, đang nối lại…'; };
-}
-function closeLog() {
-  closeModal('logModal');
-  if (LOG.es) { LOG.es.close(); LOG.es = null; }
-}
-function openAdd() { openModal('addModal'); setTimeout(() => $('tokIn').focus(), 60); }
-function closeAdd() { closeModal('addModal'); }
-
-/* ---- lớp phủ: trang phía sau "tan" thành lưới ký tự ASCII (không blur) ---- */
+/* ---- lớp phủ: trang phía sau tan thành lưới ký tự ASCII ---- */
 const VEIL = {open: 0, t0: 0, dir: 0, raf: 0, order: null, drawn: 0, cols: 0, rows: 0};
 const RAMP = ['.', ':', '·', '+', '*', '=', '#', '%'];
+const REDUCE = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 function veilBuild() {
   const c = $('veil'), dpr = Math.min(2, window.devicePixelRatio || 1), W = innerWidth, H = innerHeight;
   c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); c.style.width = W + 'px'; c.style.height = H + 'px';
   const cw = 9, chh = 16, cols = Math.ceil(W / cw), rows = Math.ceil(H / chh), n = cols * rows;
-  Object.assign(VEIL, {c, dpr, cw, chh, cols, rows, n, drawn: 0});
+  Object.assign(VEIL, {c, cw, chh, cols, rows, n, drawn: 0});
   VEIL.order = new Uint32Array(n); for (let i = 0; i < n; i++) VEIL.order[i] = i;
-  for (let i = n - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = VEIL.order[i]; VEIL.order[i] = VEIL.order[j]; VEIL.order[j] = t; }
+  for (let i = n - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0, t = VEIL.order[i]; VEIL.order[i] = VEIL.order[j]; VEIL.order[j] = t; }
   const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.font = `${chh - 3}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`; ctx.textBaseline = 'top';
   VEIL.ctx = ctx;
 }
 function veilCell(i) {
-  const {ctx, cols, cw, chh} = VEIL, x = (i % cols), y = (i / cols) | 0;
+  const {ctx, cols, cw, chh} = VEIL, x = i % cols, y = (i / cols) | 0;
   const nz = (Math.sin(x * 0.21 + Math.sin(y * 0.13) * 2) + Math.sin(y * 0.17 + x * 0.05) + 2) / 4 + (Math.random() - 0.5) * 0.35;
   const g = RAMP[Math.max(0, Math.min(RAMP.length - 1, (nz * RAMP.length) | 0))];
   ctx.clearRect(x * cw, y * chh, cw, chh);
@@ -734,53 +264,289 @@ function veilCell(i) {
   ctx.fillStyle = `rgba(29,27,23,${0.16 + nz * 0.42})`; ctx.fillText(g, x * cw, y * chh);
 }
 function veilStep(now) {
-  const dur = VEIL.dir > 0 ? 340 : 220, k = Math.min(1, (now - VEIL.t0) / dur), target = Math.floor((VEIL.dir > 0 ? k : 1 - k) * VEIL.n);
+  const d = VEIL.dir > 0 ? 340 : 220, k = Math.min(1, (now - VEIL.t0) / d), target = Math.floor((VEIL.dir > 0 ? k : 1 - k) * VEIL.n);
   if (VEIL.dir > 0) { while (VEIL.drawn < target) veilCell(VEIL.order[VEIL.drawn++]); }
-  else { while (VEIL.drawn > target) { const i = VEIL.order[--VEIL.drawn]; const x = i % VEIL.cols, y = (i / VEIL.cols) | 0; VEIL.ctx.clearRect(x * VEIL.cw, y * VEIL.chh, VEIL.cw, VEIL.chh); } }
-  if (k < 1) VEIL.raf = requestAnimationFrame(veilStep);
-  else if (VEIL.dir < 0) { VEIL.c.style.display = 'none'; VEIL.raf = 0; }
+  else while (VEIL.drawn > target) { const i = VEIL.order[--VEIL.drawn]; VEIL.ctx.clearRect((i % VEIL.cols) * VEIL.cw, ((i / VEIL.cols) | 0) * VEIL.chh, VEIL.cw, VEIL.chh); }
+  if (k < 1) VEIL.raf = requestAnimationFrame(veilStep); else if (VEIL.dir < 0) { VEIL.c.style.display = 'none'; VEIL.raf = 0; }
 }
 function veilShow() {
   if (VEIL.open++ > 0) return;
   cancelAnimationFrame(VEIL.raf);
   if (!VEIL.c || VEIL.cols !== Math.ceil(innerWidth / 9) || VEIL.rows !== Math.ceil(innerHeight / 16)) veilBuild();
   VEIL.c.style.display = 'block'; VEIL.dir = 1; VEIL.t0 = performance.now();
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { while (VEIL.drawn < VEIL.n) veilCell(VEIL.order[VEIL.drawn++]); return; }
+  if (REDUCE()) { while (VEIL.drawn < VEIL.n) veilCell(VEIL.order[VEIL.drawn++]); return; }
   VEIL.raf = requestAnimationFrame(veilStep);
 }
 function veilHide() {
   if (VEIL.open === 0 || --VEIL.open > 0) return;
   cancelAnimationFrame(VEIL.raf);
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { VEIL.ctx.clearRect(0, 0, innerWidth, innerHeight); VEIL.drawn = 0; VEIL.c.style.display = 'none'; return; }
+  if (REDUCE()) { VEIL.ctx.clearRect(0, 0, innerWidth, innerHeight); VEIL.drawn = 0; VEIL.c.style.display = 'none'; return; }
   VEIL.dir = -1; VEIL.t0 = performance.now(); VEIL.raf = requestAnimationFrame(veilStep);
 }
 window.addEventListener('resize', () => { if (VEIL.open === 0) VEIL.cols = 0; });
-function openModal(id) { const m = $(id); if (m.classList.contains('open')) return; m.classList.add('open'); document.body.style.overflow = 'hidden'; veilShow(); }
-function closeModal(id) { const m = $(id); if (!m.classList.contains('open')) return; m.classList.remove('open'); veilHide(); if (!document.querySelector('.modal.open')) document.body.style.overflow = ''; }
-function logFilter(btn) {
-  LOG.filter = btn.dataset.f;
-  document.querySelectorAll('.fchip').forEach((b) => b.classList.toggle('on', b === btn));
-  logRender();
+let LAST_FOCUS = null;
+function openModal(id) { const m = $(id); if (m.classList.contains('open')) return; LAST_FOCUS = document.activeElement; m.classList.add('open'); document.body.style.overflow = 'hidden'; veilShow(); }
+function closeModal(id) { const m = $(id); if (!m.classList.contains('open')) return; m.classList.remove('open'); veilHide(); if (!document.querySelector('.modal.open')) document.body.style.overflow = ''; if (LAST_FOCUS && LAST_FOCUS.focus) LAST_FOCUS.focus(); }
+
+/* ---- hộp xác nhận ---- */
+let ASK = null;
+function ask(title, text, okLabel, danger) {
+  return new Promise((resolve) => {
+    $('cfmTitle').textContent = title; $('cfmText').textContent = text;
+    const ok = $('cfmOk'); ok.textContent = okLabel || 'OK'; ok.className = danger ? 'danger' : 'solid';
+    ASK = resolve; openModal('cfmModal'); setTimeout(() => ok.focus(), 50);
+  });
 }
-function logTogglePause() {
-  LOG.paused = !LOG.paused;
-  $('logPause').textContent = LOG.paused ? 'tiếp tục' : 'tạm dừng';
-  $('logPause').classList.toggle('solid', LOG.paused);
-  if (!LOG.paused) logRender();
+function askDone(v) { if (!ASK) return; const r = ASK; ASK = null; closeModal('cfmModal'); r(v); }
+
+/* ---- tài khoản ---- */
+function openAdd() { openModal('addModal'); setTimeout(() => $('tokIn').focus(), 60); }
+function closeAdd() { closeModal('addModal'); }
+
+async function addManual() {
+  const b = $('btnAdd'), token = $('tokIn').value.trim();
+  if (!token) return say('Dán token trước', 'err');
+  b.disabled = true;
+  try {
+    const r = await fetch('/api/accounts', {method: 'POST', headers: J, body: JSON.stringify({token, label: $('lblIn').value})});
+    const d = await r.json();
+    if (!r.ok || d.error) return say(d.error || ('lỗi ' + r.status), 'err');
+    say('Đã thêm ' + (d.label || 'tài khoản'), 'ok'); $('tokIn').value = ''; $('lblIn').value = ''; closeAdd(); loadStats();
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
-function logClear() { LOG.lines = []; logRender(); }
+async function loginStart() {
+  const b = $('btnLogin'); b.disabled = true;
+  try {
+    const d = await post('/api/login_start');
+    if (!d.ok) return say(d.error, 'err');
+    say('Đã mở tab DeepSeek — đăng nhập trong đó, xong tự lưu.', 'ok'); closeAdd();
+    const t = setInterval(loadStats, 2000); setTimeout(() => clearInterval(t), 660000);
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
+async function captureAll() {
+  const b = $('btnScan'); b.disabled = true;
+  try {
+    const d = await post('/api/capture');
+    if (!d.ok) return say(d.error, 'err');
+    say(`+${d.added} mới, ${d.refreshed} làm mới${d.email ? ' · ' + d.email : ''}`, 'ok'); closeAdd(); loadStats();
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
+async function buildProfile() {
+  if (!(await ask('Build profile?', 'Mở Chrome login riêng và dạo web ~40 giây để nuôi fingerprint. Chỉ cần làm một lần.', 'Build'))) return;
+  const b = $('btnBuild'); b.disabled = true;
+  try { const d = await post('/api/build_profile'); say(d.ok ? 'Đang build ~40 giây' : d.error, d.ok ? 'ok' : 'err'); }
+  catch (e) { say(e.message, 'err'); } finally { setTimeout(() => { b.disabled = false; }, 45000); }
+}
+async function verify(id, label) {
+  if (!(await ask('Verify?', `Kiểm tra token của ${label} với DeepSeek.`, 'Verify'))) return;
+  await post('/api/accounts/' + id + '/verify'); loadStats(); say('Đã verify ' + label, 'ok');
+}
+async function reset(id, label) {
+  if (!(await ask('Reset?', `Xoá lỗi, cooldown và phiên web đang giữ của ${label}. Hội thoại đang dùng nó sẽ gửi lại đủ ngữ cảnh.`, 'Reset', true))) return;
+  await post('/api/accounts/' + id + '/reset'); loadStats(); say('Đã reset ' + label, 'ok');
+}
+async function del(id, label) {
+  if (!(await ask('Xoá?', `Xoá ${label} khỏi pool. Không hoàn tác được.`, 'Xoá', true))) return;
+  await fetch('/api/accounts/' + id, {method: 'DELETE'}); loadStats(); say('Đã xoá ' + label, 'ok');
+}
+
+let OPEN_ACC = null;
+function accItem(a, perAcc) {
+  const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
+  let kind = '', text = 'sẵn sàng';
+  if (relogin) { kind = 'bad'; text = 'cần đăng nhập lại'; }
+  else if (a.cooldown_left_secs > 0) { kind = 'warn'; text = `nghỉ ${a.cooldown_left_secs}s`; }
+  else if (!/ok/.test(a.last_status || '')) { kind = 'bad'; text = a.last_status || 'lỗi'; }
+  else if (a.in_flight > 0) { kind = 'run'; text = `đang chạy ${a.in_flight}/${perAcc}`; }
+  const box = el('div', 'acc' + (OPEN_ACC === a.id ? ' open' : ''));
+  const hd = el('button', 'hd'); hd.setAttribute('aria-expanded', OPEN_ACC === a.id);
+  hd.append(el('i', 'sq ' + (kind === 'bad' || kind === 'warn' ? kind : '')), el('span', 'nm', a.label), el('span', 'st ' + kind, text));
+  hd.onclick = () => { OPEN_ACC = OPEN_ACC === a.id ? null : a.id; document.querySelectorAll('.acc').forEach((n) => n.classList.remove('open')); if (OPEN_ACC) box.classList.add('open'); hd.setAttribute('aria-expanded', !!OPEN_ACC); };
+  const more = el('div', 'more');
+  more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}`), el('span', 'sp'));
+  const mk = (t, cls, fn) => { const b = el('button', 'sm ' + cls, t); b.onclick = fn; return b; };
+  more.append(mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label)), mk('xoá', 'del', () => del(a.id, a.label)));
+  box.append(hd, more);
+  return box;
+}
+
+/* ---- biểu đồ ---- */
+function drawBars(box, items) {
+  box.textContent = '';
+  const max = Math.max(1, ...items.map((i) => i.input + i.output)), H = (box.clientHeight || 96) - 6, px = (n) => Math.round((n / max) * H);
+  for (const it of items) {
+    const col = el('div', 'col'), out = px(it.output), hit = px(it.cached || 0), inp = Math.max(0, px(it.input) - hit);
+    col.title = `${it.title} · ${fmtTok(it.input + it.output)} token · ${fmtUsd(it.cost)}`;
+    for (const [c, h] of [['out', out], ['in', inp], ['hit', hit]]) { const s = el('div', 'seg ' + c); s.style.height = h + 'px'; col.append(s); }
+    col.append(el('div', 'tick' + (it.peak ? ' pk' : '')));
+    box.append(col);
+  }
+}
+
+function renderUsage(u) {
+  const t = u.today, pr = u.pricing, pj = u.projection;
+  $('kTok').textContent = fmtTok(t.tokens);
+  $('kTokSub').textContent = t.input ? `cache ${Math.round((t.cached / t.input) * 100)}% · ${t.req} lượt` : `${t.req} lượt`;
+  $('kSave').textContent = fmtUsd(t.cost);
+  $('kSaveSub').textContent = `tháng này ~${fmtUsd(pj.month_cost)}`;
+  const left = u.next_switch ? u.next_switch - Date.now() / 1000 : null;
+  $('kNow').textContent = u.now_peak ? 'CAO ĐIỂM' : 'THẤP ĐIỂM';
+  $('kNow').className = 'big ' + (u.now_peak ? 'bad' : 'good');
+  $('kNowSub').textContent = (u.now_peak ? 'gấp đôi · hết sau ' : 'cao điểm sau ') + (left != null ? dur(left) : '—');
+
+  const cb = $('cBody'); cb.textContent = '';
+  for (const [name, a] of [['hôm nay', u.today], ['7 ngày', u.d7], ['30 ngày', u.d30]]) {
+    const tr = el('tr'); tr.append(el('td', null, name), el('td', 'r', fmtTok(a.tokens)), el('td', 'r', fmtUsd(a.cost))); cb.append(tr);
+  }
+  $('pLine').textContent = `${pr.model} · in $${pr.miss[0]} · out $${pr.out[0]} /1M` + (pr.source === 'live' ? '' : ' · giá dự phòng');
+  $('pLine').className = 'sub' + (pr.source === 'live' ? '' : ' bad');
+
+  const h = u.hours;
+  drawBars($('bars24'), h.map((x) => ({input: x.input, output: x.output, cached: x.cached, peak: x.peak, cost: x.cost, title: hh(x.t) + ':00'})));
+  const ax = $('axis24'); ax.textContent = ''; h.forEach((x, i) => ax.append(el('span', null, i % 3 === 0 ? hh(x.t) : '')));
+  $('h24sum').textContent = fmtTok(h.reduce((a, x) => a + x.input + x.output, 0));
+}
+
+async function loadStats() {
+  try {
+    const [d, u] = await Promise.all([fetch('/api/stats').then((r) => r.json()), fetch('/api/usage').then((r) => r.json())]);
+    const p = d.pool, sf = p.stateful || {}, running = d.accounts.reduce((n, a) => n + (a.in_flight || 0), 0), tot = (sf.hits || 0) + (sf.misses || 0);
+    $('kAcc').textContent = `${p.available}/${p.total}`;
+    $('kAccSub').textContent = `chạy ${running}` + (tot ? ` · stateful ${Math.round((sf.hits / tot) * 100)}%` : '');
+    const list = $('accList'); list.textContent = '';
+    $('empty').style.display = d.accounts.length ? 'none' : 'block';
+    for (const a of d.accounts) list.append(accItem(a, p.max_conc_per_acc));
+    if (u && u.pricing) renderUsage(u);
+    $('dot').className = 'dot'; $('liveTxt').textContent = new Date().toLocaleTimeString([], {hour12: false});
+  } catch (e) { $('dot').className = 'dot off'; $('liveTxt').textContent = 'mất kết nối'; }
+}
+
+/* ---- cài đặt: sửa → Lưu → đợi rảnh → khởi động lại ---- */
+let CFG = [], PENDING = {}, BUSY = false;
+const eff = (c) => (c.key in PENDING ? (PENDING[c.key] === null ? c.default : PENDING[c.key]) : c.value);
+
+function openSettings() { openModal('setModal'); loadCfg(); }
+function closeSettings() { PENDING = {}; closeModal('setModal'); }
+
+function stage(key, value) {
+  const c = CFG.find((x) => x.key === key); if (!c) return;
+  if (value !== null && String(value) === c.value) delete PENDING[key]; else PENDING[key] = value;
+  renderCfg();
+}
+function cfgRow(c) {
+  const v = eff(c), dirty = c.key in PENDING, row = el('div', 'row' + (dirty ? ' dirty' : '')); row.title = c.key;
+  const t = el('div', 't', c.label); if (c.hint) t.append(el('small', null, c.hint));
+  const ctl = el('div'); ctl.style.cssText = 'display:flex;align-items:center;gap:6px';
+  if (c.kind === 'bool') {
+    const b = el('button', 'sw' + (v === '1' ? ' on' : '')); b.setAttribute('role', 'switch'); b.setAttribute('aria-checked', v === '1'); b.setAttribute('aria-label', c.label);
+    b.onclick = () => stage(c.key, v === '1' ? '0' : '1'); ctl.append(b);
+  } else if (c.kind === 'choice') {
+    const sel = el('select'); sel.setAttribute('aria-label', c.label);
+    for (const o of c.choices) { const op = el('option', null, o); op.value = o; if (o === v) op.selected = true; sel.append(op); }
+    sel.onchange = () => stage(c.key, sel.value); ctl.append(sel);
+  } else {
+    const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.value = v; inp.inputMode = 'numeric'; inp.setAttribute('aria-label', c.label);
+    inp.onchange = () => stage(c.key, inp.value); inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
+    ctl.append(inp); if (c.unit) ctl.append(el('span', 'u', c.unit));
+  }
+  if (c.overridden || dirty) { const x = el('button', 'x', '↺'); x.title = 'về mặc định'; x.setAttribute('aria-label', 'Về mặc định'); x.onclick = () => stage(c.key, null); ctl.append(x); }
+  row.append(t, ctl); return row;
+}
+function renderCfg() {
+  const box = $('cfg');
+  if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+  box.textContent = ''; CFG.forEach((c) => box.append(cfgRow(c)));
+  renderFoot();
+}
+function renderFoot(wait) {
+  const f = $('cfgFoot'), n = Object.keys(PENDING).length; f.textContent = '';
+  if (wait) { f.append(...wait); return; }
+  const hard = el('button', 'ghost sm bad', 'Hard reset'); hard.onclick = () => restartFlow('now');
+  if (!n) { f.append(el('span', null, 'Mặc định đã tối ưu sẵn.'), el('span', 'sp'), hard); return; }
+  const save = el('button', 'solid', 'Lưu & áp dụng'); save.onclick = () => saveFlow('idle');
+  const cancel = el('button', 'sm', 'Huỷ'); cancel.onclick = () => { PENDING = {}; renderCfg(); };
+  f.append(el('span', null, n + ' thay đổi'), el('span', 'sp'), cancel, save);
+}
+async function loadCfg() { try { CFG = (await (await fetch('/api/settings')).json()).items; renderCfg(); } catch (e) {} }
+
+async function saveFlow(mode) {
+  if (BUSY) return;
+  BUSY = true;
+  try {
+    const d = await post('/api/settings', PENDING);
+    if (!d.ok) return say(d.error || 'Không lưu được', 'err');
+    PENDING = {}; await loadCfg(); await doRestart(mode);
+  } catch (e) { say(e.message, 'err'); } finally { BUSY = false; }
+}
+async function restartFlow(mode) {
+  if (!(await ask('Hard reset?', 'Khởi động lại ngay, cắt mọi request đang chạy (dsh tự thử lại). Hội thoại stateful đang giữ sẽ gửi lại đủ ngữ cảnh.', 'Hard reset', true))) return;
+  doRestart(mode);
+}
+async function doRestart(mode) {
+  const boot0 = (await (await fetch('/api/restart')).json()).boot;
+  await post('/api/restart', {mode});
+  const msg = el('span', null, mode === 'idle' ? 'Đang chờ hết request…' : 'Đang khởi động lại…');
+  const cancel = el('button', 'sm', 'Huỷ');
+  cancel.onclick = async () => { await post('/api/restart', {mode: 'cancel'}); clearInterval(timer); renderFoot(); say('Đã huỷ', 'ok'); };
+  renderFoot(mode === 'idle' ? [msg, el('span', 'sp'), cancel] : [msg]);
+  const t0 = Date.now();
+  const timer = setInterval(async () => {
+    try {
+      const s = await (await fetch('/api/restart', {cache: 'no-store'})).json();
+      if (s.boot !== boot0) { clearInterval(timer); location.reload(); return; }
+      if (s.pending) msg.textContent = s.in_flight ? `Đang chờ ${s.in_flight} request xong… ${Math.round((Date.now() - t0) / 1000)}s` : 'Sắp khởi động lại…';
+    } catch (e) { msg.textContent = 'Đang khởi động lại…'; }
+    if (Date.now() - t0 > 180000) { clearInterval(timer); renderFoot(); say('Khởi động lại quá lâu — xem journalctl', 'err'); }
+  }, 700);
+}
+
+/* ---- log realtime ---- */
+const LOG = {es: null, lines: [], paused: false, filter: 'all', stick: true, max: 3000};
+const ERR_RE = /ds-fail|ds-error|ds-stall|ds-stream|ds-truncated|toolcall-(invalid|unparsed)|lỗi|error|panic|failed/i;
+const logClass = (s) => ERR_RE.test(s) ? 'err' : /miss|bận|nghỉ|cooldown/i.test(s) ? 'warn' : /^\[(usage|ds-timing|pow|pricing)\]/.test(s) ? 'dim' : '';
+const logTime = (ms) => new Date(ms).toLocaleTimeString([], {hour12: false}) + '.' + String(ms % 1000).padStart(3, '0');
+function logVisible(l) {
+  if (LOG.filter === 'err' && !ERR_RE.test(l.line)) return false;
+  const q = $('logQ').value.trim().toLowerCase(); return !q || l.line.toLowerCase().includes(q);
+}
+const logNode = (l) => { const d = el('div', 'll ' + logClass(l.line)); d.append(el('time', null, logTime(l.t)), el('span', null, l.line)); return d; };
+function logRender() {
+  const body = $('logBody'); body.querySelectorAll('.ll').forEach((n) => n.remove());
+  const frag = document.createDocumentFragment(); for (const l of LOG.lines) if (logVisible(l)) frag.append(logNode(l));
+  body.insertBefore(frag, $('logJump')); logBottom(false);
+}
+function logAdd(l) {
+  LOG.lines.push(l); if (LOG.lines.length > LOG.max) LOG.lines.splice(0, LOG.lines.length - LOG.max);
+  if (LOG.paused || !logVisible(l)) return;
+  const body = $('logBody'); body.insertBefore(logNode(l), $('logJump'));
+  const nodes = body.querySelectorAll('.ll'); if (nodes.length > LOG.max) nodes[0].remove();
+  if (LOG.stick) logBottom(false); else $('logJump').style.display = 'block';
+}
+function logBottom(force) { const b = $('logBody'); if (force) LOG.stick = true; if (LOG.stick) { b.scrollTop = b.scrollHeight; $('logJump').style.display = 'none'; } }
+function openLog() {
+  openModal('logModal'); if (LOG.es) return;
+  LOG.lines = []; logRender();
+  const es = new EventSource('/api/logs/stream?backlog=400'); LOG.es = es;
+  es.onopen = () => { $('logState').textContent = '●'; };
+  es.onmessage = (e) => { try { logAdd(JSON.parse(e.data)); } catch (_) {} };
+  es.onerror = () => { $('logState').textContent = '○ nối lại…'; };
+}
+function closeLog() { closeModal('logModal'); if (LOG.es) { LOG.es.close(); LOG.es = null; } }
+function logFilter(btn) { LOG.filter = btn.dataset.f; document.querySelectorAll('.fchip').forEach((b) => b.classList.toggle('on', b === btn)); logRender(); }
+function logTogglePause() { LOG.paused = !LOG.paused; $('logPause').textContent = LOG.paused ? 'tiếp tục' : 'tạm dừng'; $('logPause').classList.toggle('solid', LOG.paused); if (!LOG.paused) logRender(); }
 async function logCopy() {
   const text = LOG.lines.filter(logVisible).map((l) => logTime(l.t) + ' ' + l.line).join('\n');
-  try { await navigator.clipboard.writeText(text); say('đã copy ' + text.split('\n').length + ' dòng', 'ok'); } catch (e) { say('không copy được: ' + e.message, 'err'); }
+  try { await navigator.clipboard.writeText(text); say('Đã copy ' + text.split('\n').length + ' dòng', 'ok'); } catch (e) { say('Không copy được', 'err'); }
 }
-document.addEventListener('keydown', (e) => { if (e.key !== 'Escape') return; if ($('cfmModal').classList.contains('open')) askDone(false); else if ($('addModal').classList.contains('open')) closeAdd(); else if ($('logModal').classList.contains('open')) closeLog(); });
-document.addEventListener('DOMContentLoaded', () => {
-  $('logBody').addEventListener('scroll', () => { const b = $('logBody'); LOG.stick = b.scrollHeight - b.scrollTop - b.clientHeight < 24; if (LOG.stick) $('logJump').style.display = 'none'; });
+$('logBody').addEventListener('scroll', () => { const b = $('logBody'); LOG.stick = b.scrollHeight - b.scrollTop - b.clientHeight < 24; if (LOG.stick) $('logJump').style.display = 'none'; });
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  for (const [id, fn] of [['cfmModal', () => askDone(false)], ['addModal', closeAdd], ['setModal', closeSettings], ['logModal', closeLog]]) if ($(id).classList.contains('open')) { fn(); break; }
 });
 
-loadStats(); loadCfg();
+loadStats();
 setInterval(loadStats, 5000);
-setInterval(loadCfg, 15000);
 </script>
 </body>
 </html>
