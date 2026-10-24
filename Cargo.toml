@@ -19,9 +19,9 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 
 # Deploy chạy target/release: PoW (Keccak) và parse DSML hưởng lợi trực tiếp từ LTO + 1 codegen unit.
+# Không dùng panic=abort: một panic trong 1 request chỉ được giết task đó, không kéo sập cả proxy (mọi acc/phiên).
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
 strip = true

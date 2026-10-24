@@ -109,6 +109,11 @@ fn max_image_bytes() -> usize {
     std::env::var("DS_MAX_IMAGE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(20) * 1024 * 1024
 }
 
+/// Cắt theo ký tự (không panic khi cắt giữa ký tự nhiều byte).
+fn head_chars(s: &str, n: usize) -> &str {
+    s.char_indices().nth(n).map_or(s, |(i, _)| &s[..i])
+}
+
 /// Chặn SSRF: chỉ cho http/https tới host công khai. Ảnh trong hội thoại là dữ liệu do client
 /// (có thể bị prompt-injection điều khiển) nên không được phép chạm vào loopback/LAN/metadata.
 fn url_is_public(url: &reqwest::Url) -> bool {
@@ -143,7 +148,7 @@ fn url_is_public(url: &reqwest::Url) -> bool {
 fn image_key(part: &Value) -> Option<String> {
     if let Some(src) = part.get("source") {
         if let Some(d) = src.get("data").and_then(|x| x.as_str()) {
-            return Some(format!("b64:{}:{}", d.len(), &d[..d.len().min(64)]));
+            return Some(format!("b64:{}:{}", d.len(), head_chars(d, 64)));
         }
     }
     let url = part.pointer("/image_url/url").and_then(|x| x.as_str())
@@ -182,12 +187,15 @@ async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
     if url.starts_with("http://") || url.starts_with("https://") {
         let parsed = reqwest::Url::parse(url).ok()?;
         if !url_is_public(&parsed) {
-            eprintln!("[image] chặn URL nội bộ/không hợp lệ: {}", &url[..url.len().min(120)]);
+            eprintln!("[image] chặn URL nội bộ/không hợp lệ: {}", head_chars(url, 120));
             return None;
         }
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::limited(3))
+            // mỗi bước redirect cũng phải qua kiểm tra SSRF (host công khai có thể 302 về 127.0.0.1)
+            .redirect(reqwest::redirect::Policy::custom(|a| {
+                if a.previous().len() >= 3 || !url_is_public(a.url()) { a.stop() } else { a.follow() }
+            }))
             .build().ok()?;
         let r = client.get(parsed).send().await.ok()?;
         if !r.status().is_success() {
@@ -980,5 +988,22 @@ mod tests {
         }
         // ngân sách đủ lớn thì giữ nguyên
         assert_eq!(fit_messages(&msgs, full * 2).len(), msgs.len());
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    #[test]
+    fn head_chars_is_char_safe() {
+        assert_eq!(head_chars("ảnh-đẹp", 3), "ảnh");
+        assert_eq!(head_chars("ab", 5), "ab");
+    }
+    #[test]
+    fn ssrf_blocks_internal() {
+        for u in ["http://127.0.0.1/x", "http://[::1]/", "http://192.168.1.5/", "http://169.254.169.254/", "file:///etc/passwd", "http://localhost:8790/"] {
+            assert!(!url_is_public(&reqwest::Url::parse(u).unwrap()), "{u}");
+        }
+        assert!(url_is_public(&reqwest::Url::parse("https://example.com/a.png").unwrap()));
     }
 }
