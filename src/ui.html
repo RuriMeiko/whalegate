@@ -84,8 +84,8 @@
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-web","messages":[{"role":"user","content":"hello"}]}'
 
-# thinking: {"model":"deepseek-web-r1"}  |  search: thêm "search": true</div>
-    <div class="sub" style="margin-top:10px">Models: <code>deepseek-web</code> (thường), <code>deepseek-web-r1</code> (thinking)</div>
+# thinking: thêm "reasoning_effort":"max"  |  search: thêm "search": true</div>
+    <div class="sub" style="margin-top:10px">Model duy nhất: <code>deepseek-web</code> — mức suy nghĩ qua <code>reasoning_effort</code>: <code>none</code> (Nhanh) / <code>max</code> (DeepThink). Hỗ trợ ảnh.</div>
   </div>
 </div>
 
@@ -173,9 +173,13 @@ async function loadStats() {
       const vbtn = document.createElement('button');
       vbtn.className = 'ghost'; vbtn.style.cssText = 'padding:5px 10px;font-size:12px;margin:0';
       vbtn.textContent = 'Verify'; vbtn.onclick = () => verify(a.id);
+      const rbtn = document.createElement('button');
+      rbtn.className = 'ghost'; rbtn.style.cssText = 'padding:5px 10px;font-size:12px;margin:0';
+      rbtn.title = 'Xoá lỗi/cooldown + phiên web đang giữ, kiểm tra lại token';
+      rbtn.textContent = 'Reset'; rbtn.onclick = async () => { await fetch('/api/accounts/' + a.id + '/reset', {method: 'POST'}); loadStats(); };
       const dbtn = document.createElement('button');
       dbtn.className = 'danger'; dbtn.textContent = 'Xoá'; dbtn.onclick = () => del(a.id);
-      actions.append(vbtn, dbtn); td.append(actions); tr.append(td);
+      actions.append(vbtn, rbtn, dbtn); td.append(actions); tr.append(td);
       tbody.append(tr);
     }
   } catch (e) {}

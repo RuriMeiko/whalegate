@@ -187,6 +187,9 @@ Model trả về tool-call sẽ nằm trong `choices[0].message.tool_calls` như
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
 | `DS_PORT` | `8787` | Cổng nghe (bind `127.0.0.1`) |
+| `DS_STATEFUL` | 1 | nối tiếp hội thoại trong phiên web (chỉ gửi phần mới); 0 = luôn gửi đủ |
+| `DS_CONV_TTL` / `DS_CONV_MAX_CHARS` | 1800 / 600000 | dọn phiên nhàn rỗi (s) / trần ngữ cảnh một phiên (ký tự) |
+| `DS_DEFAULT_EFFORT` | none | mức suy nghĩ khi client không chỉ định |
 | `DS_API_KEY` | (trống) | Đặt thì `/v1/*` yêu cầu `Authorization: Bearer <key>` |
 | `DS_ACCOUNTS_PATH` | `$HOME/.ds-harness/accounts.json` | File lưu account |
 | `DS_MAX_CONC_PER_ACC` | `2` | Số call đồng thời tối đa mỗi acc (>2 dễ bị khoá) |
@@ -281,3 +284,9 @@ npx wrangler secret put WORKER_TOKEN   # bearer token cho client
 ---
 
 **Dùng với trách nhiệm. Ưu tiên mua API chính thức nếu bạn cần sự ổn định.**
+
+## Model, ảnh, stateful
+- **Một model**: `deepseek-web`. `reasoning_effort: none` = Nhanh (flash), `max` (hoặc mức khác) = DeepThink. Alias cũ `deepseek-web-r1` và hậu tố `deepseek-web:max` vẫn nhận.
+- **Ảnh**: nhận `image_url` (data URL/http), `image`/base64 (kiểu Anthropic), kể cả trong kết quả tool. Ảnh được upload lên DS (`/file/upload_file`, PoW riêng) và gắn qua `ref_file_ids`; cache theo acc.
+- **Stateful**: sau mỗi lượt trả lời harness ghi dấu vân tay của prefix + id tool-call đã cấp. Request kế tiếp có prefix khớp chỉ gửi phần mới, nối bằng `parent_message_id` vào đúng phiên/acc. Không khớp, acc bận, đổi tools hay phiên quá dài thì tự gửi đủ ngữ cảnh. Phiên nhàn rỗi bị xoá sau `DS_CONV_TTL`.
+- **Token**: chuỗi tĩnh (không xoay); `code 40003` = hết hạn/đăng xuất → acc bị cách ly 30 phút, báo "cần login lại". Cookie `aws-waf-token` được làm mới từ Chrome mỗi 5 phút. Nút **Reset** xoá lỗi/cooldown/phiên và kiểm tra lại token.

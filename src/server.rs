@@ -203,6 +203,17 @@ pub(crate) async fn save_store(store: &Store) -> Result<()> {
     Ok(())
 }
 
+/// Một hội thoại đang nằm trong phiên web: gửi tiếp chỉ cần phần mới + parent_message_id.
+#[derive(Clone)]
+pub(crate) struct Conv {
+    pub(crate) acc_id: String,
+    pub(crate) sid: String,
+    pub(crate) parent_id: i64,
+    pub(crate) tools_hash: u64,
+    pub(crate) chars: usize,
+    pub(crate) last_used: u64,
+}
+
 pub(crate) struct AppState {
     pub(crate) store: RwLock<Store>,
     // Round-robin pointer chọn account kế tiếp
@@ -212,6 +223,8 @@ pub(crate) struct AppState {
     // đang canh 1 tab login (chặn double-start)
     pub(crate) login_watching: std::sync::Mutex<bool>,
     // (acc_id, sha256 ảnh) -> file id DS đã upload (id gắn theo acc nên cache theo acc)
+    // hội thoại stateful: dấu vân tay prefix -> phiên web đang giữ ngữ cảnh
+    pub(crate) convs: std::sync::Mutex<std::collections::HashMap<u64, Conv>>,
     pub(crate) file_cache: std::sync::Mutex<std::collections::HashMap<(String, String), String>>,
 }
 
@@ -1417,6 +1430,11 @@ fn render_tool_calls(m: &Value) -> String {
 }
 
 pub(crate) fn messages_to_prompt(messages: &[Value]) -> String {
+    messages_to_prompt_from(messages, 0)
+}
+
+/// Render từ message thứ `start` (nhãn tool_result vẫn tra tên tool trên toàn bộ lịch sử).
+pub(crate) fn messages_to_prompt_from(messages: &[Value], start: usize) -> String {
     // id → tên tool, lấy từ các tool_calls của assistant, để gắn nhãn tool_result
     let mut call_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for m in messages {
@@ -1430,6 +1448,7 @@ pub(crate) fn messages_to_prompt(messages: &[Value]) -> String {
     }
     messages
         .iter()
+        .skip(start)
         .filter_map(|m| {
             let role = m["role"].as_str().unwrap_or("user");
             Some(match role {
@@ -1778,6 +1797,31 @@ async fn access_guard(
     next.run(req).await
 }
 
+/// Dọn hội thoại stateful nhàn rỗi quá DS_CONV_TTL (mặc định 1800s): xoá phiên trên DS và khỏi registry.
+async fn conv_sweeper(st: Arc<AppState>) {
+    let ttl: u64 = std::env::var("DS_CONV_TTL").ok().and_then(|v| v.parse().ok()).unwrap_or(1800);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let t = now();
+        let expired: Vec<Conv> = {
+            let mut m = st.convs.lock().unwrap();
+            let keys: Vec<u64> = m.iter().filter(|(_, c)| t.saturating_sub(c.last_used) > ttl).map(|(k, _)| *k).collect();
+            keys.into_iter().filter_map(|k| m.remove(&k)).collect()
+        };
+        for c in expired {
+            let acc = { st.store.read().await.accounts.iter().find(|a| a.id == c.acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
+            if let Some((tok, ck)) = acc {
+                if let Ok(cl) = DsClient::new(tok, ck) {
+                    match cl.delete_session(&c.sid).await {
+                        Ok(()) => eprintln!("[conv] đã xoá phiên nhàn rỗi {}", &c.sid[..8.min(c.sid.len())]),
+                        Err(e) => eprintln!("[conv] xoá phiên {} lỗi: {}", c.sid, e),
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn run(port: u16) -> Result<()> {
     let store = load_store().await;
     let st = Arc::new(AppState {
@@ -1786,6 +1830,7 @@ pub async fn run(port: u16) -> Result<()> {
         in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
         login_watching: std::sync::Mutex::new(false),
         file_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        convs: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let app = Router::new()
@@ -1806,6 +1851,7 @@ pub async fn run(port: u16) -> Result<()> {
         .with_state(st.clone());
 
     // Auto-refresh cookies từ Chrome mỗi 5 phút
+    tokio::spawn(conv_sweeper(st.clone()));
     tokio::spawn(auto_refresh_loop(st));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));

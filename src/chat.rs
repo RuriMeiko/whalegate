@@ -36,7 +36,7 @@ struct Lease {
 enum Out {
     Reasoning(String),
     Content(String),
-    ToolCalls(Vec<DsmlToolCall>),
+    ToolCalls(Vec<DsmlToolCall>, Vec<String>), // (calls, id đã cấp — client sẽ echo lại, dùng làm dấu vân tay)
     Finish { reason: &'static str, prompt_tokens: i64, completion_tokens: i64 },
     Error(String),
 }
@@ -48,8 +48,26 @@ pub(crate) struct Image {
     mime: String,
 }
 
+/// Tiếp hội thoại đang nằm trong phiên web: chỉ gửi phần mới.
+struct ContPlan {
+    acc_id: String,
+    sid: String,
+    parent_id: i64,
+    delta_prompt: String,
+    delta_images: Vec<Image>,
+    base_chars: usize,
+}
+
+/// Đăng ký hội thoại sau khi trả lời để request kế tiếp nối tiếp được.
+struct RegPlan {
+    pf_n: u64,
+    tools_hash: u64,
+}
+
 struct ChatCtx {
     prompt: String,
+    cont: Option<ContPlan>,
+    reg: Option<RegPlan>,
     images: Vec<Image>,
     thinking: bool,
     search: bool,
@@ -147,13 +165,64 @@ pub(crate) fn effort_to_thinking(effort: Option<&str>, legacy_r1: bool, thinking
     }
 }
 
+fn hash_pair(prev: u64, x: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    prev.hash(&mut h);
+    x.hash(&mut h);
+    h.finish()
+}
+
+/// Dấu vân tay 1 message: assistant chỉ tính id tool-call (khoan dung với việc client chuẩn hoá lại văn bản); còn lại tính nội dung.
+fn msg_fp_str(m: &Value) -> String {
+    let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+    if role == "assistant" {
+        let ids: Vec<&str> = m.get("tool_calls").and_then(|t| t.as_array())
+            .map(|a| a.iter().filter_map(|tc| tc.get("id").and_then(|x| x.as_str())).collect()).unwrap_or_default();
+        return format!("assistant|{}", ids.join(","));
+    }
+    format!("{}|{}|{}", role, m.get("tool_call_id").and_then(|x| x.as_str()).unwrap_or(""), render_content(m))
+}
+
+/// pf[k] = dấu vân tay của k message đầu (pf[0] là hạt giống).
+pub(crate) fn prefix_fps(msgs: &[Value]) -> Vec<u64> {
+    let mut v = vec![0x5eed_u64];
+    for m in msgs {
+        let next = hash_pair(*v.last().unwrap(), &msg_fp_str(m));
+        v.push(next);
+    }
+    v
+}
+
+fn tools_hash(tools: &Option<Vec<Value>>) -> u64 {
+    hash_pair(7, &serde_json::to_string(tools).unwrap_or_default())
+}
+
+fn stateful_enabled() -> bool {
+    std::env::var("DS_STATEFUL").map(|v| v != "0").unwrap_or(true)
+}
+
+fn conv_max_chars() -> usize {
+    std::env::var("DS_CONV_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(600_000)
+}
+
+fn spawn_delete_session(acc: Option<(String, String)>, sid: String) {
+    if let Some((tok, ck)) = acc {
+        tokio::spawn(async move {
+            if let Ok(c) = DsClient::new(tok, ck) {
+                let _ = c.delete_session(&sid).await;
+            }
+        });
+    }
+}
+
 fn queue_wait_secs() -> u64 {
     std::env::var("DS_QUEUE_WAIT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(120)
 }
 
 /// Chọn acc ít bận nhất (rồi lâu chưa dùng nhất). `exclude` là loại trừ MỀM: bỏ qua các acc đó khi còn acc khác
 /// trong pool; pool chỉ có đúng acc đó thì vẫn dùng. Chờ tới `deadline` rồi trả 429.
-async fn acquire(st: &Arc<AppState>, exclude: &[String], deadline: Instant) -> Result<Lease, ApiErr> {
+async fn acquire(st: &Arc<AppState>, exclude: &[String], only: Option<&str>, deadline: Instant) -> Result<Lease, ApiErr> {
     loop {
         let t = now();
         let picked = {
@@ -166,7 +235,7 @@ async fn acquire(st: &Arc<AppState>, exclude: &[String], deadline: Instant) -> R
             let in_flight = st.in_flight.lock().unwrap();
             let mut best: Option<((u32, u64), usize)> = None;
             for (i, a) in accs.iter().enumerate() {
-                if !a.pool_enabled || (others_exist && exclude.contains(&a.id)) {
+                if !a.pool_enabled || (others_exist && exclude.contains(&a.id)) || only.map_or(false, |o| o != a.id) {
                     continue;
                 }
                 let conc = in_flight
@@ -249,15 +318,30 @@ async fn mark_auth_invalid(st: &Arc<AppState>, acc_id: &str) {
     let _ = save_store(&store).await;
 }
 
-async fn ok_acc(st: &Arc<AppState>, acc_id: &str, sid: &str) {
+async fn ok_acc(st: &Arc<AppState>, acc_id: &str, sid: &str, shared: bool) {
     let mut store = st.store.write().await;
     if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
-        note_session_use(a, sid);
+        if shared { note_session_use(a, sid); }
         a.stats.total_ok += 1;
         a.stats.mark_ok();
         a.last_status = Some("ok".into());
     }
     let _ = save_store(&store).await;
+}
+
+impl ContPlan {
+    fn acc_id_hint(&self) -> &str { &self.acc_id }
+}
+
+/// Ghi lại hội thoại vừa trả lời để request kế (cùng prefix + assistant này) nối tiếp được trong phiên web.
+fn register_conv(st: &Arc<AppState>, ctx: &ChatCtx, was_stateful: bool, acc_id: &str, sid: &str, msg_id: Option<i64>, ids: &[String], resp_chars: usize) {
+    let (Some(reg), Some(mid)) = (&ctx.reg, msg_id) else { return };
+    let base = if was_stateful { ctx.cont.as_ref().map_or(0, |c| c.base_chars) } else { ctx.prompt.chars().count() };
+    let key = hash_pair(reg.pf_n, &format!("assistant|{}", ids.join(",")));
+    st.convs.lock().unwrap().insert(key, Conv {
+        acc_id: acc_id.to_string(), sid: sid.to_string(), parent_id: mid,
+        tools_hash: reg.tools_hash, chars: base + resp_chars, last_used: now(),
+    });
 }
 
 /// Lõi: retry tối đa 3 lượt, mỗi lượt lỗi/rỗng/cụt thì đổi sang acc khác.
@@ -274,7 +358,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                 // failover: nhả acc hỏng rồi lấy acc khác (mềm)
                 let prev = lease.take().map(|l| l.acc_id);
                 let dl = Instant::now() + Duration::from_secs(queue_wait_secs().min(60));
-                match acquire(&st, &failed, dl).await {
+                match acquire(&st, &failed, None, dl).await {
                     Ok(l) => {
                         if Some(&l.acc_id) == prev.as_ref() {
                             // pool chỉ còn đúng acc này → chờ DS hồi (rate-limit mềm ~8-10s)
@@ -292,12 +376,28 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             let acc_id = l.acc_id.clone();
             touch_acc(&st, &acc_id).await;
 
+            // lượt đầu + có hội thoại đang nằm trong phiên web → chỉ gửi phần mới nối vào parent
+            let stateful_attempt = attempt == 0 && ctx.cont.is_some();
+            let (prompt_used, images_used, sid_used, parent_used): (&str, &Vec<Image>, Option<String>, Option<i64>) = match (&ctx.cont, stateful_attempt) {
+                (Some(cp), true) => (cp.delta_prompt.as_str(), &cp.delta_images, Some(cp.sid.clone()), Some(cp.parent_id)),
+                // bắt đầu hội thoại stateful: phiên riêng (None → tạo mới); không dùng phiên chung của acc
+                _ if ctx.reg.is_some() => (ctx.prompt.as_str(), &ctx.images, None, None),
+                _ => (ctx.prompt.as_str(), &ctx.images, l.thread_sid.clone(), None),
+            };
+            let own_session = stateful_attempt || ctx.reg.is_some();
+            // retry sau khi lượt nối tiếp hỏng: bỏ phiên cũ (ngữ cảnh không còn đáng tin)
+            if attempt == 1 {
+                if let Some(cp) = &ctx.cont {
+                    let acc = { st.store.read().await.accounts.iter().find(|a| a.id == cp.acc_id_hint()).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
+                    spawn_delete_session(acc, cp.sid.clone());
+                }
+            }
             let stream_res = match DsClient::new(l.token.clone(), cookie_string(&l.cookies)) {
                 Ok(c) => {
                     // ảnh: upload (cache theo acc) rồi tham chiếu bằng ref_file_ids
                     let mut file_ids: Vec<String> = Vec::new();
                     let mut up_err: Option<anyhow::Error> = None;
-                    for img in &ctx.images {
+                    for img in images_used {
                         let key = (acc_id.clone(), img.hash.clone());
                         let cached = st.file_cache.lock().unwrap().get(&key).cloned();
                         if let Some(id) = cached { file_ids.push(id); continue; }
@@ -308,7 +408,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                     }
                     match up_err {
                         Some(e) => Err(e),
-                        None => c.chat_stream(&ctx.prompt, l.thread_sid.as_deref(), None, ctx.thinking, ctx.search, &file_ids).await,
+                        None => c.chat_stream(prompt_used, sid_used.as_deref(), parent_used, ctx.thinking, ctx.search, &file_ids).await,
                     }
                 }
                 Err(e) => Err(e),
@@ -336,6 +436,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             let mut think_dropped = false;
             let mut has_content = false;
             let mut truncated: Option<String> = None;
+            let mut msg_id: Option<i64> = None;
             let mut attempt_done = false;
             #[allow(unused_assignments)]
             let mut continue_attempt = false;
@@ -371,6 +472,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             yield Out::Content(head);
                         }
                     }
+                    StreamEv::MsgId(m) => { msg_id = Some(m); }
                     StreamEv::Truncated(why) => { truncated = Some(why); }
                     StreamEv::Done(_) => {
                         if !think_dropped && !think_buf.is_empty() {
@@ -395,8 +497,10 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                                 attempt_done = true;
                                 continue_attempt = true;
                             } else {
-                            ok_acc(&st, &acc_id, &sid).await;
-                            yield Out::ToolCalls(calls);
+                            ok_acc(&st, &acc_id, &sid, !own_session).await;
+                            let ids: Vec<String> = calls.iter().map(|_| new_call_id()).collect();
+                            register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &ids, full_text.chars().count());
+                            yield Out::ToolCalls(calls, ids);
                             yield Out::Finish { reason: "tool_calls", prompt_tokens, completion_tokens };
                             finished = true;
                             }
@@ -425,7 +529,8 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             fail_acc(&st, &acc_id, "unparsed", false).await;
                         } else {
                             if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
-                            ok_acc(&st, &acc_id, &sid).await;
+                            ok_acc(&st, &acc_id, &sid, !own_session).await;
+                            register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &[], full_text.chars().count());
                             yield Out::Finish { reason: "stop", prompt_tokens, completion_tokens };
                             finished = true;
                         }
@@ -517,11 +622,49 @@ pub(crate) async fn api_chat_completions(
         prompt.chars().count(), thinking
     );
 
-    let deadline = Instant::now() + Duration::from_secs(queue_wait_secs());
-    let lease = acquire(&st, &[], deadline).await?;
+    // ---- STATEFUL: tìm hội thoại đang nằm trong phiên web khớp prefix của request này
+    let n = req.messages.len();
+    let stateful_on = stateful_enabled() && req.tools.as_ref().map_or(false, |t| !t.is_empty()) && !is_title_req;
+    let pf = prefix_fps(&req.messages);
+    let th = tools_hash(&req.tools);
+    let mut cont: Option<ContPlan> = None;
+    let mut lease: Option<Lease> = None;
+    if stateful_on {
+        let hit = (1..n).rev()
+            .filter(|k| req.messages[k - 1].get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            .find_map(|k| st.convs.lock().unwrap().remove(&pf[k]).map(|c| (k, c)));
+        if let Some((k, conv)) = hit {
+            let acc_creds = { st.store.read().await.accounts.iter().find(|a| a.id == conv.acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
+            let usable = acc_creds.is_some() && conv.tools_hash == th && conv.chars <= conv_max_chars();
+            let delta = messages_to_prompt_from(&req.messages, k);
+            if usable && !delta.trim().is_empty() {
+                // cần đúng acc đã giữ phiên; bận quá 4s thì thôi, gửi đủ ở acc khác
+                match acquire(&st, &[], Some(&conv.acc_id), Instant::now() + Duration::from_secs(4)).await {
+                    Ok(l) => {
+                        let delta_images = collect_images(&req.messages[k..], 4).await;
+                        eprintln!("[conv] nối tiếp phiên {} (+{} msg, delta {} ký tự, phiên đã {} ký tự)", &conv.sid[..8.min(conv.sid.len())], n - k, delta.chars().count(), conv.chars);
+                        cont = Some(ContPlan { acc_id: conv.acc_id.clone(), sid: conv.sid.clone(), parent_id: conv.parent_id, delta_prompt: delta, delta_images, base_chars: conv.chars });
+                        lease = Some(l);
+                    }
+                    Err(_) => {
+                        eprintln!("[conv] acc giữ phiên đang bận — gửi đủ ngữ cảnh ở acc khác");
+                        st.convs.lock().unwrap().insert(pf[k], conv);
+                    }
+                }
+            } else {
+                eprintln!("[conv] bỏ phiên (tools đổi / quá dài / acc mất) — gửi đủ ngữ cảnh");
+                spawn_delete_session(acc_creds, conv.sid.clone());
+            }
+        }
+    }
+    let lease = match lease {
+        Some(l) => l,
+        None => acquire(&st, &[], None, Instant::now() + Duration::from_secs(queue_wait_secs())).await?,
+    };
     let images = collect_images(&msgs, 4).await;
     if !images.is_empty() { eprintln!("[req] {} ảnh đính kèm", images.len()); }
-    let ctx = ChatCtx { prompt, images, thinking, search, tools: req.tools.clone() };
+    let reg = if stateful_on { Some(RegPlan { pf_n: pf[n], tools_hash: th }) } else { None };
+    let ctx = ChatCtx { prompt, cont, reg, images, thinking, search, tools: req.tools.clone() };
     let mut outs = Box::pin(run_chat(st, ctx, lease));
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
@@ -532,10 +675,10 @@ pub(crate) async fn api_chat_completions(
                 match o {
                     Out::Reasoning(t) => yield chunk(&id, &model_name, json!({"reasoning_content": t}), Value::Null),
                     Out::Content(t) => yield chunk(&id, &model_name, json!({"content": t}), Value::Null),
-                    Out::ToolCalls(calls) => {
+                    Out::ToolCalls(calls, ids) => {
                         for (i, c) in calls.iter().enumerate() {
                             yield chunk(&id, &model_name, json!({"tool_calls": [{
-                                "index": i, "id": new_call_id(), "type": "function",
+                                "index": i, "id": ids[i].clone(), "type": "function",
                                 "function": {"name": c.name, "arguments": c.arguments}
                             }]}), Value::Null);
                         }
@@ -567,9 +710,9 @@ pub(crate) async fn api_chat_completions(
         match o {
             Out::Reasoning(t) => reasoning.push_str(&t),
             Out::Content(t) => content.push_str(&t),
-            Out::ToolCalls(calls) => {
-                tool_calls = calls.iter().map(|c| json!({
-                    "id": new_call_id(), "type": "function",
+            Out::ToolCalls(calls, ids) => {
+                tool_calls = calls.iter().zip(ids.iter()).map(|(c, tid)| json!({
+                    "id": tid, "type": "function",
                     "function": {"name": c.name, "arguments": c.arguments}
                 })).collect();
             }
@@ -592,6 +735,39 @@ pub(crate) async fn api_chat_completions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn fingerprint_chain_matches_next_request() {
+        let m1 = vec![json!({"role": "system", "content": "s"}), json!({"role": "user", "content": "làm đi"})];
+        let pf1 = prefix_fps(&m1);
+        let key = hash_pair(pf1[2], "assistant|call_abc,call_def"); // lúc đăng ký sau khi trả lời
+        let m2 = vec![
+            m1[0].clone(), m1[1].clone(),
+            // client echo lại assistant: văn bản có thể khác, id phải giống
+            json!({"role": "assistant", "content": "  văn bản đã bị chuẩn hoá ", "tool_calls": [
+                {"id": "call_abc", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+                {"id": "call_def", "type": "function", "function": {"name": "read", "arguments": "{}"}}]}),
+            json!({"role": "tool", "tool_call_id": "call_abc", "content": "ok"}),
+        ];
+        let pf2 = prefix_fps(&m2);
+        assert_eq!(pf2[3], key, "prefix + assistant phải khớp dấu vân tay đã đăng ký");
+        // đổi nội dung user ở prefix → không khớp
+        let mut m3 = m2.clone(); m3[1] = json!({"role": "user", "content": "làm khác"});
+        assert_ne!(prefix_fps(&m3)[3], key);
+        // trả lời không tool-call
+        assert_eq!(prefix_fps(&[m1[0].clone(), m1[1].clone(), json!({"role": "assistant", "content": "xong"})])[3], hash_pair(pf1[2], "assistant|"));
+    }
+
+    #[test]
+    fn effort_mapping() {
+        assert!(!effort_to_thinking(Some("none"), false, None));
+        assert!(effort_to_thinking(Some("max"), false, None));
+        assert!(effort_to_thinking(Some("high"), false, None));
+        assert!(!effort_to_thinking(None, false, None)); // mặc định Nhanh
+        assert!(effort_to_thinking(None, true, None)); // alias cũ *-r1
+        assert!(!effort_to_thinking(Some("none"), true, Some(true))); // effort tường minh thắng
+    }
 
     #[test]
     fn fit_messages_shrinks_old_tool_results_then_drops_oldest() {
