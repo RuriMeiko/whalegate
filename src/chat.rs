@@ -620,66 +620,36 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                 }
             };
 
-            let mut resp_text = String::new(); // phần content chưa flush (đuôi nghi là marker)
+            let mut content = crate::stream_guard::ContentGuard::new(tools_on);
+            let mut reasoning = crate::stream_guard::ReasoningGuard::new(tools_on);
             let mut full_text = String::new();
-            let mut yielded_len: usize = 0;
             let mut think_est: u64 = 0;
             let prior_tokens: u64 = if stateful_attempt { ctx.cont.as_ref().map_or(0, |c| c.tokens) } else { 0 };
-            let mut think_buf = String::new();
-            let mut think_dropped = false;
             let mut has_content = false;
             let mut truncated: Option<String> = None;
             let mut msg_id: Option<i64> = None;
             let mut real_usage: Option<u64> = None;
             let mut attempt_done = false;
-            // đã gặp marker trong content: giữ hết phần còn lại tới Done, khỏi quét lại buffer mỗi chunk (O(n²) với args lớn)
-            let mut in_block = false;
 
             while let Some(ev) = rx.recv().await {
                 match ev {
-                    StreamEv::Thinking(t) if !tools_on => {
-                        think_est += est_tokens(&t);
-                        if !t.is_empty() { yield Out::Reasoning(t); }
-                    }
                     StreamEv::Thinking(t) => {
                         think_est += est_tokens(&t);
                         // model hay nháp khối tool-call trong lúc nghĩ → không để markup lọt ra client
-                        if !think_dropped && !t.is_empty() {
-                            think_buf.push_str(&t);
-                            let cut = safe_flush_len(&think_buf);
-                            if has_tool_marker(&think_buf) {
-                                crate::elog!("[toolcall-guard] DSML trong reasoning — cắt từ marker");
-                                think_dropped = true;
-                            }
-                            if cut > 0 {
-                                yield Out::Reasoning(think_buf[..cut].to_string());
-                            }
-                            if think_dropped { think_buf.clear(); } else { think_buf.drain(..cut); }
-                        }
+                        let was_dropped = reasoning.dropped();
+                        if let Some(r) = reasoning.push(&t) { yield Out::Reasoning(r); }
+                        if !was_dropped && reasoning.dropped() { crate::elog!("[toolcall-guard] tool-call markup trong reasoning — bỏ phần còn lại"); }
                     }
                     StreamEv::Response(t) => {
                         has_content = true;
-                        resp_text.push_str(&t);
                         full_text.push_str(&t);
-                        if in_block { continue; }
-                        // không có tools: không có gì để giữ lại. Có tools: chỉ flush phần chắc chắn là prose,
-                        // giữ đuôi nghi marker / toàn bộ từ marker trở đi
-                        let cut = if tools_on { safe_flush_len(&resp_text) } else { resp_text.len() };
-                        if cut > 0 {
-                            let head: String = resp_text[..cut].to_string();
-                            yielded_len += head.chars().count();
-                            resp_text.drain(..cut);
-                            yield Out::Content(head);
-                        }
-                        in_block = tools_on && has_tool_marker(&resp_text);
+                        if let Some(c) = content.push(&t) { yield Out::Content(c); }
                     }
                     StreamEv::MsgId(m) => { msg_id = Some(m); }
                     StreamEv::Usage(u) => { real_usage = Some(u); crate::elog!("[usage] accumulated_token_usage={} (stateful={})", u, stateful_attempt); }
                     StreamEv::Truncated(why) => { truncated = Some(why); }
                     StreamEv::Done => {
-                        if !think_dropped && !think_buf.is_empty() {
-                            yield Out::Reasoning(std::mem::take(&mut think_buf));
-                        }
+                        if let Some(r) = reasoning.finish() { yield Out::Reasoning(r); }
                         // token: số thật của web (cộng dồn theo phiên) trừ phần output lượt này; không có thì ước lượng.
                         // Đo thực tế: accumulated_token_usage KHÔNG tính token suy nghĩ (think 2K hay 5K ký tự đều ra ~600),
                         // nên chỉ trừ output; còn completion_tokens báo ra vẫn gồm cả think (đúng nghĩa OpenAI/DeepSeek API).
@@ -720,12 +690,9 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                                 last_err = Some(format!("model trả tool-call không dùng được: {}", problems.join("; ")));
                                 break;
                             }
-                            // prose trước khối tool-call mà chưa stream (before đã trim)
-                            let before_chars = before.chars().count();
-                            if before_chars > yielded_len {
-                                let rem: String = before.chars().skip(yielded_len).collect();
-                                if !rem.is_empty() { yield Out::Content(rem); }
-                            }
+                            // prose trước khối tool-call mà chưa stream
+                            let rem = content.remainder(&before);
+                            if !rem.is_empty() { yield Out::Content(rem); }
                             ok_acc(&st, &acc_id, &sid, !own_session).await;
                             let ids: Vec<String> = calls.iter().map(|_| new_call_id()).collect();
                             register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &ids, full_text.chars().count(), real_usage.unwrap_or(0));
@@ -740,7 +707,8 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             last_err = Some(why);
                             if attempt == 2 && has_content && !has_tool_marker(&full_text) {
                                 // lượt cuối: trả phần đã có, báo 'length' để client biết bị cắt
-                                if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
+                                let rest = content.take_rest();
+                                if !rest.is_empty() { yield Out::Content(rest); }
                                 crate::usage::record(prompt_tokens.max(0) as u64, cached_tokens.max(0) as u64, completion_tokens.max(0) as u64);
                             crate::usage::record_request(t_req.elapsed().as_millis() as u64, true);
                             yield Out::Finish { reason: "length", prompt_tokens, completion_tokens, cached_tokens };
@@ -768,7 +736,8 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             let why = match &ctx.choice { ToolChoice::Named(n) => format!("you must call the tool \"{}\"", n), _ => "you must call at least one tool".into() };
                             repair = Some(repair_note(&full_text, &why));
                         } else {
-                            if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
+                            let rest = content.take_rest();
+                            if !rest.is_empty() { yield Out::Content(rest); }
                             ok_acc(&st, &acc_id, &sid, !own_session).await;
                             register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &[], full_text.chars().count(), real_usage.unwrap_or(0));
                             crate::usage::record(prompt_tokens.max(0) as u64, cached_tokens.max(0) as u64, completion_tokens.max(0) as u64);

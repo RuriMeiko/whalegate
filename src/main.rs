@@ -8,6 +8,7 @@ mod pow;
 mod server;
 mod settings;
 mod setup_dsh;
+mod stream_guard;
 mod usage;
 
 use anyhow::Result;

@@ -942,10 +942,40 @@ const TOOL_MARKERS: [&str; 8] = ["<dsml", "<invoke", "<parameter", "<bash", "<to
 
 /// Vị trí đầu tiên của marker tool-call. "DSML" trần chỉ tính khi dính markup: đứng sau '<' / thanh '｜' / "DS" (typo
 /// "DSDSML") hoặc ngay trước thanh '｜'. Văn xuôi nhắc "DSML tool-call parsing" (vd bản tóm tắt compaction) thì không tính.
+/// Vị trí `i` nằm trong code inline (số backtick đơn trước nó trên cùng dòng là lẻ): văn xuôi đang TRÍCH markup,
+/// không phải gọi tool (vd "stray `</｜｜DSML｜｜ parameter>` inside new_string"). Khối ``` không tính ở đây.
+fn in_inline_code(buf: &str, i: usize) -> bool {
+    let mut start = buf[..i].rfind('\n').map_or(0, |p| p + 1).max(i.saturating_sub(4096));
+    while !buf.is_char_boundary(start) { start += 1; }
+    let mut odd = false;
+    for (j, c) in buf[start..i].char_indices() { if is_inline_tick(buf, start + j, c) { odd = !odd; } }
+    odd
+}
+
+/// Backtick mở/đóng code inline: bỏ fence ``` và tick thứ hai của cặp `` (đếm cặp như một dấu).
+fn is_inline_tick(buf: &str, at: usize, c: char) -> bool {
+    c == '`' && !buf[at..].starts_with("```") && !buf[..at].ends_with('`')
+}
+
 fn find_tool_marker(buf: &str) -> Option<usize> {
-    let plain = TOOL_MARKERS.iter().filter_map(|k| buf.find(k)).min();
+    // ứng viên theo thứ tự vị trí; độ chẵn lẻ backtick trên dòng tính dần một lượt (không đếm lại mỗi ứng viên —
+    // văn xuôi một dòng dài toàn marker trích trong backtick từng là O(n²))
+    let mut cands: Vec<usize> = TOOL_MARKERS.iter().flat_map(|k| buf.match_indices(k).map(|(i, _)| i)).collect();
+    cands.sort_unstable();
+    cands.dedup();
+    let (mut pos, mut odd) = (0usize, false);
+    let mut inline_at = |i: usize| -> bool {
+        for (j, c) in buf[pos..i].char_indices() {
+            if c == '\n' { odd = false } else if is_inline_tick(buf, pos + j, c) { odd = !odd }
+        }
+        pos = i;
+        odd
+    };
+    let plain = cands.into_iter().find(|&i| !inline_at(i));
     let mut dsml = None;
     for (i, _) in buf.match_indices("DSML") {
+        if plain.is_some_and(|p| p < i) { break; }
+        if in_inline_code(buf, i) { continue; }
         let before = &buf[..i];
         let after = &buf[i + 4..];
         let glued_after = after.starts_with('｜') || after.starts_with('|');
@@ -953,6 +983,13 @@ fn find_tool_marker(buf: &str) -> Option<usize> {
         if glued_before || glued_after {
             // lùi về đầu cụm: bỏ "DS" typo, các thanh và '<' đứng trước
             let head = before.trim_end_matches("DS").trim_end_matches(|c| c == '｜' || c == '|');
+            // phải có dạng THẺ: mở bằng '<'/'</', hoặc theo sau là tên thẻ. Văn xuôi nhắc "`｜｜DSML｜｜` fragments"
+            // (vd bản tóm tắt compaction) không phải ý định gọi tool.
+            let tagged = head.ends_with('<') || head.ends_with("</") || {
+                let a = after.trim_start_matches(['｜', '|']).trim_start_matches([' ', ':', '_', '-']);
+                [">", "calls", "call", "invoke", "parameter", "tool_call", "function_call"].iter().any(|w| a.starts_with(w))
+            };
+            if !tagged { continue; }
             dsml = Some(if head.ends_with('<') { head.len() - 1 } else { head.len() });
             break;
         }
@@ -964,14 +1001,27 @@ pub(crate) fn has_tool_marker(buf: &str) -> bool {
     find_tool_marker(buf).is_some()
 }
 
+/// Đuôi `<…` dài hơn thế này mà vẫn chưa thành marker thì không phải marker (marker dài nhất cần ~20 byte để nhận ra):
+/// thả ra luôn — không thì văn xuôi kiểu `x < y` rồi một đoạn dài không có '>' bị giữ mãi và quét lại mỗi chunk.
+const MAX_PENDING_TAG: usize = 48;
+
 pub(crate) fn safe_flush_len(buf: &str) -> usize {
     if let Some(m) = find_tool_marker(buf) {
-        return buf[..m].rfind('<').unwrap_or(m);
+        // lùi qua '</' hoặc '<' dính ngay trước marker (find_tool_marker có thể dừng ở '/' của thẻ đóng)
+        let head = &buf[..m];
+        let head = head.strip_suffix('/').unwrap_or(head);
+        return head.strip_suffix('<').map_or(m, |h| h.len());
     }
-    match buf.rfind('<') {
-        Some(i) if !buf[i..].contains('>') => i,
-        _ => buf.len(),
+    // đuôi có thể là ĐẦU một marker chưa đủ ký tự để nhận ra (kể cả khi chunk cắt ngang marker):
+    // '<…' / thanh '｜…' / '|…' chưa gặp '>' trong MAX_PENDING_TAG byte cuối, hoặc "D"/"DS"/"DSM" ở cuối.
+    let mut win = buf.len().saturating_sub(MAX_PENDING_TAG);
+    while !buf.is_char_boundary(win) { win += 1; }
+    let from = buf.rfind('>').map_or(0, |i| i + 1).max(win);
+    let mut cut = buf[from..].find(['<', '｜', '|']).map_or(buf.len(), |p| from + p);
+    for partial in ["DSM", "DS", "D"] {
+        if buf[..cut].ends_with(partial) { cut -= partial.len(); break; }
     }
+    cut
 }
 
 /// Số lượt tối đa trên 1 session web trước khi đổi (DS_SESSION_ROTATE, mặc định 30).
@@ -1038,7 +1088,9 @@ fn parse_native_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
     let head = t[..first].replace("<｜tool_calls_begin｜>", "");
     let mut calls = Vec::new();
     let mut rest = &t[first..];
-    while let Some((p, b)) = BEGINS.iter().filter_map(|b| rest.find(b).map(|p| (p, *b))).min_by_key(|x| x.0) {
+    // mỗi vòng tìm lại trên phần còn lại: giới hạn số call một lượt (thực tế ≤ vài chục)
+    for _ in 0..64 {
+        let Some((p, b)) = BEGINS.iter().filter_map(|b| rest.find(b).map(|p| (p, *b))).min_by_key(|x| x.0) else { break };
         let body_all = &rest[p + b.len()..];
         let end = BEGINS.iter().chain(["<｜tool_call_end｜>"].iter()).filter_map(|m| body_all.find(m)).min().unwrap_or(body_all.len());
         let body = body_all[..end].trim();
@@ -1071,7 +1123,9 @@ fn parse_native_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
 /// Object JSON hợp lệ đầu tiên trong chuỗi (bỏ qua ```json fence, ngoặc trong chuỗi JSON).
 fn first_json_object(s: &str) -> Option<Value> {
     let mut from = 0;
-    while let Some(off) = s[from..].find('{') {
+    // mỗi lần thử quét tới cuối chuỗi: giới hạn số lần thử, không thì '{' x n là O(n²) (đo được 14s ở 130KB)
+    for _ in 0..16 {
+        let Some(off) = s[from..].find('{') else { break };
         let start = from + off;
         let (mut depth, mut in_str, mut esc) = (0i32, false, false);
         for (i, ch) in s[start..].char_indices() {
@@ -1102,7 +1156,10 @@ pub(crate) fn extract_tool_calls(text: &str, tools: &[Value]) -> Option<(String,
     let names = tool_names(tools);
     if names.is_empty() { return None; }
     let n = normalize_dsml(text);
-    if let Some(r) = parse_dsml_tool_calls(&n) { return Some(r); }
+    // DSML/bản địa chỉ khi có marker thật (marker trích trong code inline không tính)
+    if has_tool_marker(&n) {
+        if let Some(r) = parse_dsml_tool_calls(&n) { return Some(r); }
+    }
     let tail = n.trim_end_matches(|c: char| c.is_whitespace() || c == '`');
     // định dạng bản địa cùng luật với dự phòng: khối phải kết thúc câu trả lời (dạng `<｜工具调用｜>NAME {json}` kết bằng '}')
     if tail.ends_with('>') || tail.ends_with('}') {
@@ -1113,8 +1170,17 @@ pub(crate) fn extract_tool_calls(text: &str, tools: &[Value]) -> Option<(String,
     if !tail.ends_with('>') { return None; }
     parse_dsml_json_tool_calls(&n)
         .or_else(|| parse_dsml_nested_tool_calls(&n))
-        .or_else(|| parse_xml_tool_call(&n).map(|(b, c)| (b, vec![c])))
+        .or_else(|| xml_tool_call_at_end(&n, &names))
         .filter(|(_, calls)| calls.iter().all(|c| names.contains(&c.name.as_str())))
+}
+
+/// Dạng XML `<tool_name><param>v</param></tool_name>` — chỉ xét thẻ mang tên tool đã khai báo, lấy lần xuất hiện
+/// CUỐI (khối phải kết thúc câu trả lời). Quét mọi '<' như parse_xml_tool_call là O(n²) với HTML dày đặc.
+fn xml_tool_call_at_end(text: &str, names: &[&str]) -> Option<(String, Vec<DsmlToolCall>)> {
+    let p = names.iter().filter_map(|n| text.rfind(&format!("<{}>", n))).max()?;
+    let (b, c) = parse_xml_tool_call(&text[p..])?;
+    let before = format!("{} {}", text[..p].trim(), b).trim().to_string();
+    Some((before, vec![c]))
 }
 
 /// id tool-call duy nhất — `call_0` lặp ở mọi step làm model/client nhầm result ↔ call.
@@ -2654,7 +2720,9 @@ mod xml_tests {
     fn safe_flush_holds_only_marker_tail() {
         assert!(has_tool_marker("nháp <｜DSML｜function_calls>") && !has_tool_marker("a < b"));
         assert!(!has_tool_marker("DSML tool-call parsing: normalize_dsml") && has_tool_marker("x <｜｜DSML｜｜ calls>"));
-        assert!(has_tool_marker("<｜｜DSDSML｜｜ calls>") && has_tool_marker("a ｜DSML｜｜ b") && has_tool_marker("x DSML｜｜ calls>"));
+        assert!(has_tool_marker("<｜｜DSDSML｜｜ calls>") && has_tool_marker("a ｜DSML｜｜ invoke") && has_tool_marker("x DSML｜｜ calls>"));
+        // nhắc tới DSML trong văn xuôi (không có dạng thẻ) không phải marker
+        assert!(!has_tool_marker("mangled with literal `｜｜DSML｜｜` fragments") && !has_tool_marker("a ｜DSML｜｜ b"));
         assert_eq!(safe_flush_len("xin chào <｜｜DSDSML｜｜ calls>"), "xin chào ".len());
         assert_eq!(safe_flush_len("hello world"), 11);
         assert_eq!(safe_flush_len("a < b"), 2);
