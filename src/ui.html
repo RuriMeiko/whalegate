@@ -92,6 +92,10 @@
   textarea, input[type=text], input[type=number], select { font: 12px/1.4 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 8px 10px; outline: none; }
   textarea:focus, input:focus, select:focus { background: #f4efe2; outline: 2px solid var(--ink); outline-offset: 1px; }
   textarea { width: 100%; resize: vertical; }
+  .cmd { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; margin: 0 0 12px; padding: 9px 12px; text-align: left; }
+  .cmd code { border: 0; padding: 0; font-size: 12.5px; }
+  .cmd span { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; }
+  .cmd.done span { color: var(--ok); }
   code { font: 12px/1 var(--mono); border: 1px solid var(--hair); padding: 2px 5px; }
 
   /* cài đặt */
@@ -184,7 +188,8 @@
   <div class="dlg">
     <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeAdd()">×</button></div>
     <div class="inner">
-      <p>Dán <code>localStorage.userToken</code> từ tab đã đăng nhập chat.deepseek.com (Console: <code>copy(localStorage.userToken)</code>).</p>
+      <p>Mở tab đã đăng nhập chat.deepseek.com → F12 → Console, dán lệnh này rồi chạy, sau đó dán kết quả vào ô dưới:</p>
+      <button class="cmd" id="cmdCopy" onclick="copyCmd()" title="Bấm để copy"><code>copy(localStorage.userToken)</code><span>copy</span></button>
       <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder='{"value":"…"} hoặc token trần'></textarea>
       <div class="btns" style="margin-top:10px"><input type="text" id="lblIn" style="flex:1;min-width:0" placeholder="nhãn (tuỳ chọn)" aria-label="Nhãn" autocomplete="off"><button class="solid" id="btnAdd" onclick="addManual()">Thêm</button></div>
     </div>
@@ -315,6 +320,13 @@ function askDone(v) { if (!ASK) return; const r = ASK; ASK = null; closeModal('c
 function openAdd() { openModal('addModal'); setTimeout(() => $('tokIn').focus(), 60); }
 function closeAdd() { closeModal('addModal'); }
 
+async function copyCmd() {
+  const text = 'copy(localStorage.userToken)', b = $('cmdCopy');
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) { const t = el('textarea'); t.value = text; t.style.cssText = 'position:fixed;opacity:0'; document.body.append(t); t.select(); try { document.execCommand('copy'); } finally { t.remove(); } }
+  b.classList.add('done'); b.querySelector('span').textContent = 'đã copy'; say('Đã copy lệnh — dán vào Console', 'ok');
+  setTimeout(() => { b.classList.remove('done'); b.querySelector('span').textContent = 'copy'; }, 1800);
+}
 async function addManual() {
   const b = $('btnAdd'), token = $('tokIn').value.trim();
   if (!token) return say('Dán token trước', 'err');
