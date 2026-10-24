@@ -28,7 +28,7 @@ provider = {
     "models": [{
         "id": "deepseek-web", "name": "DeepSeek Web (harness, free)",
         "contextWindow": ctx, "maxTokens": 32768, "input": ["text", "image"],
-        "reasoningEfforts": {"off": "none", "low": "auto", "high": "max", "max": "max"},
+        "reasoningEfforts": {"off": "none", "low": "auto", "max": "max"},
     }],
 }
 def entry(i, name):
