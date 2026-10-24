@@ -99,13 +99,18 @@
   .row:last-child { border-bottom: 0; }
   .row .t { flex: 1; font: 13px/1.35 var(--sans); min-width: 0; }
   .row .t small { display: block; font: 11px/1.3 var(--mono); color: var(--mute); margin-top: 2px; }
-  .row.dirty { background: #ddd3b9; margin: 0 -14px; padding-left: 14px; padding-right: 14px; }
-  .row .undo { width: 32px; height: 32px; padding: 0; flex: none; border-color: transparent; visibility: hidden; font-size: 15px; line-height: 1; }
-  .row.dirty .undo { visibility: visible; border-color: var(--ink); }
+  .row.dirty { background: #ddd3b9; margin: 0 -14px; padding-left: 14px; padding-right: 14px; border-bottom-color: transparent; }
+  .row:has(+ .row.dirty) { border-bottom-color: transparent; }
+  .row .undo { width: 32px; height: 32px; padding: 0; flex: none; border: 0; background: transparent; color: var(--ink); visibility: hidden; font-size: 17px; line-height: 1; }
+  .row.dirty .undo { visibility: visible; }
+  .row .undo:hover:not(:disabled) { background: rgba(29, 27, 23, .12); }
   .row .u { font: 11px/1 var(--mono); color: var(--mute); }
-  .row input[type=number] { width: 112px; text-align: right; } .row select { padding: 7px 8px; }
-  .seg2 { display: inline-flex; border: 1px solid var(--ink); flex: none; }
-  .seg2 button { border: 0; padding: 8px 14px; font-size: 11px; min-width: 52px; }
+  .row input[type=number] { text-align: right; } .row select { padding: 0 8px; }
+  .ctl { display: grid; grid-template-columns: 124px 52px 32px; gap: 6px; align-items: center; flex: none; }
+  .ctl > input, .ctl > select, .ctl > .seg2 { width: 100%; height: 34px; }
+  .ctl .u { white-space: nowrap; }
+  .seg2 { display: flex; border: 1px solid var(--ink); }
+  .seg2 button { border: 0; padding: 0; font-size: 11px; flex: 1; height: 100%; }
   .seg2 button + button { border-left: 1px solid var(--ink); }
   .seg2 button.on { background: var(--ink); color: var(--bg); }
   .seg2 button:not(.on):hover:not(:disabled) { background: var(--hair); }
@@ -129,6 +134,7 @@
   @media (max-width: 860px) { .k { grid-column: span 6; } .c8, .c4 { grid-column: span 12; } }
   @media (max-width: 560px) {
     .wrap { padding: 0 12px 32px; } h1 { font-size: 13px; } #liveTxt { display: none; } .live { margin-right: 0; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
+    .row { flex-wrap: wrap; } .row .ctl { margin-left: auto; }
     .modal { padding: 0; } .dlg, .dlg.log { width: 100%; height: 100%; max-height: none; box-shadow: none; border: 0; }
     .modal:not(#logModal):not(#setModal) .dlg { height: auto; max-height: 100%; align-self: flex-end; border-top: 1px solid var(--ink); }
     .ll { flex-direction: column; gap: 0; } #logQ { width: 100%; order: 9; }
@@ -448,10 +454,10 @@ function stage(key, value) {
 function cfgRow(c) {
   const v = eff(c), dirty = c.key in PENDING, row = el('div', 'row' + (dirty ? ' dirty' : '')); row.title = c.key;
   const t = el('div', 't', c.label); if (c.hint) t.append(el('small', null, c.hint));
-  const ctl = el('div'); ctl.style.cssText = 'display:flex;align-items:center;gap:6px';
+  const ctl = el('div', 'ctl'); let unit = null;
   if (c.kind === 'bool') {
     const g = el('div', 'seg2'); g.setAttribute('role', 'radiogroup'); g.setAttribute('aria-label', c.label);
-    for (const [val, txt] of [['1', 'BẬT'], ['0', 'TẮT']]) {
+    for (const [val, txt] of [['0', 'TẮT'], ['1', 'BẬT']]) {
       const b = el('button', v === val ? 'on' : '', txt); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', v === val);
       b.onclick = () => stage(c.key, val); g.append(b);
     }
@@ -463,8 +469,9 @@ function cfgRow(c) {
   } else {
     const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.value = v; inp.inputMode = 'numeric'; inp.setAttribute('aria-label', c.label);
     inp.onchange = () => stage(c.key, inp.value); inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
-    ctl.append(inp); if (c.unit) ctl.append(el('span', 'u', c.unit));
+    ctl.append(inp); unit = c.unit;
   }
+  ctl.append(el('span', 'u', unit || ''));
   const undo = el('button', 'undo', '↺'); undo.title = 'Hoàn tác'; undo.setAttribute('aria-label', 'Hoàn tác thay đổi này'); undo.tabIndex = dirty ? 0 : -1;
   undo.onclick = () => { delete PENDING[c.key]; renderCfg(); };
   ctl.append(undo);
