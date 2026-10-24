@@ -484,11 +484,28 @@ async function togglePool(a, enabled) {
   } catch (e) { say(e.message, 'err'); }
 }
 async function verify(id, label) {
-  if (!(await ask('Verify?', `Kiểm tra token của ${label} với DeepSeek.`, 'Verify'))) return;
-  await post('/api/accounts/' + id + '/verify'); loadStats(); say('Đã verify ' + label, 'ok');
+  if (!(await ask('Verify?', `Kiểm tra token VÀ chat thử một lượt tối thiểu với ${label}. Một lượt chat thật là cách duy nhất biết acc có đang bị throttle không.`, 'Verify'))) return;
+  const t = say('Đang verify ' + label + ' (chat thử)…', 'wait');
+  try {
+    const d = await post('/api/accounts/' + id + '/verify');
+    if (t) t.remove();
+    say(probeMsg(d, label), d.ok ? 'ok' : 'err');
+  } catch (e) { if (t) t.remove(); say(e.message, 'err'); }
+  loadStats();
+}
+
+/// Câu thông báo cho kết quả probe: phân biệt "token chết" với "đang bị throttle".
+function probeMsg(d, label) {
+  if (!d || d.error) return (d && d.error) || 'verify lỗi';
+  switch (d.probe) {
+    case 'alive': return label + ': chat được, đã hết cooldown';
+    case 'throttled': return label + ': token còn sống nhưng chat trả rỗng — đang bị throttle';
+    case 'auth_dead': return label + ': token bị từ chối — cần đăng nhập lại';
+    default: return label + ': không kết luận được (lỗi mạng/PoW?)';
+  }
 }
 async function reset(id, label) {
-  if (!(await ask('Reset?', `Xoá lỗi, cooldown và phiên web đang giữ của ${label}. Hội thoại đang dùng nó sẽ gửi lại đủ ngữ cảnh.`, 'Reset', true))) return;
+  if (!(await ask('Reset?', `Xoá lỗi, cooldown và phiên web đang giữ của ${label}, rồi chat thử một lượt để xác nhận acc dùng được. Hội thoại đang dùng nó sẽ gửi lại đủ ngữ cảnh.`, 'Reset', true))) return;
   await post('/api/accounts/' + id + '/reset'); loadStats(); say('Đã reset ' + label, 'ok');
 }
 async function del(id, label) {
@@ -530,7 +547,13 @@ async function bulk(kind) {
   const worker = async () => {
     while (queue.length) {
       const a = queue.shift();
-      try { const d = await post('/api/accounts/' + a.id + '/' + kind); if (d.ok !== false && (v ? d.ok : d.token_alive !== false)) ok++; else bad.push(a.label); }
+      try {
+        const d = await post('/api/accounts/' + a.id + '/' + kind);
+        // verify: ok = probe Alive; reset: cần chat được (token_alive) chứ không chỉ token hợp lệ
+        const good = v ? d.ok === true : d.token_alive === true;
+        if (good) ok++;
+        else bad.push(a.label + (d.probe && d.probe !== 'alive' ? ' (' + d.probe + ')' : ''));
+      }
       catch (e) { bad.push(a.label); }
       t.firstChild.textContent = `${v ? 'Verify' : 'Reset'} ${++done}/${accs.length}…`;
     }

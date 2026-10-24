@@ -739,25 +739,35 @@ async fn api_reset_account(
     };
     let ((token, cookies), old_sid) = acc;
     st.file_cache.lk().retain(|(acc_id, _), _| acc_id != &id);
-    let alive = match DsClient::new(token, cookies) {
+    // Reset cũng phải chứng minh chat được, không chỉ token hợp lệ.
+    let probe = match DsClient::new(token, cookies) {
         Ok(c) => {
             if let Some(sid) = old_sid { let _ = c.delete_session(&sid).await; }
-            c.token_alive().await.unwrap_or(false)
+            c.probe_chat().await
         }
-        Err(_) => false,
+        Err(_) => crate::client::Probe::Unknown,
     };
+    let alive = probe == crate::client::Probe::Alive;
     {
         let mut store = st.store.write().await;
         if let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) {
             a.last_verified = Some(now());
-            a.last_status = Some(if alive { "ok (reset)".into() } else { "invalid token — cần login lại".into() });
+            a.last_status = Some(match probe {
+                crate::client::Probe::Alive => "ok (reset)".into(),
+                crate::client::Probe::Throttled => "throttled".into(),
+                crate::client::Probe::AuthDead => "invalid token — cần login lại".into(),
+                crate::client::Probe::Unknown => "reset: không kết luận được".into(),
+            });
         }
     }
     mark_dirty(&st);
     flush_store(&st).await;
-    Json(json!({"ok": true, "token_alive": alive}))
+    Json(json!({"ok": true, "token_alive": alive, "probe": probe.as_str()}))
 }
 
+/// Verify = auth + MỘT lượt chat thật. /users/current một mình không đủ: acc bị throttle vẫn
+/// trả code 0 ở đó, nên verify kiểu cũ báo "ok" cho acc không chat được và xoá mất nhãn
+/// "throttled" mà lần chat lỗi trước đã ghi.
 async fn api_verify_account(
     State(st): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -773,21 +783,50 @@ async fn api_verify_account(
         Ok(c) => c,
         Err(e) => return Json(json!({"ok": false, "error": e.to_string()})),
     };
-    let v = c.users_current().await.unwrap_or_else(|_| json!({"code": -1}));
-    let ok = v["code"].as_i64() == Some(0);
+    // Tra cứu user trước để lấy uid/email kể cả khi probe chat lỗi mạng.
+    let users = c.users_current().await.unwrap_or_else(|_| json!({"code": -1}));
+    let probe = c.probe_chat().await;
+    let alive = probe == crate::client::Probe::Alive;
     {
         let mut store = st.store.write().await;
         if let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) {
             a.last_verified = Some(now());
-            a.last_status = Some(if ok { "ok".into() } else { format!("invalid: {}", v["msg"]) });
-            if ok { if let Some(u) = v["data"]["biz_data"]["id"].as_str() { a.ds_uid = Some(u.to_string()); } }
+            match probe {
+                crate::client::Probe::Alive => {
+                    a.last_status = Some("ok".into());
+                    // chat được thì hết cooldown: acc đã tự hồi
+                    a.stats.reset();
+                }
+                crate::client::Probe::Throttled => {
+                    // Giữ nguyên nhãn throttle, chỉ đẩy cooldown ra để scheduler né acc này.
+                    a.last_status = Some("throttled".into());
+                    a.stats.cooldown_until = now() + AccStats::cooldown();
+                }
+                crate::client::Probe::AuthDead => {
+                    a.last_status = Some("invalid token — cần login lại".into());
+                    a.stats.fail_streak = a.stats.fail_streak.max(5);
+                    a.stats.cooldown_until = now() + 1800;
+                }
+                crate::client::Probe::Unknown => {
+                    // Không kết luận được: giữ nhãn cũ thay vì ghi đè bằng "ok" giả.
+                    if a.last_status.is_none() {
+                        a.last_status = Some("verify: không kết luận được".into());
+                    }
+                }
+            }
+            if alive {
+                if let Some(u) = users["data"]["biz_data"]["id"].as_str() { a.ds_uid = Some(u.to_string()); }
+            }
         }
     }
     mark_dirty(&st);
     flush_store(&st).await;
-    Json(json!({"ok": ok, "msg": v["msg"]}))
+    Json(json!({
+        "ok": alive,
+        "probe": probe.as_str(),
+        "msg": users["msg"],
+    }))
 }
-
 
 // ---------- DSML tool-call parse (DS web trả tool call dạng text DSML) ----------
 // Format: <｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="bash"> <｜｜DSML｜｜ parameter name="command" string="true">...value...</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>

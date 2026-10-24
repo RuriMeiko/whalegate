@@ -292,11 +292,6 @@ impl DsClient {
     }
 
     /// Xác thực nhẹ: token còn sống không (khác với cookie WAF).
-    pub async fn token_alive(&self) -> Result<bool> {
-        let v = self.users_current().await?;
-        Ok(v["code"].as_i64() == Some(0))
-    }
-
     /// Full flow: challenge -> solve -> completion (SSE). Returns (session_id, sse, last_message_id).
     /// Khi parent_message_id = Some(n) thì chat TIẾP trong cùng thread (không tạo conversation mới).
     pub async fn chat(
@@ -579,6 +574,150 @@ pub async fn chat_stream(
     Ok((sid, rx))
 }
 
+}
+
+
+/// Kết quả dò "acc này có chat được không", tách bạch với "token còn hợp lệ không".
+/// /users/current chỉ chứng minh token chưa bị từ chối — một acc bị throttle vẫn qua được,
+/// nên verify phải đi tới tận /chat/completion mới biết thật.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    /// Chat thật, có ít nhất một fragment RESPONSE.
+    Alive,
+    /// Token bị từ chối (40003/40002): phải đăng nhập lại.
+    AuthDead,
+    /// Token hợp lệ nhưng DeepSeek trả stream rỗng: đang bị throttle/hết hạn mức.
+    Throttled,
+    /// Lỗi khác (mạng, PoW, 5xx) — không kết luận được gì về acc.
+    Unknown,
+}
+
+impl Probe {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Probe::Alive => "alive",
+            Probe::AuthDead => "auth_dead",
+            Probe::Throttled => "throttled",
+            Probe::Unknown => "unknown",
+        }
+    }
+}
+
+impl DsClient {
+    /// Chat thử một prompt tối thiểu để chứng minh acc dùng được. Tạo session riêng rồi xoá,
+    /// nên không đụng tới thread stateful của acc và không để lại rác trên web.
+    pub async fn probe_chat(&self) -> Probe {
+        // 1) auth: rẻ nhất, và phân biệt được "token chết" với "throttle".
+        match self.users_current().await {
+            Ok(v) => match v["code"].as_i64() {
+                Some(0) => {}
+                Some(40003) | Some(40002) => return Probe::AuthDead,
+                _ => return Probe::Unknown,
+            },
+            Err(_) => return Probe::Unknown,
+        }
+        // 2) chat thật. Prompt ngắn nhất có thể; thinking/search tắt để không tốn quota.
+        let sid = match self.create_session().await {
+            Ok(s) => s,
+            Err(e) => return if format!("{:#}", e).contains("AUTH_INVALID") { Probe::AuthDead } else { Probe::Unknown },
+        };
+        let out = self.chat("hi", Some(&sid), None, false, false).await;
+        // dọn session dù kết quả thế nào
+        let _ = self.delete_session(&sid).await;
+        match out {
+            Ok((_, sse, _)) => {
+                if sse_has_response(&sse) { Probe::Alive } else { Probe::Throttled }
+            }
+            Err(e) => {
+                let msg = format!("{:#}", e);
+                if msg.contains("AUTH_INVALID") { Probe::AuthDead }
+                else if msg.contains("stream rỗng") { Probe::Throttled }
+                else { Probe::Unknown }
+            }
+        }
+    }
+}
+
+/// SSE của /chat/completion có fragment RESPONSE nào chưa? Dùng chung logic với chat_stream:
+/// khối fragments mang type, các delta sau đó chỉ mang p/v.
+pub(crate) fn sse_has_response(sse: &str) -> bool {
+    let cur_type = String::new();
+    for line in sse.lines() {
+        let Some(data) = line.strip_prefix("data: ") else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+        // init object chứa fragments[]
+        if let Some(frags) = v.get("v").and_then(|x| x.get("response")).and_then(|r| r.get("fragments")).and_then(|f| f.as_array()) {
+            for f in frags {
+                if f["type"].as_str() == Some("RESPONSE") { return true; }
+            }
+            continue;
+        }
+        // APPEND fragments
+        if let Some(arr) = v.get("v").and_then(|x| x.as_array()) {
+            for f in arr {
+                if f["type"].as_str() == Some("RESPONSE") { return true; }
+            }
+            continue;
+        }
+        // delta mang path
+        if let Some(p) = v.get("p").and_then(|p| p.as_str()) {
+            if p.ends_with("/content") && cur_type == "RESPONSE" { return true; }
+            continue;
+        }
+        // bare {"v":"text"} nối tiếp fragment đang mở
+        if cur_type == "RESPONSE" && v.get("v").and_then(|x| x.as_str()).is_some() { return true; }
+    }
+    false
+}
+
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    /// Stream rỗng: chỉ có event ready/update nhưng không fragment RESPONSE nào — đây đúng là
+    /// thứ một acc bị throttle trả về, và là lý do verify cũ báo sai.
+    #[test]
+    fn empty_stream_has_no_response() {
+        let sse = concat!(
+            "event: ready\n",
+            "data: {\"request_message_id\":123,\"response_message_id\":456}\n\n",
+            "event: update\n",
+            "data: {\"v\":{\"response\":{\"fragments\":[]}}}\n\n",
+            "event: close\n\n"
+        );
+        assert!(!sse_has_response(sse));
+    }
+
+    /// Fragment RESPONSE xuất hiện ngay trong khối init.
+    #[test]
+    fn response_fragment_in_init() {
+        let sse = "data: {\"v\":{\"response\":{\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"hi\"}]}}}\n";
+        assert!(sse_has_response(sse));
+    }
+
+    /// Web hay trả THINK trước rồi mới tới RESPONSE: phải nhận ra RESPONSE, và không nhầm THINK.
+    #[test]
+    fn think_only_is_not_response() {
+        let sse = concat!(
+            "data: {\"v\":{\"response\":{\"fragments\":[{\"type\":\"THINK\",\"content\":\"nghĩ\"}]}}}\n",
+            "data: {\"p\":\"response/fragments/-1/content\",\"v\":\" thêm\"}\n"
+        );
+        assert!(!sse_has_response(sse));
+        let with_resp = concat!(
+            "data: {\"v\":{\"response\":{\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"x\"}]}}}\n",
+            "data: {\"p\":\"response/fragments/-1/content\",\"v\":\" thêm\"}\n"
+        );
+        assert!(sse_has_response(with_resp));
+    }
+
+    /// Dòng rác / JSON hỏng không được làm panic hay báo nhầm.
+    #[test]
+    fn garbage_lines_are_ignored() {
+        let sse = "event: ping\ndata: not json\n\ndata: {\"v\":42}\n";
+        assert!(!sse_has_response(sse));
+        assert!(!sse_has_response(""));
+    }
 }
 
 #[cfg(test)]

@@ -457,7 +457,7 @@ stateDiagram-v2
 
 Open `http://127.0.0.1:8790/`. It is loopback-only.
 
-- **Accounts:** add, verify, reset, edit label or token, enable/disable in the pool, bulk verify/reset, and duplicate-user detection.
+- **Accounts:** add, verify, reset, edit label or token, enable/disable in the pool, bulk verify/reset, and duplicate-user detection. **Verify** is not just an auth check: it sends one minimal real completion on a throwaway session, because a throttled account still passes the auth endpoint. The result is alive, throttled, auth_dead or unknown, and only alive clears a throttle label.
 - **Usage:** tokens per hour (cache miss / cache hit / output), and what the same traffic would cost on the official API. Prices are fetched live every 6h from DeepSeek's pricing page, peak hours are included, and there is a monthly projection. Data lives in `usage.json` next to `accounts.json`.
 - **Latency:** p50/p90 over the last hour, plus the error count.
 - **Live logs:** SSE stream with filters and search. Useful tags include `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` and `[ds-fail]`.
@@ -545,7 +545,7 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `GET` | `/` | Dashboard |
 | `GET` / `POST` | `/api/accounts` | List / add accounts (`{token, label?}` or `{token, cookies}`) |
 | `PATCH` / `DELETE` | `/api/accounts/{id}` | Edit label or token / delete |
-| `POST` | `/api/accounts/{id}/verify` · `/reset` · `/pool` | Verify token / clear errors and sessions / `{"pool_enabled": bool}` |
+| `POST` | `/api/accounts/{id}/verify` · `/reset` · `/pool` | Probe with a real chat (returns `probe: alive\|throttled\|auth_dead\|unknown`) / clear errors and sessions, then probe / `{"pool_enabled": bool}` |
 | `POST` | `/api/capture` · `/api/login_start` · `/api/build_profile` | Chrome session capture, login flow, profile warm-up |
 | `GET` | `/api/stats` · `/api/usage` | Pool state (in-flight, cooldowns, stateful hit rate) / usage, cost and latency |
 | `GET` | `/api/logs` · `/api/logs/stream` | Logs as JSON / SSE |
