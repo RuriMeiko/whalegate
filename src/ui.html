@@ -154,6 +154,21 @@
   .dshProf b { min-width: 74px; }
   .dshProf .st { flex: 1; color: var(--mute); font-size: 11.5px; }
   .dshProf .st.ok { color: var(--ok); }
+  /* release notes render từ Markdown */
+  .md { font: 12.5px/1.6 var(--sans); color: var(--ink); margin-top: 12px; max-height: 300px; overflow: auto; border-top: 1px solid var(--hair); padding-top: 10px; }
+  .md > :first-child { margin-top: 0; }
+  .md h1, .md h2, .md h3, .md h4 { font: 600 13px/1.35 var(--mono); letter-spacing: .02em; margin: 16px 0 6px; }
+  .md h1 { font-size: 14px; } .md h2 { font-size: 13px; }
+  .md p { margin: 0 0 8px; }
+  .md ul, .md ol { margin: 0 0 8px; padding-left: 20px; }
+  .md li { margin: 2px 0; }
+  .md code { font: 11.5px/1.4 var(--mono); background: #e3dbc7; padding: 1px 4px; }
+  .md pre.mdPre { background: #e3dbc7; padding: 9px 10px; margin: 0 0 8px; overflow: auto; }
+  .md pre.mdPre code { background: none; padding: 0; font-size: 11.5px; line-height: 1.5; }
+  .md a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+  .md blockquote { margin: 0 0 8px; padding: 4px 0 4px 10px; border-left: 2px solid var(--mute); color: var(--mute); }
+  .md hr { border: 0; border-top: 1px solid var(--hair); margin: 12px 0; }
+  .md img { max-width: 100%; height: auto; display: block; margin: 0 0 8px; }
 
   @media (max-width: 860px) { .k { grid-column: span 6; } .c8, .c4 { grid-column: span 12; } }
   @media (max-width: 560px) {
@@ -276,7 +291,7 @@
     <div class="inner">
       <table><tbody id="updInfo"></tbody></table>
       <p class="sub" style="margin-top:10px">Cập nhật tải bản dựng sẵn từ GitHub, kiểm tra SHA-256, thay binary rồi tự khởi động lại. Request đang chạy bị cắt — dsh sẽ tự thử lại.</p>
-      <pre id="updNotes" style="white-space:pre-wrap;font:12px/1.5 var(--mono);color:var(--mute);margin:10px 0 0;max-height:240px;overflow:auto"></pre>
+      <div id="updNotes" class="md"></div>
     </div>
     <div class="foot">
       <button class="ghost sm" onclick="closeModal('updModal')">Đóng</button>
@@ -821,6 +836,71 @@ async function importApply() {
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
 
+/* ---- render Markdown của release notes ----
+   Notes là dữ liệu từ GitHub (không tin được), nên escape HTML TRƯỚC rồi mới áp các quy tắc
+   Markdown quen thuộc. Chỉ hỗ trợ tập con mà release notes thực tế dùng: heading, đậm/nghiêng,
+   code fence + inline code, link, list, blockquote, hr, đoạn. Không render HTML thô. */
+function mdEscape(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function mdInline(s) {
+  // inline code trước để nội dung trong backtick không bị các quy tắc khác đụng vào
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m, c) => { codes.push(c); return '\u0000' + (codes.length - 1) + '\u0000'; });
+  s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (m, t, u) =>
+    '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + t + '</a>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  s = s.replace(/(^|[^*])\*([^*]+)\*/g, '$1<i>$2</i>');
+  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => '<code>' + codes[+i] + '</code>');
+  return s;
+}
+function renderMd(src) {
+  // Release notes mở đầu bằng banner <p align="center"><img ...></p> — vô nghĩa trong hộp thoại
+  // hẹp và nếu để nguyên sẽ hiện thành chữ. Bỏ đúng khối đó trước khi render; mọi HTML khác vẫn
+  // bị escape (notes là dữ liệu ngoài, không tin được).
+  src = String(src).replace(/^\s*<p[^>]*>\s*<img[^>]*>\s*<\/p>\s*/i, '');
+  const lines = mdEscape(src).split('\n');
+  const out = [];
+  let i = 0, list = null, para = [];
+  const flushPara = () => { if (para.length) { out.push('<p>' + mdInline(para.join(' ')) + '</p>'); para = []; } };
+  const flushList = () => { if (list) { out.push('<' + list.tag + '>' + list.items.map((x) => '<li>' + mdInline(x) + '</li>').join('') + '</' + list.tag + '>'); list = null; } };
+  while (i < lines.length) {
+    const line = lines[i];
+    // code fence
+    const fence = line.match(/^```(\w*)\s*$/);
+    if (fence) {
+      flushPara(); flushList();
+      const buf = []; i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+      i++;
+      out.push('<pre class="mdPre"><code>' + buf.join('\n') + '</code></pre>');
+      continue;
+    }
+    if (/^\s*$/.test(line)) { flushPara(); flushList(); i++; continue; }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { flushPara(); flushList(); const lv = h[1].length; out.push('<h' + lv + '>' + mdInline(h[2]) + '</h' + lv + '>'); i++; continue; }
+    if (/^(-{3,}|\*{3,})\s*$/.test(line)) { flushPara(); flushList(); out.push('<hr>'); i++; continue; }
+    const li = line.match(/^\s*[-*+]\s+(.*)$/);
+    const oli = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (li || oli) {
+      flushPara();
+      const tag = li ? 'ul' : 'ol';
+      if (!list || list.tag !== tag) { flushList(); list = { tag, items: [] }; }
+      list.items.push((li || oli)[1]);
+      i++; continue;
+    }
+    const bq = line.match(/^&gt;\s?(.*)$/);
+    if (bq) { flushPara(); flushList(); out.push('<blockquote>' + mdInline(bq[1]) + '</blockquote>'); i++; continue; }
+    // dòng nối tiếp của list item
+    if (list && /^\s+\S/.test(line)) { list.items[list.items.length - 1] += ' ' + line.trim(); i++; continue; }
+    flushList();
+    para.push(line.trim());
+    i++;
+  }
+  flushPara(); flushList();
+  return out.join('');
+}
+
 /* ---- cập nhật từ xa ---- */
 const UPD = {info: null, hidden: false, busy: false};
 const VER = (s) => String(s || '').replace(/^v/i, '');
@@ -864,7 +944,7 @@ async function loadUpdate(manual) {
   row('Trạng thái', i.error ? i.error : i.has_update ? 'có bản mới' : 'đã là bản mới nhất', i.error ? 'bad' : i.has_update ? 'warn' : '');
   $('btnUpdGo').disabled = !i.has_update;
   $('btnUpdGo').textContent = i.has_update ? 'Cập nhật lên ' + VER(i.latest) : 'Đã mới nhất';
-  const nt = $('updNotes'); nt.textContent = i.notes ? i.notes.trim() : '';
+  const nt = $('updNotes'); nt.innerHTML = i.notes ? renderMd(i.notes.trim()) : '';
   if (i.url) nt.title = i.url;
 }
 
