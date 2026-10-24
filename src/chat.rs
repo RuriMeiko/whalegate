@@ -637,6 +637,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             let ids: Vec<String> = calls.iter().map(|_| new_call_id()).collect();
                             register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &ids, full_text.chars().count(), real_usage.unwrap_or(0));
                             yield Out::ToolCalls(calls, ids);
+                            crate::usage::record(prompt_tokens.max(0) as u64, cached_tokens.max(0) as u64, completion_tokens.max(0) as u64);
                             yield Out::Finish { reason: "tool_calls", prompt_tokens, completion_tokens, cached_tokens };
                             finished = true;
                             }
@@ -646,7 +647,8 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             if attempt == 2 && has_content && !has_tool_marker(&full_text) {
                                 // lượt cuối: trả phần đã có, báo 'length' để client biết bị cắt
                                 if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
-                                yield Out::Finish { reason: "length", prompt_tokens, completion_tokens, cached_tokens };
+                                crate::usage::record(prompt_tokens.max(0) as u64, cached_tokens.max(0) as u64, completion_tokens.max(0) as u64);
+                            yield Out::Finish { reason: "length", prompt_tokens, completion_tokens, cached_tokens };
                                 finished = true;
                             } else {
                                 fail_acc(&st, &acc_id, "error", true).await;
@@ -669,6 +671,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
                             ok_acc(&st, &acc_id, &sid, !own_session).await;
                             register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &[], full_text.chars().count(), real_usage.unwrap_or(0));
+                            crate::usage::record(prompt_tokens.max(0) as u64, cached_tokens.max(0) as u64, completion_tokens.max(0) as u64);
                             yield Out::Finish { reason: "stop", prompt_tokens, completion_tokens, cached_tokens };
                             finished = true;
                         }

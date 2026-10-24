@@ -295,6 +295,10 @@ pub(crate) struct AppState {
 
 // ---------- handlers ----------
 
+async fn api_usage() -> Json<Value> {
+    Json(tokio::task::spawn_blocking(crate::usage::report).await.unwrap_or_else(|_| json!({})))
+}
+
 async fn index() -> Html<&'static str> {
     Html(include_str!("ui.html"))
 }
@@ -836,20 +840,20 @@ fn fix_dsml_bars(text: &str) -> String {
 fn fix_bare_closers(text: &str) -> String {
     const BARE: &str = "</｜｜DSML｜｜>";
     if !text.contains(BARE) { return text.to_string(); }
-    let (mut params, mut invokes, mut calls) = (0i32, 0i32, 0i32);
+    let (mut params, mut invokes) = (0i32, 0i32);
     let mut out = String::with_capacity(text.len() + 16);
     let mut i = 0;
     while i < text.len() {
         let rest = &text[i..];
         let step;
         if rest.starts_with(BARE) {
-            let name = if params > 0 { params -= 1; "parameter" } else if invokes > 0 { invokes -= 1; "invoke" } else { calls -= 1; "calls" };
+            let name = if params > 0 { params -= 1; "parameter" } else if invokes > 0 { invokes -= 1; "invoke" } else { "calls" };
             out.push_str(&format!("</｜｜DSML｜｜ {}>", name));
             step = BARE.len();
         } else {
-            for (tag, ctr) in [("<｜｜DSML｜｜ parameter", 0), ("</｜｜DSML｜｜ parameter>", 1), ("<｜｜DSML｜｜ invoke", 2), ("</｜｜DSML｜｜ invoke>", 3), ("<｜｜DSML｜｜ calls>", 4), ("</｜｜DSML｜｜ calls>", 5)] {
+            for (tag, ctr) in [("<｜｜DSML｜｜ parameter", 0), ("</｜｜DSML｜｜ parameter>", 1), ("<｜｜DSML｜｜ invoke", 2), ("</｜｜DSML｜｜ invoke>", 3)] {
                 if rest.starts_with(tag) {
-                    match ctr { 0 => params += 1, 1 => params -= 1, 2 => invokes += 1, 3 => invokes -= 1, 4 => calls += 1, _ => calls -= 1 }
+                    match ctr { 0 => params += 1, 1 => params -= 1, 2 => invokes += 1, _ => invokes -= 1 }
                     break;
                 }
             }
@@ -2018,6 +2022,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/login_start", post(api_login_start))
         .route("/api/build_profile", post(api_build_profile))
         .route("/api/stats", get(api_stats))
+        .route("/api/usage", get(api_usage))
         .route("/v1/chat/completions", post(crate::chat::api_chat_completions))
         .route("/v1/models", get(api_models))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB — prompt dài (256K+ token)
@@ -2025,6 +2030,7 @@ pub async fn run(port: u16) -> Result<()> {
         .with_state(st.clone());
 
     // Background: dọn phiên nhàn rỗi, refresh cookies từ Chrome, ghi store gom lô
+    crate::usage::spawn_background();
     tokio::spawn(conv_sweeper(st.clone()));
     tokio::spawn(store_flusher(st.clone()));
     tokio::spawn(auto_refresh_loop(st));

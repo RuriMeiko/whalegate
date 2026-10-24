@@ -2,14 +2,13 @@
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ds-harness</title>
 <style>
   :root {
     --bg: #ebe4d3;
     --ink: #1d1b17;
     --mute: #7a725f;
-    --line: #1d1b17;
     --hair: #cfc5ad;
     --ok: #2f5d3a;
     --warn: #8f6200;
@@ -20,22 +19,63 @@
   * { box-sizing: border-box; border-radius: 0 !important; }
   html { background: var(--bg); }
   body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 64px; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 0 16px 48px; padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
 
-  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 28px 0 14px; border-bottom: 1px solid var(--line); }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 20px 0 12px; }
   h1 { margin: 0; font: 600 15px/1 var(--mono); letter-spacing: .02em; }
   .live { font: 12px/1 var(--mono); color: var(--mute); display: flex; align-items: center; gap: 8px; }
   .dot { width: 8px; height: 8px; background: var(--ink); display: inline-block; }
   .dot.off { background: transparent; border: 1px solid var(--mute); }
 
-  .stats { display: grid; grid-template-columns: repeat(6, 1fr); border-bottom: 1px solid var(--line); }
-  .stat { padding: 18px 16px 16px 0; border-right: 1px solid var(--hair); margin-right: 16px; min-width: 0; }
-  .stat:last-child { border-right: 0; margin-right: 0; }
-  .stat b { display: block; font: 500 30px/1.05 var(--mono); letter-spacing: -.02em; }
-  .stat span { display: block; margin-top: 6px; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; }
+  /* lưới dashboard: các ô chung đường kẻ 1px */
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 0; border-top: 1px solid var(--ink); border-left: 1px solid var(--ink); }
+  .cell { border-right: 1px solid var(--ink); border-bottom: 1px solid var(--ink); padding: 14px 16px 16px; min-width: 0; }
+  .c2 { grid-column: span 2; } .c3 { grid-column: span 3; } .c4 { grid-column: span 4; } .c5 { grid-column: span 5; }
+  .c6 { grid-column: span 6; } .c7 { grid-column: span 7; } .c8 { grid-column: span 8; } .c12 { grid-column: span 12; }
 
-  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px 0; border-bottom: 1px solid var(--line); }
-  button { font: 500 12px/1 var(--mono); letter-spacing: .04em; color: var(--ink); background: transparent; border: 1px solid var(--line); padding: 9px 14px; cursor: pointer; transition: background .12s, color .12s; }
+  .lab { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; display: flex; justify-content: space-between; gap: 8px; }
+  .lab em { font-style: normal; text-transform: none; letter-spacing: 0; }
+  .big { font: 500 28px/1.05 var(--mono); letter-spacing: -.02em; word-break: break-all; }
+  .sub { font: 12px/1.4 var(--mono); color: var(--mute); margin-top: 8px; }
+  .good { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+
+  /* biểu đồ cột */
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 110px; }
+  .bars .col { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
+  .bars .seg { width: 100%; }
+  .seg.in { background: var(--ink); } .seg.hit { background: var(--hair); } .seg.out { background: var(--bad); }
+  .bars .tick { height: 3px; margin-top: 3px; background: var(--hair); flex: none; }
+  .bars .tick.pk { background: var(--bad); }
+  .axis { display: flex; gap: 3px; margin-top: 4px; font: 10px/1 var(--mono); color: var(--mute); }
+  .axis span { flex: 1; text-align: left; white-space: nowrap; overflow: visible; min-width: 0; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font: 11px/1 var(--mono); color: var(--mute); margin-top: 10px; }
+  .legend i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; vertical-align: -1px; }
+
+  /* lịch giá */
+  .sched { display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; }
+  .sched b { height: 22px; background: var(--hair); display: block; }
+  .sched b.pk { background: repeating-linear-gradient(135deg, var(--bad) 0 3px, transparent 3px 6px); border: 1px solid var(--bad); }
+  .sched b.now { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; padding: 0 10px 10px 0; border-bottom: 1px solid var(--ink); font-weight: 400; white-space: nowrap; }
+  th.r, td.r { text-align: right; padding-right: 0; }
+  td { padding: 10px 10px 10px 0; border-bottom: 1px solid var(--hair); vertical-align: middle; font: 12.5px/1.3 var(--mono); }
+  tr:last-child td { border-bottom: 0; }
+  td.name { font: 500 13px/1.3 var(--sans); word-break: break-all; }
+  .id { font: 11px/1 var(--mono); color: var(--mute); margin-top: 3px; }
+  .tag { display: inline-flex; align-items: center; gap: 7px; font: 12px/1 var(--mono); white-space: nowrap; }
+  .tag i { width: 7px; height: 7px; background: var(--ink); display: inline-block; }
+  .tag.ok i { background: var(--ok); } .tag.warn i { background: var(--warn); } .tag.bad i { background: var(--bad); }
+  .tag.warn { color: var(--warn); } .tag.bad { color: var(--bad); }
+  .meter { display: inline-block; width: 44px; height: 6px; border: 1px solid var(--ink); vertical-align: middle; margin-right: 8px; position: relative; }
+  .meter u { position: absolute; inset: 0 auto 0 0; background: var(--ink); }
+  td.act { text-align: right; white-space: nowrap; }
+  td.act button { margin-left: 4px; }
+  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .empty { color: var(--mute); font: 12px/1 var(--mono); padding: 12px 0 0; display: none; }
+
+  button { font: 500 12px/1 var(--mono); letter-spacing: .04em; color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 9px 14px; cursor: pointer; transition: background .12s, color .12s; touch-action: manipulation; }
   button:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
   button:disabled { opacity: .4; cursor: default; }
   button.solid { background: var(--ink); color: var(--bg); }
@@ -43,38 +83,37 @@
   button.sm { padding: 6px 10px; font-size: 11px; }
   button.del { border-color: var(--hair); color: var(--bad); }
   button.del:hover:not(:disabled) { background: var(--bad); border-color: var(--bad); color: var(--bg); }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   #msg { font: 12px/1.4 var(--mono); color: var(--mute); margin-left: auto; text-align: right; }
   #msg.ok { color: var(--ok); } #msg.err { color: var(--bad); }
 
-  .tablewrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; padding: 14px 12px 10px 0; border-bottom: 1px solid var(--line); font-weight: 400; white-space: nowrap; }
-  td { padding: 14px 12px 14px 0; border-bottom: 1px solid var(--hair); vertical-align: middle; }
-  tr:last-child td { border-bottom: 1px solid var(--line); }
-  td.name { font-weight: 500; word-break: break-all; }
-  .id { font: 11px/1 var(--mono); color: var(--mute); margin-top: 4px; }
-  .mono { font: 12px/1.3 var(--mono); }
-  .tag { display: inline-flex; align-items: center; gap: 7px; font: 12px/1 var(--mono); }
-  .tag i { width: 7px; height: 7px; background: var(--ink); display: inline-block; }
-  .tag.ok i { background: var(--ok); } .tag.warn i { background: var(--warn); } .tag.bad i { background: var(--bad); }
-  .tag.warn { color: var(--warn); } .tag.bad { color: var(--bad); }
-  .meter { display: inline-block; width: 64px; height: 6px; border: 1px solid var(--line); vertical-align: middle; margin-right: 8px; position: relative; }
-  .meter u { position: absolute; inset: 0 auto 0 0; background: var(--ink); }
-  td.act { text-align: right; white-space: nowrap; }
-  td.act button { margin-left: 4px; }
-  .empty { padding: 28px 0; color: var(--mute); font: 12px/1 var(--mono); border-bottom: 1px solid var(--line); display: none; }
+  details summary { cursor: pointer; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; list-style: none; padding: 2px 0; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "+ "; } details[open] summary::before { content: "− "; }
+  pre { margin: 12px 0 0; padding: 12px; border: 1px solid var(--hair); font: 12px/1.6 var(--mono); overflow-x: auto; white-space: pre; }
+  .note { font: 12px/1.6 var(--mono); color: var(--mute); margin: 12px 0 0; }
+  .foot { font: 11px/1.5 var(--mono); color: var(--mute); margin-top: 14px; }
 
-  details { border-bottom: 1px solid var(--line); }
-  summary { cursor: pointer; padding: 14px 0; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; list-style: none; }
-  summary::-webkit-details-marker { display: none; }
-  summary::before { content: "+ "; } details[open] summary::before { content: "− "; }
-  pre { margin: 0 0 16px; padding: 14px; border: 1px solid var(--hair); font: 12px/1.6 var(--mono); overflow-x: auto; white-space: pre; }
-  .note { font: 12px/1.6 var(--mono); color: var(--mute); margin: 0 0 16px; }
-
-  @media (max-width: 760px) {
-    .stats { grid-template-columns: repeat(3, 1fr); }
-    .stat:nth-child(3) { border-right: 0; margin-right: 0; }
-    .stat:nth-child(n+4) { border-top: 1px solid var(--hair); }
+  @media (max-width: 1100px) {
+    .c8, .c7, .c5, .c4 { grid-column: span 6; }
+    .c3 { grid-column: span 6; }
+    .c2 { grid-column: span 4; }
+  }
+  @media (max-width: 720px) {
+    .c2, .c3, .c4, .c5, .c6, .c7, .c8 { grid-column: span 12; }
+    .k { grid-column: span 6; }            /* ô số liệu nhỏ: 2 cột trên điện thoại */
+    .big { font-size: 24px; }
+    .cell { padding: 12px 12px 14px; }
+    .bars { height: 90px; }
+    .hide-s { display: none; }
+    /* bảng tài khoản → mỗi tài khoản là một khối, không phải cuộn ngang */
+    #accTable thead { display: none; }
+    #accTable tr { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--hair); align-items: center; }
+    #accTable tr:last-child { border-bottom: 0; }
+    #accTable td { padding: 0; border: 0; }
+    #accTable td.n { grid-column: 1 / -1; }
+    #accTable td.a { grid-column: 1 / -1; text-align: left; }
+    #accTable td.a button { margin: 0 6px 0 0; }
     #msg { margin-left: 0; width: 100%; text-align: left; }
   }
 </style>
@@ -86,166 +125,244 @@
     <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
   </header>
 
-  <section class="stats" id="stats"></section>
+  <main class="grid">
+    <!-- hàng 1: số liệu chính -->
+    <div class="cell c2 k"><div class="lab">Token hôm nay</div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
+    <div class="cell c2 k"><div class="lab">Tiết kiệm hôm nay</div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
+    <div class="cell c2 k"><div class="lab">Dự toán tháng</div><div class="big good" id="kMonth">—</div><div class="sub" id="kMonthSub"></div></div>
+    <div class="cell c2 k"><div class="lab">Giá hiện tại</div><div class="big" id="kNow">—</div><div class="sub" id="kNowSub"></div></div>
+    <div class="cell c2 k"><div class="lab">Cache hit</div><div class="big" id="kHit">—</div><div class="sub" id="kHitSub"></div></div>
+    <div class="cell c2 k"><div class="lab">Tài khoản</div><div class="big" id="kAcc">—</div><div class="sub" id="kAccSub"></div></div>
 
-  <div class="bar">
-    <button class="solid" id="btnLogin" onclick="loginStart()">+ Login</button>
-    <button id="btnScan" onclick="captureAll()">Quét tab</button>
-    <button id="btnBuild" onclick="buildProfile()">Build profile</button>
-    <div id="msg"></div>
-  </div>
+    <!-- hàng 2: biểu đồ + bảng giá -->
+    <div class="cell c8">
+      <div class="lab">24 giờ qua <em id="h24sum"></em></div>
+      <div class="bars" id="bars24"></div>
+      <div class="axis" id="axis24"></div>
+      <div class="legend"><span><i style="background:var(--ink)"></i>input</span><span><i style="background:var(--hair)"></i>cached</span><span><i style="background:var(--bad)"></i>output</span><span><i style="background:var(--bad);height:3px;vertical-align:2px"></i>cao điểm</span></div>
+    </div>
+    <div class="cell c4">
+      <div class="lab">Giá API rẻ nhất <em id="pSrc"></em></div>
+      <table>
+        <thead><tr><th id="pModel">model</th><th class="r">thấp</th><th class="r">cao</th></tr></thead>
+        <tbody id="pBody"></tbody>
+      </table>
+      <div class="foot">USD / 1M token</div>
+    </div>
 
-  <div class="tablewrap">
-    <table>
-      <thead><tr><th>Tài khoản</th><th>Tải</th><th>Trạng thái</th><th>ok / rỗng / lỗi</th><th></th></tr></thead>
-      <tbody id="accBody"></tbody>
-    </table>
-  </div>
-  <div id="empty" class="empty">Chưa có tài khoản. Bấm + Login.</div>
+    <!-- hàng 3: chi phí -->
+    <div class="cell c5">
+      <div class="lab">Chi phí tương đương <em>nếu trả tiền API</em></div>
+      <div class="scroll"><table>
+        <thead><tr><th></th><th class="r">token</th><th class="r">chi phí</th><th class="r hide-s">cao điểm</th></tr></thead>
+        <tbody id="cBody"></tbody>
+      </table></div>
+      <div class="foot" id="cFoot"></div>
+    </div>
+    <div class="cell c4">
+      <div class="lab">14 ngày <em id="d14sum"></em></div>
+      <div class="bars" id="bars14"></div>
+      <div class="axis" id="axis14"></div>
+    </div>
+    <div class="cell c3">
+      <div class="lab">Lịch giá 24h tới <em id="schedSum"></em></div>
+      <div class="sched" id="sched"></div>
+      <div class="axis" id="schedAxis" style="margin-top:6px"></div>
+      <div class="legend"><span><i style="background:var(--hair)"></i>thấp điểm</span><span><i style="background:var(--bad)"></i>cao điểm ×2</span></div>
+    </div>
 
-  <details>
-    <summary>Thêm tài khoản</summary>
-    <p class="note">+ Login mở tab DeepSeek trong Chrome. Đăng nhập xong harness tự lưu session và tự đóng tab. Quét tab lấy session từ Chrome đang đăng nhập sẵn (CDP 9333). Build profile chạy một lần đầu (~40s) để giảm lỗi "Current device environment error".</p>
-  </details>
+    <!-- hàng 4: tài khoản -->
+    <div class="cell c12">
+      <div class="actions" style="margin-bottom:14px">
+        <div class="lab" style="margin:0;flex:1">Tài khoản</div>
+        <button class="solid sm" id="btnLogin" onclick="loginStart()">+ Login</button>
+        <button class="sm" id="btnScan" onclick="captureAll()">Quét tab</button>
+        <button class="sm" id="btnBuild" onclick="buildProfile()">Build profile</button>
+        <div id="msg"></div>
+      </div>
+      <div class="scroll"><table id="accTable">
+        <thead><tr><th>Tài khoản</th><th>Tải</th><th>Trạng thái</th><th class="hide-s">ok / rỗng / lỗi</th><th></th></tr></thead>
+        <tbody id="accBody"></tbody>
+      </table></div>
+      <div id="empty" class="empty">Chưa có tài khoản. Bấm + Login.</div>
+    </div>
 
-  <details>
-    <summary>API</summary>
+    <div class="cell c6">
+      <details><summary>Thêm tài khoản</summary>
+        <p class="note">+ Login mở tab DeepSeek trong Chrome; đăng nhập xong harness tự lưu session và đóng tab. Quét tab lấy session từ Chrome đã đăng nhập sẵn (CDP 9333). Build profile chạy một lần (~40s) để giảm lỗi "Current device environment error".</p>
+      </details>
+    </div>
+    <div class="cell c6">
+      <details><summary>API</summary>
 <pre>curl http://127.0.0.1:8790/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-web","messages":[{"role":"user","content":"hello"}]}'
 
 model            deepseek-web   (text + ảnh)
-reasoning_effort none | auto | max
-search           true</pre>
-    <p class="note">none = nhanh · auto = nghĩ ở lượt người dùng, tắt khi nối tiếp sau tool · max = nghĩ mọi bước</p>
-  </details>
+reasoning_effort none | auto | max</pre>
+        <p class="note">none = nhanh · auto = nghĩ ở lượt người dùng, tắt khi nối tiếp sau tool · max = nghĩ mọi bước</p>
+      </details>
+    </div>
+  </main>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const say = (text, kind) => { const m = $('msg'); m.textContent = text || ''; m.className = kind || ''; };
 
-function say(text, kind) { const m = $('msg'); m.textContent = text || ''; m.className = kind || ''; }
+const fmtTok = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
+const fmtUsd = (v) => '$' + (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
+const fmtPrice = (v) => '$' + (+v.toPrecision(3));
+const hh = (t) => String(new Date(t * 1000).getHours()).padStart(2, '0');
+const dur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h >= 24 ? Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : h ? h + 'h' + String(m).padStart(2, '0') : m + 'm'; };
 
-async function post(url) {
-  const r = await fetch(url, {method: 'POST'});
-  return r.json();
-}
+async function post(url) { return (await fetch(url, {method: 'POST'})).json(); }
 
 async function buildProfile() {
   const b = $('btnBuild'); b.disabled = true; say('đang build ~40s…');
-  try {
-    const d = await post('/api/build_profile');
-    if (!d.ok) return say(d.error, 'err');
-    say(d.note || 'đã build', 'ok');
-  } catch (e) { say(e.message, 'err'); }
+  try { const d = await post('/api/build_profile'); say(d.ok ? (d.note || 'đã build') : d.error, d.ok ? 'ok' : 'err'); }
+  catch (e) { say(e.message, 'err'); }
   finally { setTimeout(() => { b.disabled = false; }, 45000); }
 }
-
 async function loginStart() {
   const b = $('btnLogin'); b.disabled = true; say('đang mở tab…');
   try {
     const d = await post('/api/login_start');
     if (!d.ok) return say(d.error, 'err');
     say('tab DeepSeek đã mở — đăng nhập trong đó (tối đa 10 phút)', 'ok');
-    const t = setInterval(loadStats, 2000);
-    setTimeout(() => clearInterval(t), 660000);
-  } catch (e) { say(e.message, 'err'); }
-  finally { b.disabled = false; }
+    const t = setInterval(loadStats, 2000); setTimeout(() => clearInterval(t), 660000);
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
-
 async function captureAll() {
   const b = $('btnScan'); b.disabled = true; say('đang quét…');
   try {
     const d = await post('/api/capture');
     if (!d.ok) return say(d.error, 'err');
-    say(`${d.action}: +${d.added} mới, ${d.refreshed} làm mới${d.email ? ' · ' + d.email : ''}`, 'ok');
-    loadStats();
-  } catch (e) { say(e.message, 'err'); }
-  finally { b.disabled = false; }
+    say(`${d.action}: +${d.added} mới, ${d.refreshed} làm mới${d.email ? ' · ' + d.email : ''}`, 'ok'); loadStats();
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
-
 async function verify(id) { await post('/api/accounts/' + id + '/verify'); loadStats(); }
 async function reset(id) { await post('/api/accounts/' + id + '/reset'); loadStats(); }
 async function del(id) {
   if (!confirm('Xoá tài khoản này?')) return;
-  await fetch('/api/accounts/' + id, {method: 'DELETE'});
-  loadStats();
+  await fetch('/api/accounts/' + id, {method: 'DELETE'}); loadStats();
 }
 
-function stat(value, label) {
-  const s = el('div', 'stat');
-  s.append(el('b', null, value), el('span', null, label));
-  return s;
-}
+function tag(kind, text) { const t = el('span', 'tag ' + kind); t.append(el('i'), document.createTextNode(text)); return t; }
 
-function tag(kind, text) {
-  const t = el('span', 'tag ' + kind);
-  t.append(el('i'), document.createTextNode(text));
-  return t;
-}
-
-function row(a, perAcc) {
+function accRow(a, perAcc) {
   const tr = el('tr');
-
-  const name = el('td', 'name', a.label);
-  name.append(el('div', 'id', a.id.slice(0, 8)));
-
-  const load = el('td', 'mono');
-  const meter = el('span', 'meter'); const u = el('u');
+  const name = el('td', 'name n', a.label); name.append(el('div', 'id', a.id.slice(0, 8)));
+  const load = el('td', 'l');
+  const meter = el('span', 'meter'), u = el('u');
   u.style.width = Math.min(100, Math.round(((a.in_flight || 0) / perAcc) * 100)) + '%';
-  meter.append(u);
-  load.append(meter, document.createTextNode(`${a.in_flight || 0}/${perAcc}`));
-
+  meter.append(u); load.append(meter, document.createTextNode(`${a.in_flight || 0}/${perAcc}`));
   const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
-  const st = el('td');
+  const st = el('td', 's');
   if (relogin) st.append(tag('bad', `lỗi ${a.fail_streak}× · đăng nhập lại`));
   else if (a.cooldown_left_secs > 0) st.append(tag('warn', `nghỉ ${a.cooldown_left_secs}s` + (a.fail_streak ? ` · lỗi ${a.fail_streak}×` : '')));
   else if (/ok/.test(a.last_status || '')) st.append(tag('ok', a.in_flight > 0 ? 'đang chạy' : 'sẵn sàng'));
   else st.append(tag('bad', a.last_status || '?'));
-
-  const cnt = el('td', 'mono', `${a.total_ok} / ${a.total_empty} / ${a.total_error}`);
-
-  const act = el('td', 'act');
+  const cnt = el('td', 'hide-s', `${a.total_ok} / ${a.total_empty} / ${a.total_error}`);
+  const act = el('td', 'act a');
   const mk = (text, cls, fn, title) => { const b = el('button', 'sm ' + cls, text); if (title) b.title = title; b.onclick = fn; return b; };
-  act.append(
-    mk('verify', '', () => verify(a.id)),
-    mk('reset', '', () => reset(a.id), 'xoá lỗi/cooldown và phiên web đang giữ, kiểm tra lại token'),
-    mk('xoá', 'del', () => del(a.id)),
-  );
-
+  act.append(mk('verify', '', () => verify(a.id)), mk('reset', '', () => reset(a.id), 'xoá lỗi/cooldown và phiên web đang giữ, kiểm tra lại token'), mk('xoá', 'del', () => del(a.id)));
   tr.append(name, load, st, cnt, act);
   return tr;
 }
 
+/* ---- biểu đồ ---- */
+function drawBars(box, items) {
+  box.textContent = '';
+  const max = Math.max(1, ...items.map((i) => i.input + i.output));
+  const H = box.clientHeight - 6; // chừa chỗ cho vạch giờ
+  const px = (n) => Math.round((n / max) * H);
+  for (const it of items) {
+    const col = el('div', 'col');
+    const out = px(it.output), hit = px(it.cached || 0), inp = Math.max(0, px(it.input) - hit);
+    col.title = `${it.title}\n${fmtTok(it.input + it.output)} token · ${fmtUsd(it.cost)}`;
+    const sOut = el('div', 'seg out'); sOut.style.height = out + 'px';
+    const sIn = el('div', 'seg in'); sIn.style.height = inp + 'px';
+    const sHit = el('div', 'seg hit'); sHit.style.height = hit + 'px';
+    col.append(sOut, sIn, sHit);
+    if (it.peak != null) col.append(el('div', 'tick' + (it.peak ? ' pk' : '')));
+    box.append(col);
+  }
+}
+function drawAxis(box, labels) { box.textContent = ''; labels.forEach((l) => box.append(el('span', null, l))); }
+
+function renderUsage(u) {
+  const t = u.today, pr = u.pricing, pj = u.projection;
+  $('kTok').textContent = fmtTok(t.tokens);
+  $('kTokSub').textContent = `${t.req} lượt · in ${fmtTok(t.input)} · out ${fmtTok(t.output)}`;
+  $('kSave').textContent = fmtUsd(t.cost);
+  $('kSaveSub').textContent = t.cost_peak > 0 ? `cao điểm ${fmtUsd(t.cost_peak)} · phụ phí ${fmtUsd(t.peak_surcharge)}` : 'chưa phát sinh giờ cao điểm';
+  $('kMonth').textContent = fmtUsd(pj.month_cost);
+  $('kMonthSub').textContent = `${fmtTok(pj.month_tokens)} token · TB ${fmtUsd(pj.cost_per_day)}/ngày (${pj.days_basis < 1.5 ? '1' : pj.days_basis.toFixed(1)}d)`;
+  const left = u.next_switch ? u.next_switch - Date.now() / 1000 : null;
+  $('kNow').textContent = u.now_peak ? 'CAO ĐIỂM' : 'THẤP ĐIỂM';
+  $('kNow').className = 'big ' + (u.now_peak ? 'bad' : 'good');
+  $('kNowSub').textContent = (u.now_peak ? 'giá gấp đôi · hết sau ' : 'giá −50% · cao điểm sau ') + (left != null ? dur(left) : '—');
+  const inTot = t.input;
+  $('kHit').textContent = inTot ? Math.round((t.cached / inTot) * 100) + '%' : '—';
+  $('kHitSub').textContent = `${fmtTok(t.cached)} / ${fmtTok(inTot)} input`;
+
+  // giá live
+  $('pModel').textContent = pr.model;
+  $('pSrc').textContent = pr.source === 'live' ? 'live ' + dur(Date.now() / 1000 - pr.fetched_at) + ' trước' : 'bảng giá dự phòng';
+  $('pSrc').className = pr.source === 'live' ? '' : 'bad';
+  const pb = $('pBody'); pb.textContent = '';
+  for (const [name, v] of [['input cache hit', pr.hit], ['input cache miss', pr.miss], ['output', pr.out]]) {
+    const tr = el('tr'); tr.append(el('td', null, name), el('td', 'r', fmtPrice(v[0])), el('td', 'r', fmtPrice(v[1]))); pb.append(tr);
+  }
+
+  // chi phí
+  const cb = $('cBody'); cb.textContent = '';
+  for (const [name, a] of [['hôm nay', u.today], ['7 ngày', u.d7], ['30 ngày', u.d30], ['tổng', u.all]]) {
+    const tr = el('tr');
+    tr.append(el('td', null, name), el('td', 'r', fmtTok(a.tokens)), el('td', 'r', fmtUsd(a.cost)), el('td', 'r hide-s', a.cost > 0 ? `${fmtUsd(a.cost_peak)} · ${Math.round((a.cost_peak / a.cost) * 100)}%` : '—'));
+    cb.append(tr);
+  }
+  const ratio = pj.month_cost > 0 ? (1 - pj.month_cost_if_offpeak / pj.month_cost) * 100 : 0;
+  $('cFoot').textContent = pj.month_cost > 0
+    ? `Dồn hết sang giờ thấp điểm: ${fmtUsd(pj.month_cost_if_offpeak)}/tháng (−${ratio.toFixed(0)}%). Cache miss tính đủ giá nên con số nghiêng về phía cao.`
+    : 'Chưa có dữ liệu — số liệu bắt đầu tính từ lúc server khởi động.';
+
+  // 24 giờ
+  const h = u.hours;
+  drawBars($('bars24'), h.map((x) => ({input: x.input, output: x.output, cached: x.cached, peak: x.peak, cost: x.cost, title: hh(x.t) + ':00'})));
+  drawAxis($('axis24'), h.map((x, i) => (i % 3 === 0 ? hh(x.t) : '')));
+  $('h24sum').textContent = fmtTok(h.reduce((a, x) => a + x.input + x.output, 0)) + ' token';
+
+  // 14 ngày
+  const d = u.daily;
+  drawBars($('bars14'), d.map((x) => ({input: x.tokens, output: 0, cached: 0, peak: null, cost: x.cost, title: new Date(x.t * 1000).toLocaleDateString()})));
+  drawAxis($('axis14'), d.map((x, i) => (i % 2 === 0 ? String(new Date(x.t * 1000).getDate()) : '')));
+  $('d14sum').textContent = fmtUsd(d.reduce((a, x) => a + x.cost, 0));
+
+  // lịch giá
+  const sc = $('sched'); sc.textContent = '';
+  const sa = $('schedAxis'); sa.textContent = ''; sa.style.display = 'grid'; sa.style.gridTemplateColumns = 'repeat(24, 1fr)'; sa.style.gap = '2px';
+  u.schedule.forEach((s, i) => { const b = el('b', (s.peak ? 'pk' : '') + (i === 0 ? ' now' : '')); b.title = hh(s.t) + ':00 · ' + (s.peak ? 'cao điểm' : 'thấp điểm'); sc.append(b); sa.append(el('span', null, i % 6 === 0 ? hh(s.t) : '')); });
+  const peaks = u.schedule.filter((s) => s.peak).length;
+  $('schedSum').textContent = peaks ? `${peaks}h cao điểm` : 'không có cao điểm';
+}
+
 async function loadStats() {
   try {
-    const d = await (await fetch('/api/stats')).json();
+    const [d, u] = await Promise.all([fetch('/api/stats').then((r) => r.json()), fetch('/api/usage').then((r) => r.json())]);
     const p = d.pool, sf = p.stateful || {};
     const running = d.accounts.reduce((n, a) => n + (a.in_flight || 0), 0);
-    const total = (sf.hits || 0) + (sf.misses || 0);
-    const hit = total ? Math.round((sf.hits / total) * 100) + '%' : '—';
-
-    const box = $('stats'); box.textContent = '';
-    box.append(
-      stat(`${p.available}/${p.total}`, 'tài khoản'),
-      stat(`${running}/${p.available * p.max_conc_per_acc}`, 'đang chạy'),
-      stat(String(p.capacity_now_rpm_hint), 'lượt / 30s'),
-      stat(hit, 'stateful hit'),
-      stat(String(sf.active_conversations ?? 0), 'hội thoại'),
-      stat(String(sf.open_sessions ?? 0), 'phiên web'),
-    );
-
+    $('kAcc').textContent = `${p.available}/${p.total}`;
+    const tot = (sf.hits || 0) + (sf.misses || 0);
+    $('kAccSub').textContent = `chạy ${running}/${p.available * p.max_conc_per_acc} · stateful ${tot ? Math.round((sf.hits / tot) * 100) + '%' : '—'} · ${sf.open_sessions ?? 0} phiên`;
     const body = $('accBody'); body.textContent = '';
     $('empty').style.display = d.accounts.length ? 'none' : 'block';
-    for (const a of d.accounts) body.append(row(a, p.max_conc_per_acc));
-
-    $('dot').className = 'dot';
-    $('liveTxt').textContent = new Date().toLocaleTimeString();
-  } catch (e) {
-    $('dot').className = 'dot off';
-    $('liveTxt').textContent = 'mất kết nối';
-  }
+    for (const a of d.accounts) body.append(accRow(a, p.max_conc_per_acc));
+    if (u && u.pricing) renderUsage(u);
+    $('dot').className = 'dot'; $('liveTxt').textContent = new Date().toLocaleTimeString();
+  } catch (e) { $('dot').className = 'dot off'; $('liveTxt').textContent = 'mất kết nối'; }
 }
 
 loadStats();

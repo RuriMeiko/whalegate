@@ -4,6 +4,7 @@ mod client;
 mod chrome_capture;
 mod pow;
 mod server;
+mod usage;
 
 use anyhow::Result;
 

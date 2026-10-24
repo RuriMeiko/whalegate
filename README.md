@@ -328,3 +328,13 @@ Làm tay: trong `~/.dsh/profiles/web/cordis.patch.yml`, mục `llm-pi-ai` → `p
 kèm `compat: {supportsDeveloperRole: false, supportsReasoningEffort: true, supportsUsageInStreaming: true}`, và `agent-default-model` → `model: deepseek-web`. Nếu harness đặt `DS_API_KEY`, khai báo biến môi trường `DS_HARNESS_API_KEY` trong `~/.dsh/.env`.
 
 `contextWindow` nên ≤ `DS_CONTEXT_TOKENS` của harness (web nhận ≥500K token, đo thực tế; ~1,1M thì trả stream rỗng). Muốn dsh nén sớm hơn (model dài hay lú) thì hạ xuống 200–300K.
+
+## Token, chi phí và giá API
+
+Dashboard (`/`) đếm token mỗi lượt hoàn tất (input không trúng cache / trúng cache / output gồm cả suy nghĩ) theo giờ UTC, lưu `usage.json` cạnh `accounts.json` (giữ 400 ngày). Số liệu bắt đầu tính từ lúc server có tính năng này.
+
+- Giá: lấy **live** từ `api-docs.deepseek.com/quick_start/pricing`, làm mới 6 giờ/lần, lấy model **rẻ nhất** mỗi hàng (hiện là `deepseek-flash`). Không tải được thì dùng bảng giá dự phòng và dashboard ghi rõ.
+- Cao điểm theo trang giá: thứ 2–6, 01:00–04:00 và 06:00–10:00 UTC, trừ ngày nghỉ lễ Trung Quốc; giá cao điểm gấp đôi. Danh sách nghỉ lễ 2026 trong code là ước lượng; thêm ngày khác bằng `DS_CN_HOLIDAYS=2026-12-31,2027-01-01`.
+- "Tiết kiệm" = chi phí nếu trả tiền API cho đúng lượng token đó. Cache miss tính đủ giá nên thiên về phía cao (API thật có cache theo prefix tự động).
+- Dự toán tháng = bình quân ngày của tối đa 7 ngày gần nhất × 30.
+- `GET /api/usage` trả toàn bộ số liệu dạng JSON.
