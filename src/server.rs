@@ -641,14 +641,22 @@ fn normalize_dsml(text: &str) -> String {
 /// - còn lại → flush hết
 const TOOL_MARKERS: [&str; 6] = ["<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function"];
 
-/// Vị trí đầu tiên của marker tool-call. "DSML" trần chỉ tính khi đứng ngay sau '<' (kèm tối đa vài thanh '｜'/'|'),
-/// để văn xuôi nhắc tới "DSML" (vd bản tóm tắt compaction) không bị coi là tool-call hỏng.
+/// Vị trí đầu tiên của marker tool-call. "DSML" trần chỉ tính khi dính markup: đứng sau '<' / thanh '｜' / "DS" (typo
+/// "DSDSML") hoặc ngay trước thanh '｜'. Văn xuôi nhắc "DSML tool-call parsing" (vd bản tóm tắt compaction) thì không tính.
 fn find_tool_marker(buf: &str) -> Option<usize> {
     let plain = TOOL_MARKERS.iter().filter_map(|k| buf.find(k)).min();
     let mut dsml = None;
     for (i, _) in buf.match_indices("DSML") {
-        let head = buf[..i].trim_end_matches(|c| c == '｜' || c == '|');
-        if head.ends_with('<') { dsml = Some(head.len() - 1); break; }
+        let before = &buf[..i];
+        let after = &buf[i + 4..];
+        let glued_after = after.starts_with('｜') || after.starts_with('|');
+        let glued_before = before.ends_with('<') || before.ends_with('｜') || before.ends_with('|') || before.ends_with("DS");
+        if glued_before || glued_after {
+            // lùi về đầu cụm: bỏ "DS" typo, các thanh và '<' đứng trước
+            let head = before.trim_end_matches("DS").trim_end_matches(|c| c == '｜' || c == '|');
+            dsml = Some(if head.ends_with('<') { head.len() - 1 } else { head.len() });
+            break;
+        }
     }
     match (plain, dsml) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) }
 }
@@ -824,6 +832,36 @@ fn fix_dsml_bars(text: &str) -> String {
     out
 }
 
+/// Thẻ đóng trần '</｜｜DSML｜｜>' (model bỏ chữ parameter/invoke/calls): suy ra loại từ các thẻ mở chưa đóng.
+fn fix_bare_closers(text: &str) -> String {
+    const BARE: &str = "</｜｜DSML｜｜>";
+    if !text.contains(BARE) { return text.to_string(); }
+    let (mut params, mut invokes, mut calls) = (0i32, 0i32, 0i32);
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let step;
+        if rest.starts_with(BARE) {
+            let name = if params > 0 { params -= 1; "parameter" } else if invokes > 0 { invokes -= 1; "invoke" } else { calls -= 1; "calls" };
+            out.push_str(&format!("</｜｜DSML｜｜ {}>", name));
+            step = BARE.len();
+        } else {
+            for (tag, ctr) in [("<｜｜DSML｜｜ parameter", 0), ("</｜｜DSML｜｜ parameter>", 1), ("<｜｜DSML｜｜ invoke", 2), ("</｜｜DSML｜｜ invoke>", 3), ("<｜｜DSML｜｜ calls>", 4), ("</｜｜DSML｜｜ calls>", 5)] {
+                if rest.starts_with(tag) {
+                    match ctr { 0 => params += 1, 1 => params -= 1, 2 => invokes += 1, 3 => invokes -= 1, 4 => calls += 1, _ => calls -= 1 }
+                    break;
+                }
+            }
+            let c = rest.chars().next().unwrap();
+            out.push(c);
+            step = c.len_utf8();
+        }
+        i += step;
+    }
+    out
+}
+
 /// '<｜｜DSML｜｜ file_path" string="true">' (mất 'parameter name="') → dạng chuẩn.
 fn fix_mangled_param_tags(text: &str) -> String {
     const OPEN: &str = "<｜｜DSML｜｜ ";
@@ -858,10 +896,12 @@ fn strip_dsml_fragments(text: &str) -> String {
 }
 
 pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
+    let fixed = text.replace("DSDSML", "DSML"); // typo lặp "DS" của model
+    let text = fixed.as_str();
     // DS web đổi format theo phiên bản: '<｜｜DSML｜｜ calls>' / '<｜｜DSML｜｜tool_calls>' /
     // '<｜｜DSML｜｜ calls>' có space — normalize mọi biến thể về '<｜｜DSML｜｜ calls>' trước parse
     let mut norm: String = {
-        let mut out = fix_mangled_param_tags(&space_dsml_tags(&fix_dsml_bars(text)))
+        let mut out = fix_mangled_param_tags(&fix_bare_closers(&space_dsml_tags(&fix_dsml_bars(text))))
             .replace("<｜｜DSML｜｜tool_calls>", "<｜｜DSML｜｜ calls>")
             .replace("</｜｜DSML｜｜tool_calls>", "</｜｜DSML｜｜ calls>")
             .replace("<｜｜DSML｜｜invoke name=", "<｜｜DSML｜｜ invoke name=")
@@ -886,8 +926,14 @@ pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolC
     // model bỏ thẻ mở invoke (calls → parameter… → /invoke): chèn invoke không tên, tên suy ra từ schema sau
     if let Some(pp) = norm.find("<｜｜DSML｜｜ parameter") {
         let inv = norm.find("<｜｜DSML｜｜ invoke");
-        if inv.is_none_or(|i| pp < i) && norm.contains("</｜｜DSML｜｜ invoke>") {
+        if inv.is_none_or(|i| pp < i) {
+            let had_inv_close = norm.contains("</｜｜DSML｜｜ invoke>");
             norm.insert_str(pp, "<｜｜DSML｜｜ invoke name=\"\">");
+            if !had_inv_close {
+                // chưa có thẻ đóng invoke nào: đóng ngay trước </calls> (hoặc cuối chuỗi)
+                let at = norm.find("</｜｜DSML｜｜ calls>").unwrap_or(norm.len());
+                norm.insert_str(at, "</｜｜DSML｜｜ invoke>\n");
+            }
         }
     }
     // thẻ <parameter name=...> trơn lẫn trong khối DSML → đưa về dạng DSML
@@ -2034,6 +2080,8 @@ mod xml_tests {
     fn safe_flush_holds_only_marker_tail() {
         assert!(has_tool_marker("nháp <｜DSML｜function_calls>") && !has_tool_marker("a < b"));
         assert!(!has_tool_marker("DSML tool-call parsing: normalize_dsml") && has_tool_marker("x <｜｜DSML｜｜ calls>"));
+        assert!(has_tool_marker("<｜｜DSDSML｜｜ calls>") && has_tool_marker("a ｜DSML｜｜ b") && has_tool_marker("x DSML｜｜ calls>"));
+        assert_eq!(safe_flush_len("xin chào <｜｜DSDSML｜｜ calls>"), "xin chào ".len());
         assert_eq!(safe_flush_len("hello world"), 11);
         assert_eq!(safe_flush_len("a < b"), 2);
         let s = "I'll dig in.\n\n<｜DSML｜function_calls>";
@@ -2267,5 +2315,51 @@ mod xml_tests {
         assert_eq!(call.name, "bash");
         assert!(call.arguments.contains("pwd && ls -la"));
         assert!(before.contains("repo"));
+    }
+}
+
+#[cfg(test)]
+mod sample_replay {
+    /// Chạy lại các mẫu hỏng đã lưu (~/.ds-harness/samples.jsonl) qua parser hiện tại:
+    ///   cargo test --release replay_samples -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn replay_samples() {
+        let p = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".ds-harness/samples.jsonl");
+        let (mut ok, mut bad) = (0, 0);
+        for l in std::fs::read_to_string(p).unwrap_or_default().lines() {
+            let v: serde_json::Value = match serde_json::from_str(l) { Ok(v) => v, Err(_) => continue };
+            let raw = v["raw"].as_str().unwrap_or("");
+            if !super::has_tool_marker(raw) { continue; }
+            match super::parse_any_tool_calls(raw) {
+                Some((_, calls)) if !calls.is_empty() => ok += 1,
+                _ => { bad += 1; println!("FAIL {:?}", raw.chars().take(260).collect::<String>()); }
+            }
+        }
+        println!("replay: ok={} fail={}", ok, bad);
+    }
+}
+
+#[cfg(test)]
+mod bare_close_tests {
+    use super::*;
+    #[test]
+    fn no_invoke_and_bare_closers() {
+        let t = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">d</｜｜DSML｜｜>\n</｜｜DSML｜｜ calls>";
+        let (_, c) = parse_dsml_tool_calls(t).expect("parse");
+        assert_eq!(c.len(), 1);
+        assert!(c[0].arguments.contains("\"command\":\"ls\""));
+    }
+    #[test]
+    fn dsdsml_typo_parses() {
+        let t = "<｜｜DSDSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        assert_eq!(parse_dsml_tool_calls(t).expect("parse").1[0].name, "bash");
+    }
+    #[test]
+    fn mangled_command_with_bare_closers() {
+        let t = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ command\" string=\"true\">ls -la</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">x</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜>\n</｜｜DSML｜｜ calls>";
+        let (_, c) = parse_dsml_tool_calls(t).expect("parse");
+        assert_eq!(c[0].name, "bash");
+        assert!(c[0].arguments.contains("ls -la"), "{}", c[0].arguments);
     }
 }
