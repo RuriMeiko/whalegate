@@ -13,6 +13,7 @@ pub enum StreamEv {
     Response(String),
     Ready(String),      // chat_session_id
     MsgId(i64),         // response_message_id
+    Usage(u64),         // accumulated_token_usage thật từ web (prompt + reasoning + output)
     RawHasContent(bool),// SSE có fragment nào không (rate-limit detect)
     Truncated(String),  // stream bị cắt giữa chừng (stall/lỗi mạng) — gửi ngay trước Done
     Done(String),       // full SSE text (để parse tool-calls cuối)
@@ -368,6 +369,14 @@ pub async fn chat_stream(
                 full.push_str(&line); full.push('\n');
                 let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
 
+                // token thật: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":346},...]}
+                if let Some(arr) = v.get("v").and_then(|x| x.as_array()) {
+                    for it in arr {
+                        if it.get("p").and_then(|p| p.as_str()) == Some("accumulated_token_usage") {
+                            if let Some(n) = it.get("v").and_then(|x| x.as_u64()) { let _ = tx.send(StreamEv::Usage(n)); }
+                        }
+                    }
+                }
                 // msg id
                 if !sent_msg_id {
                     if let Some(rid) = v.get("response_message_id").and_then(|x| x.as_i64()) {

@@ -212,6 +212,7 @@ pub(crate) struct Conv {
     pub(crate) tools_hash: u64,
     pub(crate) chars: usize,
     pub(crate) last_used: u64,
+    pub(crate) tokens: u64,
 }
 
 pub(crate) struct AppState {
@@ -225,6 +226,10 @@ pub(crate) struct AppState {
     // (acc_id, sha256 ảnh) -> file id DS đã upload (id gắn theo acc nên cache theo acc)
     // hội thoại stateful: dấu vân tay prefix -> phiên web đang giữ ngữ cảnh
     pub(crate) convs: std::sync::Mutex<std::collections::HashMap<u64, Conv>>,
+    // MỌI phiên web do harness tạo cho hội thoại: sid -> (acc, lần dùng cuối). Quét xoá theo TTL kể cả khi hội thoại bị bỏ dở.
+    pub(crate) sessions: std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>,
+    pub(crate) stat_conv_hit: std::sync::atomic::AtomicU64,
+    pub(crate) stat_conv_miss: std::sync::atomic::AtomicU64,
     pub(crate) file_cache: std::sync::Mutex<std::collections::HashMap<(String, String), String>>,
 }
 
@@ -1529,6 +1534,12 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
             "available": available,
             "capacity_now_rpm_hint": available as u64 * (AccStats::burst_limit() as u64),
             "max_conc_per_acc": AccStats::max_conc(),
+            "stateful": {
+                "hits": st.stat_conv_hit.load(std::sync::atomic::Ordering::Relaxed),
+                "misses": st.stat_conv_miss.load(std::sync::atomic::Ordering::Relaxed),
+                "active_conversations": st.convs.lock().unwrap().len(),
+                "open_sessions": st.sessions.lock().unwrap().len(),
+            },
         },
         "accounts": accounts,
         "now": now,
@@ -1794,27 +1805,33 @@ async fn access_guard(
             }
         }
     }
-    next.run(req).await
+    let mut resp = next.run(req).await;
+    if resp.status() == StatusCode::TOO_MANY_REQUESTS && !resp.headers().contains_key("retry-after") {
+        resp.headers_mut().insert("retry-after", axum::http::HeaderValue::from_static("5"));
+    }
+    resp
 }
 
-/// Dọn hội thoại stateful nhàn rỗi quá DS_CONV_TTL (mặc định 1800s): xoá phiên trên DS và khỏi registry.
+/// Dọn phiên web nhàn rỗi quá DS_CONV_TTL (mặc định 1800s): xoá trên DS, khỏi registry phiên và khỏi registry hội thoại.
 async fn conv_sweeper(st: Arc<AppState>) {
     let ttl: u64 = std::env::var("DS_CONV_TTL").ok().and_then(|v| v.parse().ok()).unwrap_or(1800);
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(std::time::Duration::from_secs((ttl / 4).clamp(3, 60))).await;
         let t = now();
-        let expired: Vec<Conv> = {
-            let mut m = st.convs.lock().unwrap();
-            let keys: Vec<u64> = m.iter().filter(|(_, c)| t.saturating_sub(c.last_used) > ttl).map(|(k, _)| *k).collect();
-            keys.into_iter().filter_map(|k| m.remove(&k)).collect()
+        let expired: Vec<(String, String)> = {
+            let mut m = st.sessions.lock().unwrap();
+            let ids: Vec<String> = m.iter().filter(|(_, (_, last))| t.saturating_sub(*last) > ttl).map(|(k, _)| k.clone()).collect();
+            ids.into_iter().filter_map(|k| m.remove(&k).map(|(acc, _)| (k, acc))).collect()
         };
-        for c in expired {
-            let acc = { st.store.read().await.accounts.iter().find(|a| a.id == c.acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
+        if expired.is_empty() { continue; }
+        st.convs.lock().unwrap().retain(|_, c| !expired.iter().any(|(sid, _)| *sid == c.sid));
+        for (sid, acc_id) in expired {
+            let acc = { st.store.read().await.accounts.iter().find(|a| a.id == acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
             if let Some((tok, ck)) = acc {
                 if let Ok(cl) = DsClient::new(tok, ck) {
-                    match cl.delete_session(&c.sid).await {
-                        Ok(()) => eprintln!("[conv] đã xoá phiên nhàn rỗi {}", &c.sid[..8.min(c.sid.len())]),
-                        Err(e) => eprintln!("[conv] xoá phiên {} lỗi: {}", c.sid, e),
+                    match cl.delete_session(&sid).await {
+                        Ok(()) => eprintln!("[conv] đã xoá phiên nhàn rỗi {}", &sid[..8.min(sid.len())]),
+                        Err(e) => eprintln!("[conv] xoá phiên {} lỗi: {}", sid, e),
                     }
                 }
             }
@@ -1831,6 +1848,9 @@ pub async fn run(port: u16) -> Result<()> {
         login_watching: std::sync::Mutex::new(false),
         file_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         convs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        stat_conv_hit: std::sync::atomic::AtomicU64::new(0),
+        stat_conv_miss: std::sync::atomic::AtomicU64::new(0),
     });
 
     let app = Router::new()

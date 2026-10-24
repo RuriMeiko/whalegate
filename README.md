@@ -290,3 +290,9 @@ npx wrangler secret put WORKER_TOKEN   # bearer token cho client
 - **Ảnh**: nhận `image_url` (data URL/http), `image`/base64 (kiểu Anthropic), kể cả trong kết quả tool. Ảnh được upload lên DS (`/file/upload_file`, PoW riêng) và gắn qua `ref_file_ids`; cache theo acc.
 - **Stateful**: sau mỗi lượt trả lời harness ghi dấu vân tay của prefix + id tool-call đã cấp. Request kế tiếp có prefix khớp chỉ gửi phần mới, nối bằng `parent_message_id` vào đúng phiên/acc. Không khớp, acc bận, đổi tools hay phiên quá dài thì tự gửi đủ ngữ cảnh. Phiên nhàn rỗi bị xoá sau `DS_CONV_TTL`.
 - **Token**: chuỗi tĩnh (không xoay); `code 40003` = hết hạn/đăng xuất → acc bị cách ly 30 phút, báo "cần login lại". Cookie `aws-waf-token` được làm mới từ Chrome mỗi 5 phút. Nút **Reset** xoá lỗi/cooldown/phiên và kiểm tra lại token.
+
+## Token & tương thích API
+- `usage` lấy từ `accumulated_token_usage` thật của web (cộng dồn theo phiên): `prompt_tokens` = tổng − output lượt này; `cached_tokens` = phần ngữ cảnh đã nằm sẵn trong phiên (nối tiếp stateful). Không có số thật thì ước lượng theo loại ký tự (`est_tokens`, sai lệch <25% so với đo thực: Anh ~4,1 ký tự/token, code ~2,5, tiếng Việt ~1,9).
+- 429 có header `Retry-After`; SSE có keep-alive 10s; lỗi upstream trả `error` rõ ràng.
+- **Không hỗ trợ** (web không có): `temperature`, `top_p`, `max_tokens`, `stop`, `tool_choice`, `response_format`, `n>1`. Chúng bị bỏ qua.
+- `/api/stats` → `pool.stateful`: `hits`/`misses` (tỉ lệ nối tiếp phiên), số hội thoại và phiên đang mở.
