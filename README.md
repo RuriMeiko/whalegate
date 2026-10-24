@@ -1,143 +1,206 @@
-# ds-harness
+<p align="center">
+  <img src="docs/banner.svg" alt="whalegate — an OpenAI-compatible gateway into DeepSeek web" width="100%">
+</p>
 
-**Proxy OpenAI-compatible chạy trên phiên DeepSeek web** — biến tài khoản chat.deepseek.com của bạn thành endpoint `/v1/chat/completions` chuẩn OpenAI, có pool nhiều account, failover, stream SSE và tool-calling.
+<p align="center">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust">
+  <img alt="OpenAI compatible" src="https://img.shields.io/badge/API-OpenAI--compatible-412991">
+  <img alt="Tool calling" src="https://img.shields.io/badge/tool__calls-native--style-2ea44f">
+  <img alt="Vision" src="https://img.shields.io/badge/vision-images-blue">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-lightgrey">
+</p>
 
-> ⚠️ Đọc [Ưu tiên dùng API chính thức](#-ưu-tiên-dùng-api-chính-thức) và [Miễn trừ trách nhiệm](#️-miễn-trừ-trách-nhiệm--dùng-với-trách-nhiệm) trước khi dùng.
+**whalegate** turns your own `chat.deepseek.com` web sessions into a standard OpenAI-style `/v1/chat/completions` endpoint. It pools several accounts, fails over between them, streams over SSE, reads images, and translates OpenAI `tools` to and from DeepSeek's DSML format. Agents like Cline, Continue, LiteLLM, the OpenAI SDKs and `dsh` can use it as if it were the real API.
+
+> [!WARNING]
+> **Use the official API for real work.** [platform.deepseek.com](https://platform.deepseek.com/) is cheap, has an SLA, and doesn't risk your account. whalegate exists for learning, protocol research and personal automation on **your own** account. Automating the web app may violate DeepSeek's Terms of Service and get the account locked. Don't resell or share access. You use it at your own risk ([MIT](LICENSE), no warranty).
 
 ---
 
-## Repo này làm gì?
+## Contents
 
-DeepSeek web (`chat.deepseek.com`) không có API công khai miễn phí. Repo này dựng một cầu nối:
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Adding accounts](#adding-accounts)
+- [Using the API](#using-the-api)
+- [Tool calling](#tool-calling)
+- [Images (vision)](#images-vision)
+- [Reasoning effort](#reasoning-effort)
+- [Stateful conversations](#stateful-conversations)
+- [Account pool & failover](#account-pool--failover)
+- [Dashboard](#dashboard)
+- [Configuration](#configuration)
+- [HTTP endpoints](#http-endpoints)
+- [Using with dsh (PTC mode)](#using-with-dsh-ptc-mode)
+- [Cloudflare Worker fan-out](#cloudflare-worker-fan-out-optional)
+- [Project layout](#project-layout)
+- [Limitations](#limitations)
 
-```
-Client (OpenAI SDK, dsh, Cline, Continue, LiteLLM…)
-        │  POST /v1/chat/completions   (đúng chuẩn OpenAI)
-        ▼
-   ds-harness (Rust, axum)  ── pool account ──┐
-        │                                     │
-        │  gọi API nội bộ của DS web           │  PoW solver + cookie + token
-        ▼                                     │
-   chat.deepseek.com/api/v0  ◄────────────────┘
-```
+---
 
-Cụ thể nó làm được:
+## Features
 
-| Tính năng | Mô tả |
+| | |
 |---|---|
-| **OpenAI-compatible** | `POST /v1/chat/completions` (stream & non-stream), `GET /v1/models` |
-| **Pool nhiều account** | Thêm nhiều acc DS web, chia tải least-busy, giới hạn đồng thời mỗi acc |
-| **Failover** | Lượt lỗi / rỗng / cụt stream → tự chuyển acc khác (tối đa 3 lượt), acc hỏng bị cooldown tăng dần |
-| **Stream SSE** | Phát `delta` theo thời gian thực, có `reasoning_content` khi bật DeepThink |
-| **Tool calling** | Dịch `tools` schema của OpenAI thành hướng dẫn DSML và parse tool-call trả về |
-| **Quản lý acc qua UI** | Web UI tại `http://127.0.0.1:8790/`: thêm/xoá/verify acc, xem stats, bắt session từ Chrome |
-| **Bắt session tự động** | Qua Chrome DevTools Protocol (CDP): login 1 lần, server tự bắt token + cookie |
-| **Giải PoW** | Tự giải `DeepSeekHashV1` proof-of-work mà DS web yêu cầu trước mỗi request |
-| **Giữ thread** | Chat tiếp trong cùng conversation của DS web, tự rotate session sau N lượt |
-| **Worker proxy (tuỳ chọn)** | Cloudflare Worker xoay nhiều instance harness ở nhiều IP/VPS |
+| 🔌 **OpenAI-compatible** | `POST /v1/chat/completions` (stream and non-stream) and `GET /v1/models`. Responses use the OpenAI shape, including `usage` and `cached_tokens` |
+| 🛠️ **Tool calling** | Supports `tools`, `tool_choice` (`auto` / `none` / `required` / named) and `parallel_tool_calls`. Arguments are validated against your JSON Schema, and the gateway retries with a targeted correction before a broken call ever reaches the client |
+| 🖼️ **Vision** | Accepts `image_url` (data URL or http), Anthropic-style base64 `image`, and images inside tool results. Images are uploaded to DeepSeek and cached per account |
+| 🧠 **DeepThink** | `reasoning_effort` maps to `none` / `auto` / `max`. Reasoning streams as `reasoning_content` |
+| 🐳 **Account pool** | Least-busy scheduling with a per-account concurrency cap, burst limiter and escalating cooldowns |
+| 🔁 **Failover** | An error, empty or truncated stream moves the request to another account (up to 3 attempts) |
+| 🧵 **Stateful** | Continues the same web conversation and sends only the new messages, so long agent loops stay fast and cheap |
+| 🔐 **Proof-of-work** | Built-in solver for `DeepSeekHashV1`, with optional prefetch for the next request |
+| 🌐 **Session capture** | Log in once in Chrome. The gateway grabs the token and cookies over CDP and refreshes the cookies every 5 minutes |
+| 📊 **Dashboard** | Accounts, live logs, token usage with "what this would cost on the API", latency p50/p90, and settings with graceful restart |
 
 ---
 
-## 🚨 Ưu tiên dùng API chính thức
+## How it works
 
-**Nếu bạn chỉ cần dùng DeepSeek cho công việc thật, hãy mua API chính thức trước:**
+```mermaid
+flowchart LR
+    subgraph Clients
+        A1[OpenAI SDK]
+        A2[Cline / Continue]
+        A3[dsh agent]
+        A4[LiteLLM]
+    end
 
-- **DeepSeek Platform**: <https://platform.deepseek.com/> — trả tiền theo token, có SLA, ổn định, không lo bị khoá acc, không vi phạm ToS.
-- Hoặc dùng qua nhà cung cấp có API tương thích OpenAI (OpenRouter, Together, Groq…) nếu cần đa dạng model.
+    subgraph WG["whalegate (Rust · axum)"]
+        direction TB
+        R["/v1/chat/completions"]
+        P["Prompt builder<br/>messages + tools → DSML"]
+        S["Scheduler<br/>least-busy · cooldown · burst"]
+        X["Output parser<br/>DSML → tool_calls · schema check"]
+        POW["PoW solver<br/>DeepSeekHashV1"]
+        R --> P --> S
+        S --> POW
+        X --> R
+    end
 
-Repo này **không phải** sản phẩm thay thế API chính thức. Nó tồn tại cho mục đích **học tập, nghiên cứu giao thức và tự động hoá cá nhân** trên chính tài khoản của bạn.
+    subgraph Pool["Account pool"]
+        B1[(acc 1)]
+        B2[(acc 2)]
+        B3[(acc n)]
+    end
 
-Chi phí thực tế: API chính thức của DeepSeek rẻ hơn rất nhiều so với thời gian bạn bỏ ra để vận hành, debug và đối phó với việc acc bị khoá. **Hãy mua API nếu có thể.**
+    DS["chat.deepseek.com<br/>/api/v0"]
 
----
-
-## ⚖️ Miễn trừ trách nhiệm — dùng với trách nhiệm
-
-Khi dùng repo này, bạn tự chịu **toàn bộ** trách nhiệm:
-
-1. **Tuân thủ Điều khoản dịch vụ** của DeepSeek. Việc dùng acc web qua proxy tự động có thể **vi phạm ToS** và dẫn đến **khoá tài khoản**. Bạn tự cân nhắc.
-2. **Không dùng để bán lại, cho thuê, hoặc chia sẻ API** cho người khác khi chưa được phép — đây là hành vi có thể vi phạm pháp luật về cung cấp dịch vụ.
-3. **Không dùng cho mục đích trái pháp luật**, gây hại, spam, lừa đảo, hay tạo nội dung bị cấm.
-4. **Bảo mật dữ liệu**: file `~/.ds-harness/accounts.json` chứa **token và cookie phiên đăng nhập** — tương đương quyền truy cập tài khoản. Đừng commit, đừng chia sẻ, đừng đưa lên server công khai khi chưa bật `DS_API_KEY`.
-5. **Không có bảo hành** — xem [LICENSE](LICENSE). Tác giả không chịu trách nhiệm cho bất kỳ thiệt hại nào (mất acc, mất dữ liệu, gián đoạn công việc…).
-
-Tóm lại: **dùng trên acc của bạn, cho việc của bạn, và hiểu rõ rủi ro bạn đang nhận.**
-
----
-
-## Cài đặt
-
-### Yêu cầu
-
-- Rust ≥ 1.75 (stable)
-- Linux (đã test), macOS/Windows có thể chạy nhưng phần CDP cần chỉnh
-- Chrome/Chromium nếu muốn bắt session tự động (không bắt buộc — có thể dán JSON thủ công)
-
-### Build
-
-```bash
-git clone https://github.com/RuriMeiko/ds-harness.git
-cd ds-harness
-cargo build --release
+    A1 & A2 & A3 & A4 -->|OpenAI JSON| R
+    S --> B1 & B2 & B3
+    B1 & B2 & B3 -->|token + cookies| DS
+    DS -->|SSE| X
 ```
 
-Binary: `target/release/deepseek-harness`
+### Lifecycle of one request
 
-### Chạy
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant G as whalegate
+    participant A as Account pool
+    participant D as DeepSeek web
+
+    C->>G: POST /v1/chat/completions (messages, tools, stream)
+    G->>G: fit context, render tools spec + history as one prompt
+    G->>G: fingerprint prefix → known web conversation?
+    G->>A: lease an account (least busy, not cooling down)
+    A-->>G: acc + session
+    G->>D: create PoW challenge
+    D-->>G: challenge
+    G->>G: solve DeepSeekHashV1
+    G->>D: completion (prompt or delta, parent_message_id, ref_file_ids)
+    loop SSE
+        D-->>G: thinking / response chunks
+        G-->>C: reasoning_content / content deltas<br/>(DSML markup held back, never leaked)
+    end
+    D-->>G: done (+ accumulated token usage)
+    G->>G: parse tool calls → validate against schema
+    alt valid
+        G-->>C: tool_calls + finish_reason + usage + [DONE]
+    else invalid / unparsable
+        G->>D: retry with a correction note (≤ 3 attempts, failover on errors)
+    end
+```
+
+---
+
+## Quick start
+
+**Requirements:** Rust ≥ 1.75. Linux is tested. macOS and Windows should run, but the Chrome/CDP helpers may need tweaking. Chrome or Chromium is optional and only used for automatic session capture.
 
 ```bash
+git clone https://github.com/RuriMeiko/whalegate.git
+cd whalegate
+cargo build --release          # → target/release/deepseek-harness
+
 DS_PORT=8790 ./target/release/deepseek-harness serve
+# dashboard: http://127.0.0.1:8790/
 ```
 
-Mở UI: <http://127.0.0.1:8790/>
-
-### systemd --user (chạy nền)
+### Run in the background (systemd --user)
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp deploy/ds-harness.service ~/.config/systemd/user/
+# the unit assumes the repo lives at ~/ds-harness — edit WorkingDirectory/ExecStart if you cloned elsewhere
 systemctl --user daemon-reload
 systemctl --user enable --now ds-harness
 journalctl --user -u ds-harness -f
 ```
 
-> File unit mặc định trỏ `WorkingDirectory=%h/ds-harness` — sửa lại nếu bạn clone chỗ khác.
+### CLI
+
+| Command | What it does |
+|---|---|
+| `deepseek-harness serve` | Run the gateway (default) |
+| `deepseek-harness whoami` | Print the current user for the first stored account |
+| `deepseek-harness chat "<prompt>"` | Send one raw prompt and dump the SSE stream |
+| `deepseek-harness chatraw "<prompt>" <thinking> <search>` | Same, with DeepThink and search toggles, for debugging |
 
 ---
 
-## Thêm account
+## Adding accounts
 
-### Cách 1 — Tự động qua Chrome (khuyến nghị)
+Accounts are stored in `~/.ds-harness/accounts.json`, which you can override with `DS_ACCOUNTS_PATH`. That file holds **live session tokens**: never commit or share it.
 
-1. Bật Chrome với cổng CDP (nếu chưa):
-   ```bash
-   google-chrome --remote-debugging-port=9333
-   ```
-2. Vào UI → bấm **"➕ Login account mới"** — server tự mở tab DeepSeek trong Chrome.
-3. Đăng nhập trong tab đó (Google / email / passkey — kiểu gì cũng được). Server canh tab (poll 2s), thấy token → verify → **lưu → tự đóng tab**, acc hiện ngay trong bảng.
-4. Hoặc bấm **"🔍 Quét tabs & lưu session"** để bắt toàn bộ tab `chat.deepseek.com` đang đăng nhập sẵn.
-5. Lần đầu nên bấm **"🏗️ Build profile"** (~40s): Chrome login tự dạo web thật để fingerprint trông tin cậy, đỡ lỗi `Current device environment error`. Profile được giữ nguyên giữa các lần login.
+### Option 1: Chrome login (recommended)
 
-Server còn tự **refresh cookie từ Chrome mỗi 5 phút** cho acc khớp token đang sống.
-
-### Cách 2 — Dán JSON thủ công
-
-Trong DevTools của tab `chat.deepseek.com` đã login, chạy:
-
-```js
-JSON.stringify({
-  token: JSON.parse(localStorage.getItem('userToken')).value,
-  cookies: Object.fromEntries(document.cookie.split('; ').map(c => {
-    const i = c.indexOf('='); return [c.slice(0, i), c.slice(i + 1)];
-  }))
-})
+```mermaid
+flowchart LR
+    A["Dashboard:<br/>➕ Login new account"] --> B["Gateway spawns a dedicated<br/>Chrome (CDP :9777, fixed profile)"]
+    B --> C["You sign in<br/>(Google / email / passkey)"]
+    C --> D["Gateway polls the tab every 2s<br/>→ token found"]
+    D --> E["Verify with DeepSeek<br/>→ save → close tab"]
+    E --> F["Cookies auto-refreshed<br/>every 5 min"]
 ```
 
-Dán kết quả vào ô **"Thêm account"** trên UI.
+- **🔍 Scan tabs & save sessions** captures every already-logged-in `chat.deepseek.com` tab from your main Chrome. Start Chrome with `--remote-debugging-port=9333` first.
+- **🏗️ Build profile** (~40s, do it once) warms the login profile by browsing real sites. This makes `Current device environment error` much less likely.
+- If the same DeepSeek user logs in again, the existing account's token is replaced rather than duplicated.
+
+### Option 2: paste a token
+
+On a logged-in `chat.deepseek.com` tab, open DevTools → Console and run:
+
+```js
+copy(localStorage.userToken)
+```
+
+Paste the result into **Add account manually** on the dashboard. Any of these shapes is accepted: `{"value":"…","__version":"0"}`, a quoted string, `Bearer …`, or the bare token. The token is verified before it is saved, and cookies are optional. You can also add one through the API:
+
+```bash
+curl -X POST http://127.0.0.1:8790/api/accounts \
+  -H 'content-type: application/json' -d '{"token":"<token>","label":"main"}'
+```
 
 ---
 
-## Dùng API
+## Using the API
+
+The single model is `deepseek-web`. The legacy aliases `deepseek-web-r1` and `deepseek-web:max` are still accepted.
 
 ### curl
 
@@ -146,8 +209,8 @@ curl http://127.0.0.1:8790/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-web",
-    "messages": [{"role": "user", "content": "Xin chào"}],
-    "stream": false
+    "messages": [{"role": "user", "content": "Explain the borrow checker in 3 sentences."}],
+    "stream": true
   }'
 ```
 
@@ -156,221 +219,369 @@ curl http://127.0.0.1:8790/v1/chat/completions \
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://127.0.0.1:8790/v1",
-    api_key="khong-can-neu-khong-dat-DS_API_KEY",
-)
+client = OpenAI(base_url="http://127.0.0.1:8790/v1", api_key="anything-unless-DS_API_KEY-is-set")
 
 resp = client.chat.completions.create(
-    model="deepseek-web-r1",      # hoặc "deepseek-web"
-    messages=[{"role": "user", "content": "Giải thích borrow checker"}],
-    extra_body={"thinking": True, "search": False},
+    model="deepseek-web",
+    reasoning_effort="max",                      # none | auto | max
+    messages=[{"role": "user", "content": "Prove that √2 is irrational."}],
 )
+print(resp.choices[0].message.reasoning_content)  # DeepThink trace
 print(resp.choices[0].message.content)
 ```
 
-### Tham số mở rộng (ngoài chuẩn OpenAI)
+### Extra request fields
 
-| Field | Kiểu | Mặc định | Ý nghĩa |
+Pass these as `extra_body` in the SDKs.
+
+| Field | Type | Default | Meaning |
 |---|---|---|---|
-| `thinking` | bool | `false` | Bật DeepThink (trả `reasoning_content`) |
-| `search` | bool | `false` | Bật tìm kiếm thông minh của DS web |
-| `new_thread` | bool | `false` | `true` = tạo conversation mới; `false` = chat tiếp thread hiện có |
-| `tools` | array | – | Schema tool kiểu OpenAI; harness render thành hướng dẫn DSML và parse kết quả |
+| `reasoning_effort` | string | `DS_DEFAULT_EFFORT` | `none` = fast, `auto` = think on user turns only, `max` = always think. `reasoning.effort` also works |
+| `thinking` | bool | `false` | Legacy switch for DeepThink |
+| `search` | bool | `false` | DeepSeek web search |
+| `new_thread` | bool | `false` | Start a fresh web conversation instead of continuing a matching one |
 
-Model trả về tool-call sẽ nằm trong `choices[0].message.tool_calls` như bình thường.
+### Compatibility notes
+
+- `usage` comes from the web app's real `accumulated_token_usage`. When it is missing, a per-script estimate is used, which lands within about 25% of measured values. `prompt_tokens_details.cached_tokens` counts the part of the context that was already in the web conversation.
+- A `429` includes `Retry-After`. SSE sends a keep-alive every 10s. Upstream failures return a clear `error` object.
+- The web app has no equivalent for `temperature`, `top_p`, `max_tokens`, `stop`, `response_format` or `n > 1`, so they are ignored.
 
 ---
 
-## Biến môi trường
+## Tool calling
 
-| Biến | Mặc định | Ý nghĩa |
+DeepSeek web has no tool API. whalegate emulates one by rendering your OpenAI `tools` into the same **DSML** block format the model already uses, then parsing it back:
+
+```mermaid
+flowchart TB
+    T["OpenAI tools[] + tool_choice"] --> R["Tools spec in the prompt<br/>(types, enums, REQUIRED, nested schemas, defaults)"]
+    H["History: assistant tool_calls<br/>+ role:tool results"] --> R2["Re-rendered as canonical DSML<br/>+ tool_result (name) [id]: …"]
+    R & R2 --> M(("DeepSeek<br/>web model"))
+    M --> O["Streamed reply"]
+    O --> G{"Tool marker?"}
+    G -- no --> TXT["content (streamed live)"]
+    G -- yes --> PARSE["Normalize & parse DSML<br/>(tolerant of the model's typos)"]
+    PARSE --> V{"Valid vs JSON Schema?"}
+    V -- yes --> OUT["tool_calls[]<br/>finish_reason: tool_calls"]
+    V -- no --> FIX["Retry with the bad output<br/>+ exact error as a correction note"]
+    FIX --> M
+```
+
+What the model writes, and what your client receives:
+
+<table>
+<tr><th>Model output (DSML)</th><th>Client receives</th></tr>
+<tr><td>
+
+```text
+Let me check the repo.
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="bash">
+<｜｜DSML｜｜ parameter name="command" string="true">ls -la</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="timeout" string="false">30</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>
+```
+
+</td><td>
+
+```json
+{
+  "content": "Let me check the repo.",
+  "tool_calls": [{
+    "id": "call_9f2c41ab07de",
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "arguments": "{\"command\":\"ls -la\",\"timeout\":30}"
+    }
+  }]
+}
+```
+
+</td></tr>
+</table>
+
+### What makes it behave like a real API
+
+- **No false positives.** Calls are only extracted when the request actually has `tools`. Fallback formats (JSON, XML-ish) count only when they end the reply and name a tool you declared. HTML in an answer, or an example `<bash command="…"/>` in prose, stays text.
+- **Schema validation.** Types, `enum`, `required`, nested `properties` / `items`, `anyOf` / `oneOf`. Values are also coerced to the declared type: `"50"` becomes `50`, and `123` becomes `"123"` for string params.
+- **Repair retries.** A broken call is never retried blind. The next attempt includes the model's own output plus the concrete problem, for example `todo: "items[0].status" must be one of "todo"|"done"`, so the model fixes exactly that.
+- **`tool_choice`.** `none` returns plain text. `required` and named choices force a call and retry if the model answers in prose. A named tool that isn't declared returns `400 invalid_request_error`.
+- **`parallel_tool_calls: false`** keeps a single call.
+- **Markup never leaks.** DSML is held back from `content`, and stripped from `reasoning_content` when the model drafts calls while thinking.
+- **History round-trips.** Previous calls are re-rendered in canonical DSML. Empty tool results show as `(no output)`, so the model doesn't re-run a silent `mkdir`.
+
+### Example: an agent loop
+
+```python
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}, "description": {"type": "string"}},
+            "required": ["command", "description"],
+        },
+    },
+}]
+
+messages = [{"role": "user", "content": "How much disk is free on /?"}]
+while True:
+    r = client.chat.completions.create(model="deepseek-web", messages=messages,
+                                       tools=tools, reasoning_effort="auto")
+    msg = r.choices[0].message
+    messages.append(msg)
+    if not msg.tool_calls:
+        print(msg.content)
+        break
+    for call in msg.tool_calls:
+        output = run(call)                       # your executor
+        messages.append({"role": "tool", "tool_call_id": call.id, "content": output})
+```
+
+---
+
+## Images (vision)
+
+```python
+client.chat.completions.create(model="deepseek-web", messages=[{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "What is wrong in this screenshot?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0..."}},
+    ],
+}])
+```
+
+- Accepts `image_url` (data URL or public `http(s)` URL; private and internal addresses are refused), Anthropic-style `{"type":"image","source":{…}}`, and images returned **inside tool results**, such as a `read_image` tool.
+- Each image is uploaded through DeepSeek's file endpoint (with its own PoW) and attached with `ref_file_ids`. Uploads are cached per account by content hash.
+- Up to the 4 most recent distinct images are sent per request. The per-image size cap is `DS_MAX_IMAGE_MB` (default 20).
+
+---
+
+## Reasoning effort
+
+| `reasoning_effort` | DeepThink | Best for |
 |---|---|---|
-| `DS_PORT` | `8787` | Cổng nghe (bind `127.0.0.1`) |
-| `DS_STATEFUL` | 1 | nối tiếp hội thoại trong phiên web (chỉ gửi phần mới); 0 = luôn gửi đủ |
-| `DS_CONTEXT_TOKENS` | `500000` | `context_length` báo cho client (web nhận được ≥500K token, đo thực tế; ~1,1M thì stream rỗng) |
-| `DS_CONV_TTL` / `DS_CONV_MAX_CHARS` | 1800 / 1200000 | dọn phiên nhàn rỗi (s) / trần ngữ cảnh một phiên (ký tự) |
-| `DS_DEFAULT_EFFORT` | none | mức suy nghĩ khi client không chỉ định |
-| `DS_API_KEY` | (trống) | Đặt thì `/v1/*` yêu cầu `Authorization: Bearer <key>` |
-| `DS_ACCOUNTS_PATH` | `$HOME/.ds-harness/accounts.json` | File lưu account |
-| `DS_MAX_CONC_PER_ACC` | `2` | Số call đồng thời tối đa mỗi acc (>2 dễ bị khoá) |
-| `DS_QUEUE_WAIT_SECS` | `120` | Chờ acc rảnh trước khi trả 429 |
-| `DS_SESSION_ROTATE` | `30` | Số lượt/session web trước khi đổi session mới |
-| `DS_FAIL_COOLDOWN_MAX` | `600` | Trần cooldown (giây) cho acc hỏng liên tiếp |
-| `DS_PROMPT_MAX_CHARS` | `1200000` | Vượt ngân sách thì cắt giữa tool_result cũ, rồi bỏ lượt cũ nhất |
-| `DS_BURST_LIMIT` / `DS_BURST_WINDOW` | `6` / `30` | Giới hạn burst mỗi acc trong cửa sổ giây |
-| `DS_COOLDOWN` | `10` | Cooldown cơ bản (giây) sau lỗi |
-| `DS_CHROME_BIN` | tự dò | Đường dẫn Chrome/Chromium |
-| `DS_LOGIN_CDP_PORT` | `9777` | Cổng CDP riêng cho Chrome login |
-| `DS_LOGIN_PROFILE` | `$HOME/.ds-harness/login-profile` | Profile Chrome cố định khi login (giữ fingerprint ổn định) |
-| `DS_RESET_LOGIN_PROFILE` | – | `1` = xoá profile login trước khi mở |
-| `DS_DEBUG_SSE` | – | Bật dump SSE thô để debug |
+| `none` (also `off`, `minimal`) | never | Fast answers and simple tool loops |
+| `auto` | on user turns, **off** on steps that only continue after a `tool` result | Agents. Thinking steps take ~10–44 s and non-thinking steps ~2 s, so tool loops get several times faster |
+| `max` (any other value) | every step | Hard problems |
+
+When the client sends nothing, `DS_DEFAULT_EFFORT` applies (default `none`). Title-generation requests from clients never think.
+
+---
+
+## Stateful conversations
+
+Agents resend the whole history every step. whalegate fingerprints each conversation prefix plus the tool-call ids it issued. When the next request extends a known prefix, only the **new** messages go to the same web conversation, using `parent_message_id`.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as whalegate
+    participant D as DeepSeek web
+
+    C->>G: step 1 — [system, user]
+    G->>D: full prompt (new web conversation)
+    D-->>G: tool_calls (ids issued: call_a)
+    G->>G: remember fingerprint(prefix + call_a) → (acc, session, msg_id)
+    C->>G: step 2 — [system, user, assistant(call_a), tool(call_a)]
+    G->>G: prefix matches ✔
+    G->>D: delta only: tool_result(call_a) → parent = msg_id
+    Note over G,D: same account, same session, cached_tokens reported
+```
+
+The gateway falls back to sending the full context, on any account, when the prefix doesn't match, the holding account stays busy for more than 4s, the tools change, or the conversation grows past `DS_CONV_MAX_CHARS`. Idle web conversations are deleted after `DS_CONV_TTL`. Set `DS_STATEFUL=0` to always send everything.
+
+---
+
+## Account pool & failover
+
+```mermaid
+stateDiagram-v2
+    [*] --> Ready
+    Ready --> Busy: lease (≤ DS_MAX_CONC_PER_ACC in flight)
+    Busy --> Ready: success
+    Busy --> Cooldown: error / empty / truncated stream
+    Ready --> Burst: > DS_BURST_LIMIT calls in DS_BURST_WINDOW
+    Burst --> Ready: after DS_COOLDOWN
+    Cooldown --> Ready: 15s → 30s → 60s … (cap DS_FAIL_COOLDOWN_MAX)
+    Busy --> NeedsLogin: code 40003 (token expired)
+    NeedsLogin --> Ready: re-login / new token
+    Ready --> Disabled: pool switch OFF
+    Disabled --> Ready: pool switch ON
+```
+
+- Each request gets up to **3 attempts**. Upstream failures move to another account. Model mistakes (a bad tool call) retry with a correction note and don't penalize the account.
+- When no account is free, the request waits up to `DS_QUEUE_WAIT_SECS`, then returns `429` with `Retry-After`.
+- A stream that stalls for 90s or breaks mid-way counts as truncated and is retried, not returned as complete.
+- The in-flight lease lives for the whole stream, even if the client disconnects, so the concurrency cap really holds.
+
+---
+
+## Dashboard
+
+Open `http://127.0.0.1:8790/`. It is loopback-only.
+
+- **Accounts:** add, verify, reset, edit label or token, enable/disable in the pool, bulk verify/reset, and duplicate-user detection.
+- **Usage:** tokens per hour (cache miss / cache hit / output), and what the same traffic would cost on the official API. Prices are fetched live every 6h from DeepSeek's pricing page, peak hours are included, and there is a monthly projection. Data lives in `usage.json` next to `accounts.json`.
+- **Latency:** p50/p90 over the last hour, plus the error count.
+- **Live logs:** SSE stream with filters and search. Useful tags include `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` and `[ds-fail]`.
+- **Settings:** verified knobs only. Saving waits until no request is in flight, then the process re-execs itself (same PID, picks up a new build) and the page reloads. **Hard reset** restarts immediately.
+
+---
+
+## Configuration
+
+Precedence: value saved on the dashboard → `DS_*` environment variable → default. Rows marked ⚙️ are editable on the dashboard.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DS_PORT` | `8787` | Listen port (binds `127.0.0.1`; the sample unit uses `8790`) |
+| `DS_API_KEY` | – | If set, `/v1/*` requires `Authorization: Bearer <key>` |
+| `DS_ACCOUNTS_PATH` | `~/.ds-harness/accounts.json` | Account store. Settings, usage and samples live next to it |
+| ⚙️ `DS_STATEFUL` | `1` | Continue web conversations and send deltas only |
+| ⚙️ `DS_POW_PREFETCH` | `1` | Fetch and solve the next PoW ahead of time |
+| ⚙️ `DS_DEFAULT_EFFORT` | `none` | Effort when the client doesn't specify one |
+| ⚙️ `DS_CONTEXT_TOKENS` | `500000` | `context_length` advertised in `/v1/models`. The web app accepts ≥500K, while ~1.1M returns an empty stream |
+| ⚙️ `DS_PROMPT_MAX_CHARS` | `1200000` | Over budget: trim old tool results first, then drop the oldest turns |
+| ⚙️ `DS_MAX_CONC_PER_ACC` | `2` | In-flight requests per account. More than 2 tends to get rate-limited |
+| ⚙️ `DS_TZ_OFFSET` | `25200` | Timezone offset in seconds sent to the web app and used for daily stats |
+| `DS_CONV_TTL` | `1800` | Delete idle web conversations after this many seconds |
+| `DS_CONV_MAX_CHARS` | `1200000` | Maximum size of one stateful conversation |
+| `DS_SESSION_ROTATE` | `30` | Turns on a shared (tool-less) session before rotating |
+| `DS_QUEUE_WAIT_SECS` | `120` | Wait for a free account before returning `429` |
+| `DS_FAIL_COOLDOWN_MAX` | `600` | Cap for the escalating failure cooldown |
+| `DS_BURST_LIMIT` / `DS_BURST_WINDOW` / `DS_COOLDOWN` | `6` / `30` / `10` | Per-account burst limiter |
+| `DS_MAX_IMAGE_MB` | `20` | Maximum size per image |
+| `DS_READ_TIMEOUT_SECS` | `120` | Socket read timeout (restart required) |
+| `DS_CHROME_BIN` | auto | Chrome/Chromium path for login |
+| `DS_LOGIN_CDP_PORT` / `DS_LOGIN_PROFILE` | `9777` / `~/.ds-harness/login-profile` | Dedicated login Chrome |
+| `DS_RESET_LOGIN_PROFILE` | – | `1` wipes the login profile before opening |
+| `DS_CN_HOLIDAYS` | – | Extra Chinese holidays (`YYYY-MM-DD,…`) for peak-price math |
+| `DS_DEBUG_SSE` | `0` | Dump raw SSE to `/tmp/ds_debug_sse.log` |
 
 ---
 
 ## HTTP endpoints
 
-| Method | Path | Mô tả |
+| Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | Web UI quản lý account |
-| `GET` | `/api/accounts` | Danh sách acc |
-| `POST` | `/api/accounts` | Thêm acc (`{token, cookies}`) |
-| `DELETE` | `/api/accounts/{id}` | Xoá acc |
-| `POST` | `/api/accounts/{id}/verify` | Verify token còn sống |
-| `POST` | `/api/accounts/{id}/pool` | Bật/tắt acc trong pool |
-| `POST` | `/api/capture` | Quét tab DS trong Chrome |
-| `POST` | `/api/login_start` | Bắt đầu flow login tự động |
-| `POST` | `/api/build_profile` | Nuôi profile Chrome giống user thật (warm-up) |
-| `GET` | `/api/stats` | `in_flight`, `fail_streak`, cooldown từng acc |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat |
-| `GET` | `/v1/models` | Danh sách model |
+| `GET` | `/v1/models` | Model list (`context_length`, `reasoning_efforts`, modalities) |
+| `GET` | `/` | Dashboard |
+| `GET` / `POST` | `/api/accounts` | List / add accounts (`{token, label?}` or `{token, cookies}`) |
+| `PATCH` / `DELETE` | `/api/accounts/{id}` | Edit label or token / delete |
+| `POST` | `/api/accounts/{id}/verify` · `/reset` · `/pool` | Verify token / clear errors and sessions / `{"pool_enabled": bool}` |
+| `POST` | `/api/capture` · `/api/login_start` · `/api/build_profile` | Chrome session capture, login flow, profile warm-up |
+| `GET` | `/api/stats` · `/api/usage` | Pool state (in-flight, cooldowns, stateful hit rate) / usage, cost and latency |
+| `GET` | `/api/logs` · `/api/logs/stream` | Logs as JSON / SSE |
+| `GET` / `POST` | `/api/settings` | Read or update settings (`null` resets a key) |
+| `GET` / `POST` | `/api/restart` | Status / `{"mode": "idle" \| "now" \| "cancel"}` |
 
-**Bảo mật**: `/` và `/api/*` **luôn chỉ cho loopback** (kể cả khi bind ra ngoài). `/v1/*` mở cho mọi IP nhưng nên đặt `DS_API_KEY`.
-
----
-
-## Kiến trúc code
-
-```
-src/
-├── main.rs            # CLI: serve | whoami | chat | chatraw
-├── server.rs          # axum router, pool account, UI, parser DSML, dựng prompt
-├── chat.rs            # /v1/chat/completions — một lõi run_chat cho cả stream & non-stream
-├── client.rs          # HTTP + SSE tới chat.deepseek.com, event stream
-├── chrome_capture.rs  # CDP: login, capture tab, refresh cookie
-├── pow.rs             # Keccak-f[1600] + DeepSeekHashV1 proof-of-work
-└── ui.html            # Web UI (nhúng vào binary)
-worker/                # Cloudflare Worker proxy (tuỳ chọn)
-deploy/                # systemd unit mẫu
-```
-
-### Ghi chú kỹ thuật đáng chú ý
-
-- **Một đường parse tool-call duy nhất**: `parse_any_tool_calls` dùng chung cho stream và non-stream, xử lý cả DSML chuẩn lẫn biến thể XML mà model đôi khi sinh ra.
-- **Guard markup**: chặn khối DSML lọt vào `content`/`reasoning_content` của client.
-- **In-flight lease**: khoá giữ suốt vòng đời stream (kể cả khi client ngắt) → giới hạn đồng thời mỗi acc có hiệu lực thật.
-- **Phát hiện stream cụt**: stall >90s hoặc lỗi mạng giữa chừng → `StreamEv::Truncated` → retry thay vì coi là xong.
-- **PoW**: `DeepSeekHashV1` = SHA3-256 nhưng bỏ round 0 của keccak-f; port 1:1 từ [CJackHwang/ds2api](https://github.com/CJackHwang/ds2api).
-- **Log chẩn đoán**: `[ds-timing]`, `[ds-stall]`, `[ds-stream-err]`, `[toolcall-unparsed]`, `[toolcall-guard]`, `[ds-fail]`.
+> [!IMPORTANT]
+> `/` and `/api/*` only answer **loopback**, even when the port is exposed. `/v1/*` answers anyone, so set `DS_API_KEY` before exposing it. A reverse proxy on the same machine makes every request look like loopback, so never proxy the dashboard publicly.
 
 ---
 
-## Cloudflare Worker proxy (tuỳ chọn)
+## Using with dsh (PTC mode)
 
-`worker/ds-proxy.js` xoay request qua nhiều instance harness (nhiều IP/VPS), có rate-limit nhẹ và round-robin qua KV.
+dsh (`@deepseek-ai/dsh`) reads its model list from the profile's patch file, not from `/v1/models`. One script sets everything up. It is idempotent and backs up the file to `.bak.<timestamp>` first:
+
+```bash
+deploy/setup-dsh.sh                                  # ~/.dsh/profiles/web → http://127.0.0.1:8790/v1
+deploy/setup-dsh.sh ~/.dsh/profiles/web http://host:8790/v1
+DS_CONTEXT_TOKENS=300000 deploy/setup-dsh.sh         # smaller window → earlier compaction
+DSH_PRESET=standard deploy/setup-dsh.sh              # keep the classic agent preset
+```
+
+The script adds a `ds-harness` provider with the `deepseek-web` model (images, 500K context, usage in stream, efforts `off→none`, `low→auto`, `max→max`), makes it the default model, and selects the **PTC** agent preset for new sessions. If the gateway has `DS_API_KEY`, set `DS_HARNESS_API_KEY` in `~/.dsh/.env`. It requires PyYAML.
+
+**Why PTC (Programmatic Tool Calling)?** Instead of one schema per tool, the model sees a single `run_code` tool plus a generated TypeScript SDK, and writes one program that chains many tools:
+
+```mermaid
+flowchart LR
+    subgraph Standard["standard preset — 4 round trips"]
+        direction TB
+        s1[bash: ls] --> s2[read a.ts] --> s3[read b.ts] --> s4[bash: grep]
+    end
+    subgraph PTC["PTC preset — 1 round trip"]
+        direction TB
+        p1["run_code:<br/>const files = await tools.bash({command:'ls'})<br/>for (const f of …) await tools.read({path:f})<br/>return summary"]
+    end
+```
+
+Only what the program prints or returns comes back into the context. Through whalegate this means far fewer requests to DeepSeek web, which brings fewer throttles and less fixed per-turn latency. The trade-off is that the whole step rides on one `code` argument, so an SDK mistake fails the whole program.
+
+---
+
+## Cloudflare Worker fan-out (optional)
+
+`worker/ds-proxy.js` round-robins clients across several whalegate instances (different IPs or VPSes), with light rate limiting and an optional KV-backed cursor.
+
+```mermaid
+flowchart LR
+    C[Clients] -->|Bearer WORKER_TOKEN| W["Cloudflare Worker"]
+    W --> H1["whalegate #1 (VPS A)"]
+    W --> H2["whalegate #2 (VPS B)"]
+    W --> H3["whalegate #n"]
+```
 
 ```bash
 cd worker
 npx wrangler deploy
-npx wrangler secret put UPSTREAMS      # ["https://ds1.example","https://ds2.example"]
-npx wrangler secret put WORKER_TOKEN   # bearer token cho client
+npx wrangler secret put UPSTREAMS      # ["https://wg1.example","https://wg2.example"]
+npx wrangler secret put WORKER_TOKEN   # bearer token clients must send
 ```
 
 ---
 
-## Giới hạn đã biết
+## Project layout
 
-- DeepSeek web **không phải** API — độ trễ cao hơn, có thể bị chặn/đổi endpoint bất cứ lúc nào.
-- Tool-calling là **giả lập bằng prompt** (DSML), không phải native → độ chính xác thấp hơn API thật, model đôi khi sinh sai format.
-- Bật >2 call đồng thời/acc dễ bị DS khoá tạm thời.
-- Phần CDP phụ thuộc Chrome và chỉ ổn định trên Linux desktop.
-- Không hỗ trợ vision/embedding.
+```text
+src/
+├── main.rs            CLI: serve | whoami | chat | chatraw
+├── chat.rs            /v1/chat/completions — one core (run_chat) for stream & non-stream,
+│                      failover, repair retries, tool_choice, stateful continuation
+├── server.rs          router, account pool, dashboard API, DSML parser & schema validator,
+│                      prompt rendering
+├── client.rs          HTTP + SSE client for chat.deepseek.com, stall detection
+├── pow.rs             Keccak-f[1600] + DeepSeekHashV1 proof-of-work
+├── chrome_capture.rs  CDP login, tab capture, cookie refresh
+├── settings.rs        dashboard settings (saved → env → default)
+├── usage.rs           token accounting, live API pricing, latency
+├── logbuf.rs          in-memory log ring for the live log view
+└── ui.html            dashboard (embedded in the binary)
+deploy/                systemd unit, dsh setup script
+worker/                Cloudflare Worker fan-out
+docs/                  README assets
+```
+
+Malformed tool-call outputs are saved to `~/.ds-harness/samples.jsonl`. Replay them against the current parser with:
+
+```bash
+cargo test --release replay_samples -- --ignored --nocapture
+```
+
+The `DeepSeekHashV1` PoW is SHA3-256 without round 0 of keccak-f, ported 1:1 from [CJackHwang/ds2api](https://github.com/CJackHwang/ds2api).
+
+---
+
+## Limitations
+
+- DeepSeek web is **not** an API. Latency is higher, and endpoints or behavior can change or be blocked at any time.
+- Tool calling is prompt-emulated. It is hardened (validation, repair retries, a tolerant parser), but still less exact than a native function-calling API.
+- Tool calls arrive in one chunk when the model finishes the block, not as streamed argument deltas.
+- Sampling controls (`temperature`, `top_p`, `max_tokens`, `stop`, `response_format`) have no web equivalent.
+- No embeddings endpoint.
+- Chrome/CDP helpers are only reliable on a Linux desktop.
 
 ---
 
 ## License
 
-[MIT](LICENSE) © 2026 RuriMeiko
-
----
-
-**Dùng với trách nhiệm. Ưu tiên mua API chính thức nếu bạn cần sự ổn định.**
-
-## Model, ảnh, stateful
-- **Một model**: `deepseek-web`. `reasoning_effort: none` = Nhanh (flash), `max` (hoặc mức khác) = DeepThink. Alias cũ `deepseek-web-r1` và hậu tố `deepseek-web:max` vẫn nhận.
-- **Ảnh**: nhận `image_url` (data URL/http), `image`/base64 (kiểu Anthropic), kể cả trong kết quả tool. Ảnh được upload lên DS (`/file/upload_file`, PoW riêng) và gắn qua `ref_file_ids`; cache theo acc.
-- **Stateful**: sau mỗi lượt trả lời harness ghi dấu vân tay của prefix + id tool-call đã cấp. Request kế tiếp có prefix khớp chỉ gửi phần mới, nối bằng `parent_message_id` vào đúng phiên/acc. Không khớp, acc bận, đổi tools hay phiên quá dài thì tự gửi đủ ngữ cảnh. Phiên nhàn rỗi bị xoá sau `DS_CONV_TTL`.
-- **Token**: chuỗi tĩnh (không xoay); `code 40003` = hết hạn/đăng xuất → acc bị cách ly 30 phút, báo "cần login lại". Cookie `aws-waf-token` được làm mới từ Chrome mỗi 5 phút. Nút **Reset** xoá lỗi/cooldown/phiên và kiểm tra lại token.
-
-## Token & tương thích API
-- `usage` lấy từ `accumulated_token_usage` thật của web (cộng dồn theo phiên): `prompt_tokens` = tổng − output lượt này; `cached_tokens` = phần ngữ cảnh đã nằm sẵn trong phiên (nối tiếp stateful). Không có số thật thì ước lượng theo loại ký tự (`est_tokens`, sai lệch <25% so với đo thực: Anh ~4,1 ký tự/token, code ~2,5, tiếng Việt ~1,9).
-- 429 có header `Retry-After`; SSE có keep-alive 10s; lỗi upstream trả `error` rõ ràng.
-- **Không hỗ trợ** (web không có): `temperature`, `top_p`, `max_tokens`, `stop`, `response_format`, `n>1`. Chúng bị bỏ qua.
-- **Tool calling:** `tools`, `tool_choice` (`auto` / `none` / `required` / `{"type":"function","function":{"name":…}}`), `parallel_tool_calls`. Args được kiểm theo JSON Schema; call sai thì harness tự retry kèm lời nhắc sửa lỗi trước khi trả cho client.
-- `/api/stats` → `pool.stateful`: `hits`/`misses` (tỉ lệ nối tiếp phiên), số hội thoại và phiên đang mở.
-
-## Cấu hình dsh
-
-dsh đọc danh sách model từ file patch của profile, **không** tự lấy từ `/v1/models`, nên đổi harness xong phải cập nhật file này (nếu không dsh giữ `contextWindow` và model cũ).
-
-Tự động (idempotent, có backup `.bak.<giờ>`):
-
-```bash
-deploy/setup-dsh.sh                       # profile ~/.dsh/profiles/web, harness http://127.0.0.1:8790/v1
-deploy/setup-dsh.sh ~/.dsh/profiles/web http://127.0.0.1:8790/v1
-DS_CONTEXT_TOKENS=300000 deploy/setup-dsh.sh   # đổi cửa sổ ngữ cảnh báo cho dsh
-DSH_PRESET=standard deploy/setup-dsh.sh        # giữ agent preset thường thay vì PTC
-```
-
-**Mức suy nghĩ:** `none` = Nhanh (flash); `max` = DeepThink mọi bước; `auto` = DeepThink ở lượt người dùng nhưng tắt khi chỉ nối tiếp sau kết quả công cụ (vòng lặp tool nhanh gấp nhiều lần: bước có think 5–25K ký tự mất 10–44s, bước không think ~2s). Trong dsh: off→none, low→auto, max→max.
-
-Cần PyYAML. Script thêm provider `ds-harness` (1 model `deepseek-web`, nhận ảnh, ctx 500K, `reasoningEfforts` off→none, low→auto, max→max, usage trong stream) và đặt làm model mặc định, chọn sẵn agent preset **PTC** cho phiên mới. Mở lại dsh rồi chọn **DeepSeek Web (harness, free)**.
-
-**PTC mode:** thay vì thấy schema từng tool, model chỉ thấy `run_code` + một SDK TypeScript sinh từ các tool, rồi viết một chương trình gọi nhiều tool liền (`await tools.bash(...)`, vòng lặp, rẽ nhánh); chỉ phần chương trình in/trả về mới quay lại ngữ cảnh. Với harness: một chuỗi 5 bước tool còn 1 lượt request lên DS web (đỡ throttle, đỡ độ trễ cố định mỗi lượt). Đổi lại cả việc dồn vào một tham số `code`, viết sai SDK là hỏng cả chương trình. Không hợp thì đặt `DSH_PRESET=standard` hoặc chọn preset khác trong UI dsh.
-
-Làm tay: trong `~/.dsh/profiles/web/cordis.patch.yml`, mục `llm-pi-ai` → `providers.ds-harness.models` chỉ giữ:
-
-```yaml
-- id: deepseek-web
-  name: DeepSeek Web (harness, free)
-  contextWindow: 500000
-  maxTokens: 32768
-  input: [text, image]
-  reasoningEfforts: {off: none, low: auto, max: max}
-```
-
-kèm `compat: {supportsDeveloperRole: false, supportsReasoningEffort: true, supportsUsageInStreaming: true}`, và `agent-default-model` → `model: deepseek-web`. Nếu harness đặt `DS_API_KEY`, khai báo biến môi trường `DS_HARNESS_API_KEY` trong `~/.dsh/.env`.
-
-`contextWindow` nên ≤ `DS_CONTEXT_TOKENS` của harness (web nhận ≥500K token, đo thực tế; ~1,1M thì trả stream rỗng). Muốn dsh nén sớm hơn (model dài hay lú) thì hạ xuống 200–300K.
-
-## Token, chi phí và giá API
-
-Dashboard (`/`) đếm token mỗi lượt hoàn tất (input không trúng cache / trúng cache / output gồm cả suy nghĩ) theo giờ UTC, lưu `usage.json` cạnh `accounts.json` (giữ 400 ngày). Số liệu bắt đầu tính từ lúc server có tính năng này.
-
-- Giá: lấy **live** từ `api-docs.deepseek.com/quick_start/pricing`, làm mới 6 giờ/lần, lấy model **rẻ nhất** mỗi hàng (hiện là `deepseek-flash`). Không tải được thì dùng bảng giá dự phòng và dashboard ghi rõ.
-- Cao điểm theo trang giá: thứ 2–6, 01:00–04:00 và 06:00–10:00 UTC, trừ ngày nghỉ lễ Trung Quốc; giá cao điểm gấp đôi. Danh sách nghỉ lễ 2026 trong code là ước lượng; thêm ngày khác bằng `DS_CN_HOLIDAYS=2026-12-31,2027-01-01`.
-- "Tiết kiệm" = chi phí nếu trả tiền API cho đúng lượng token đó. Cache miss tính đủ giá nên thiên về phía cao (API thật có cache theo prefix tự động).
-- Dự toán tháng = bình quân ngày của tối đa 7 ngày gần nhất × 30.
-- `GET /api/usage` trả toàn bộ số liệu dạng JSON.
-
-## Cấu hình trên dashboard
-
-Nút **cài đặt** trên dashboard chỉ hiện các mục đã kiểm chứng hiệu lực: Stateful, Dự đoán PoW, Mức suy nghĩ mặc định, Cửa sổ ngữ cảnh, Trần prompt, Đồng thời mỗi tài khoản, Múi giờ. Các `DS_*` còn lại (burst, cooldown, TTL, hàng đợi…) vẫn chỉnh được bằng biến môi trường nhưng không hiện và không đặt được qua API, vì chưa được thử hiệu lực thật.
-
-- Lưu ở `settings.json` cạnh `accounts.json`; nút ↺ trả khoá về mặc định.
-- Thứ tự ưu tiên: giá trị đã lưu trên dashboard → biến môi trường `DS_*` → mặc định.
-- API: `GET /api/settings` (danh sách, kiểu, khoảng hợp lệ), `POST /api/settings` với `{"DS_STATEFUL":"0","DS_CONV_TTL":600}`; `null` = bỏ giá trị đã lưu. Chỉ gọi được từ loopback như mọi `/api/*`.
-- `DS_API_KEY`, đường dẫn và cổng cố ý không nằm ở đây.
-
-## Thêm tài khoản thủ công
-
-Trên dashboard, mục **Thêm tài khoản thủ công**: mở tab đã đăng nhập chat.deepseek.com, F12 → Console → `copy(localStorage.userToken)`, dán vào ô rồi bấm Thêm. Nhận cả dạng `{"value":"…","__version":"0"}`, chuỗi có nháy, `Bearer …` hoặc token trần. Token được kiểm tra với DeepSeek trước khi lưu; trùng token thì báo đã có. Không cần cookie. Cũng gọi được bằng `POST /api/accounts` với `{"token":"…","label":"tuỳ chọn"}`.
-
-## Log trực tiếp, popup, khởi động lại
-
-- **Log**: nút `log` ở đầu dashboard mở popup log realtime (SSE `GET /api/logs/stream`, vòng đệm 3000 dòng, lọc lỗi/req/conv/pow, tìm chữ, tạm dừng, copy). Mọi dòng vẫn ra stderr như cũ. `GET /api/logs?after=<seq>` để lấy dạng JSON.
-- **Popup**: log, thêm tài khoản và hộp xác nhận (xoá / reset / verify / hard reset / build profile) là popup; phía sau tan thành lưới ASCII thay vì blur (tắt hiệu ứng khi hệ điều hành bật "giảm chuyển động").
-- **Lưu cấu hình**: sửa trong popup cài đặt chưa lưu ngay, cuối popup hiện nút *Lưu & áp dụng* (có *Hard reset* riêng khi không có thay đổi). Lưu → ghi `settings.json` → đợi đến lúc không còn request nào → server tự khởi động lại (`exec` lại chính binary, cùng PID, nạp luôn bản build mới nếu có) → trang tự tải lại. Hard reset khởi động lại ngay và cắt request đang chạy. Trước khi khởi động lại, harness ghi đĩa và xoá các phiên web đang giữ để không để mồ côi trên DeepSeek.
-- API: `POST /api/restart` với `{"mode":"idle" | "now" | "cancel"}`, `GET /api/restart` trả trạng thái chờ.
-- Log và `/api/*` chỉ cho loopback; nếu đặt reverse proxy trên cùng máy thì mọi request trông như loopback, nên đừng phơi dashboard ra ngoài.
-
-## Sửa tài khoản, hàng loạt, nhận diện trùng
-
-- **Sửa**: mở dòng tài khoản → `sửa` để đổi nhãn và/hoặc thay token (để trống ô token = giữ nguyên). Token mới được kiểm tra với DeepSeek; đổi token thì xoá lỗi/cooldown và mọi phiên web gắn với tài khoản đó. API: `PATCH /api/accounts/{id}` với `{"label":"…","token":"…"}` (trường nào cũng tuỳ chọn).
-- **Verify hết / Reset hết**: cạnh nút `+ Thêm`, chạy 3 tài khoản song song, có hộp xác nhận và báo kết quả ("9 ok · 1 lỗi").
-- **Trùng người dùng**: harness lưu id người dùng DeepSeek (từ `users/current`, hiện 6 ký tự đầu cạnh nhãn). Thêm một token thuộc người đã có trong pool thì báo trùng (dùng `sửa` để thay token). Đăng nhập lại qua Chrome / quét tab với cùng người dùng thì thay token vào tài khoản cũ thay vì thêm bản thứ hai. Tài khoản cũ được bổ sung id lúc khởi động; hai dòng trùng id hiện nhãn đỏ "trùng người dùng".
-
-- **Bật/tắt tài khoản**: mở dòng tài khoản → công tắc TẮT/BẬT. Tài khoản tắt không được pool dùng (dòng mờ, "đã tắt"); dành cho acc bạn muốn dùng tay. Request đang chạy trên nó vẫn chạy nốt; hội thoại stateful gắn với nó chuyển sang gửi đủ ngữ cảnh ở tài khoản khác. API: `POST /api/accounts/{id}/pool` với `{"pool_enabled": false}`.
-
-- **Độ trễ**: ô thứ ba trên dashboard hiện p50/p90 thời gian xử lý mỗi request trong 1 giờ gần nhất (từ lúc nhận đến lúc xong, gồm chờ tài khoản và retry) cùng số request lỗi. Chỉ giữ trong bộ nhớ (400 request gần nhất), mất khi restart. `GET /api/usage` trả trường `latency`.
-
+[MIT](LICENSE) © 2026 RuriMeiko. **Use responsibly, and buy the official API if you need reliability.**
