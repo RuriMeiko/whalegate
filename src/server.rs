@@ -1292,23 +1292,25 @@ fn space_dsml_tags(text: &str) -> String {
     out
 }
 
-/// Chuẩn hoá số thanh dọc quanh 'DSML': model hay nhả '<｜DSML｜｜ calls>' / '</｜DSML｜｜ invoke>' (1-3 gạch) → luôn 2 gạch mỗi bên.
+/// Chuẩn hoá số thanh dọc quanh 'DSML': model hay nhả '<｜DSML｜｜ calls>' / '</｜DSML｜｜ invoke>' (1-3 gạch),
+/// kể cả thanh ASCII hoặc trộn ('<｜||DSML||_call>', '</||DSML|| invoke>') → luôn 2 gạch toàn độ rộng mỗi bên.
 fn fix_dsml_bars(text: &str) -> String {
+    let is_bar = |c: &char| *c == '｜' || *c == '|';
     let mut out = String::with_capacity(text.len() + 8);
     let mut rest = text;
     while let Some(p) = rest.find("DSML") {
         let before = &rest[..p];
-        let n1 = before.chars().rev().take_while(|c| *c == '｜').count();
+        let b1: usize = before.chars().rev().take_while(is_bar).map(|c| c.len_utf8()).sum();
         let after = &rest[p + 4..];
-        let n2 = after.chars().take_while(|c| *c == '｜').count();
-        if n1 == 0 && n2 == 0 {
+        let b2: usize = after.chars().take_while(is_bar).map(|c| c.len_utf8()).sum();
+        if b1 == 0 && b2 == 0 {
             out.push_str(&rest[..p + 4]);
             rest = after;
             continue;
         }
-        out.push_str(&before[..before.len() - n1 * '｜'.len_utf8()]);
+        out.push_str(&before[..before.len() - b1]);
         out.push_str("｜｜DSML｜｜");
-        rest = &after[n2 * '｜'.len_utf8()..];
+        rest = &after[b2..];
     }
     out.push_str(rest);
     out
@@ -1364,6 +1366,22 @@ fn fix_mangled_param_tags(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Cắt mảnh thẻ DSML dính ở CUỐI giá trị tham số: '…app｜｜DSML｜｜ parameter>\n', '…｜｜DSML｜｜>'.
+/// Chỉ khi markup là phần đuôi (sau nó chỉ còn tên thẻ, '>' và khoảng trắng) — nội dung file hợp lệ có nhắc tới
+/// DSML ở giữa (vd ghi chính source của parser này) không bị đụng.
+fn strip_trailing_dsml(v: &str) -> &str {
+    let mut cur = v;
+    loop {
+        let t = cur.trim_end();
+        let Some(p) = t.rfind("DSML") else { return cur };
+        let tail = t[p + 4..].trim_start_matches(['｜', '|']);
+        let tail_ok = tail.trim_end_matches('>').trim().chars().all(|c| c.is_ascii_alphabetic() || c == '_');
+        let head = t[..p].trim_end_matches(['｜', '|']);
+        if !tail_ok || head.len() == t[..p].len() { return cur; }
+        cur = head.trim_end_matches('/').trim_end_matches('<');
+    }
 }
 
 /// Xoá mảnh markup DSML còn sót khỏi phần prose.
@@ -1475,6 +1493,8 @@ pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolC
                     None => break,
                 }
             }
+            // thẻ đóng viết thiếu '</' ('…giá trị｜｜DSML｜｜ parameter>') → đuôi markup dính vào giá trị: cắt bỏ
+            let value = strip_trailing_dsml(&value).to_string();
             let is_json = after_pn[..vstart].contains("string=\"false\"");
             // skip junk param rỗng (model nhiều khi emit <parameter name="bash"></parameter>)
             if !pname.is_empty() && !value.is_empty() {
@@ -3061,5 +3081,45 @@ mod native_toolcall_tests {
         let (_, c) = extract_tool_calls(t, &tools()).unwrap();
         let v: Value = serde_json::from_str(&c[0].arguments).unwrap();
         assert_eq!(v["code"], "x({y:1})");
+    }
+}
+
+
+#[cfg(test)]
+mod dsml_leak_tests {
+    use super::*;
+
+    fn tools() -> Vec<Value> {
+        vec![json!({"type":"function","function":{"name":"run_code","parameters":{"type":"object",
+            "properties":{"code":{"type":"string"},"description":{"type":"string"}},"required":["code","description"]}}})]
+    }
+    fn call(code_desc_tail: &str) -> String {
+        format!("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"run_code\">\n<｜｜DSML｜｜ parameter name=\"code\" string=\"true\">x()</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">{}\n</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>", code_desc_tail)
+    }
+
+    #[test]
+    fn closing_tag_without_slash_does_not_leak_into_value() {
+        // mẫu thật (dsh session c39df5ed): '…relaunch app｜｜DSML｜｜ parameter>' và '…requirements｜｜DSML｜｜>'
+        for tail in ["Copy keychain｜｜DSML｜｜ parameter>", "Probe altool｜｜DSML｜｜>", "Probe｜DSML｜｜ parameter>"] {
+            let (_, c) = extract_tool_calls(&call(tail), &tools()).unwrap();
+            let v: Value = serde_json::from_str(&c[0].arguments).unwrap();
+            assert!(!v["description"].as_str().unwrap().contains("DSML"), "{:?}", v["description"]);
+        }
+        // DSML ở GIỮA giá trị (nội dung hợp lệ) phải giữ nguyên
+        assert_eq!(strip_trailing_dsml("a <｜｜DSML｜｜ calls> b"), "a <｜｜DSML｜｜ calls> b");
+        assert_eq!(strip_trailing_dsml("plain"), "plain");
+    }
+
+    #[test]
+    fn ascii_and_mixed_bars_parse() {
+        // mẫu thật: '<｜||DSML||_call>' và '<||DSML||_call>'
+        let t = "<||DSML||_call>\n<||DSML|| invoke name=\"run_code\">\n<||DSML|| parameter name=\"code\" string=\"true\">x()</||DSML|| parameter>\n<||DSML|| parameter name=\"description\" string=\"true\">d</||DSML|| parameter>\n</||DSML|| invoke>\n</||DSML||_call>";
+        let (before, c) = extract_tool_calls(t, &tools()).expect("thanh ASCII phải parse được");
+        assert_eq!((before.as_str(), c[0].name.as_str()), ("", "run_code"));
+        let t = "<｜||DSML||_call>\n<｜｜DSML｜｜ invoke name=\"run_code\">\n<｜｜DSML｜｜ parameter name=\"code\" string=\"true\">x()</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">d</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        assert!(extract_tool_calls(t, &tools()).is_some());
+        assert_eq!(safe_flush_len(t), 0, "không lộ ra stream");
+        // văn xuôi có ống '|' bình thường không bị đụng
+        assert_eq!(fix_dsml_bars("a | b || c"), "a | b || c");
     }
 }
