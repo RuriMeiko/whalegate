@@ -295,7 +295,8 @@ npx wrangler secret put WORKER_TOKEN   # bearer token cho client
 ## Token & tương thích API
 - `usage` lấy từ `accumulated_token_usage` thật của web (cộng dồn theo phiên): `prompt_tokens` = tổng − output lượt này; `cached_tokens` = phần ngữ cảnh đã nằm sẵn trong phiên (nối tiếp stateful). Không có số thật thì ước lượng theo loại ký tự (`est_tokens`, sai lệch <25% so với đo thực: Anh ~4,1 ký tự/token, code ~2,5, tiếng Việt ~1,9).
 - 429 có header `Retry-After`; SSE có keep-alive 10s; lỗi upstream trả `error` rõ ràng.
-- **Không hỗ trợ** (web không có): `temperature`, `top_p`, `max_tokens`, `stop`, `tool_choice`, `response_format`, `n>1`. Chúng bị bỏ qua.
+- **Không hỗ trợ** (web không có): `temperature`, `top_p`, `max_tokens`, `stop`, `response_format`, `n>1`. Chúng bị bỏ qua.
+- **Tool calling:** `tools`, `tool_choice` (`auto` / `none` / `required` / `{"type":"function","function":{"name":…}}`), `parallel_tool_calls`. Args được kiểm theo JSON Schema; call sai thì harness tự retry kèm lời nhắc sửa lỗi trước khi trả cho client.
 - `/api/stats` → `pool.stateful`: `hits`/`misses` (tỉ lệ nối tiếp phiên), số hội thoại và phiên đang mở.
 
 ## Cấu hình dsh
@@ -308,11 +309,14 @@ Tự động (idempotent, có backup `.bak.<giờ>`):
 deploy/setup-dsh.sh                       # profile ~/.dsh/profiles/web, harness http://127.0.0.1:8790/v1
 deploy/setup-dsh.sh ~/.dsh/profiles/web http://127.0.0.1:8790/v1
 DS_CONTEXT_TOKENS=300000 deploy/setup-dsh.sh   # đổi cửa sổ ngữ cảnh báo cho dsh
+DSH_PRESET=standard deploy/setup-dsh.sh        # giữ agent preset thường thay vì PTC
 ```
 
 **Mức suy nghĩ:** `none` = Nhanh (flash); `max` = DeepThink mọi bước; `auto` = DeepThink ở lượt người dùng nhưng tắt khi chỉ nối tiếp sau kết quả công cụ (vòng lặp tool nhanh gấp nhiều lần: bước có think 5–25K ký tự mất 10–44s, bước không think ~2s). Trong dsh: off→none, low→auto, max→max.
 
-Cần PyYAML. Script thêm provider `ds-harness` (1 model `deepseek-web`, nhận ảnh, ctx 500K, `reasoningEfforts` off→none, low→auto, max→max, usage trong stream) và đặt làm model mặc định. Mở lại dsh rồi chọn **DeepSeek Web (harness, free)**.
+Cần PyYAML. Script thêm provider `ds-harness` (1 model `deepseek-web`, nhận ảnh, ctx 500K, `reasoningEfforts` off→none, low→auto, max→max, usage trong stream) và đặt làm model mặc định, chọn sẵn agent preset **PTC** cho phiên mới. Mở lại dsh rồi chọn **DeepSeek Web (harness, free)**.
+
+**PTC mode:** thay vì thấy schema từng tool, model chỉ thấy `run_code` + một SDK TypeScript sinh từ các tool, rồi viết một chương trình gọi nhiều tool liền (`await tools.bash(...)`, vòng lặp, rẽ nhánh); chỉ phần chương trình in/trả về mới quay lại ngữ cảnh. Với harness: một chuỗi 5 bước tool còn 1 lượt request lên DS web (đỡ throttle, đỡ độ trễ cố định mỗi lượt). Đổi lại cả việc dồn vào một tham số `code`, viết sai SDK là hỏng cả chương trình. Không hợp thì đặt `DSH_PRESET=standard` hoặc chọn preset khác trong UI dsh.
 
 Làm tay: trong `~/.dsh/profiles/web/cordis.patch.yml`, mục `llm-pi-ai` → `providers.ds-harness.models` chỉ giữ:
 
