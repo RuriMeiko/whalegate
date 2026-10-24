@@ -84,8 +84,6 @@
   button.del { border-color: var(--hair); color: var(--bad); }
   button.del:hover:not(:disabled) { background: var(--bad); border-color: var(--bad); color: var(--bg); }
   .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-  #msg { font: 12px/1.4 var(--mono); color: var(--mute); margin-left: auto; text-align: right; }
-  #msg.ok { color: var(--ok); } #msg.err { color: var(--bad); }
 
 
   /* cấu hình */
@@ -93,6 +91,7 @@
   .chip { font: 500 11px/1 var(--mono); letter-spacing: .06em; padding: 7px 10px; border: 1px solid var(--ink); background: transparent; color: var(--ink); cursor: pointer; text-transform: uppercase; }
   .chip i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; background: transparent; border: 1px solid var(--ink); vertical-align: 0; }
   .chip.on { background: var(--ink); color: var(--bg); } .chip.on i { background: var(--bg); border-color: var(--bg); }
+  .chip.dirty { outline: 2px solid var(--warn); outline-offset: 1px; }
   .cfg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
   .cfg > div { padding: 0 16px 0 0; }
   .cfg h4 { margin: 0 0 6px; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; font-weight: 400; padding-bottom: 8px; border-bottom: 1px solid var(--ink); }
@@ -116,6 +115,59 @@
   #lblIn { margin: 0; flex: 1; min-width: 160px; width: auto; }
   textarea:focus, #lblIn:focus { background: #f4efe2; }
   code { font: 12px/1 var(--mono); border: 1px solid var(--hair); padding: 2px 5px; }
+
+  /* thông báo nổi (không chen vào thanh nút) */
+  #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: min(420px, calc(100vw - 32px)); pointer-events: none; }
+  .toast { pointer-events: auto; background: var(--bg); border: 1px solid var(--ink); border-left-width: 6px; padding: 10px 12px; font: 12px/1.45 var(--mono); display: flex; gap: 12px; align-items: flex-start; box-shadow: 4px 4px 0 var(--ink); }
+  .toast.ok { border-left-color: var(--ok); } .toast.err { border-left-color: var(--bad); } .toast.wait { border-left-color: var(--warn); }
+  .toast span { flex: 1; word-break: break-word; }
+  .toast b { cursor: pointer; font-weight: 400; color: var(--mute); padding: 0 2px; }
+
+  /* popup + lớp phủ ASCII */
+  #veil { position: fixed; inset: 0; z-index: 39; pointer-events: none; display: none; }
+  .modal { position: fixed; inset: 0; z-index: 40; display: none; padding: 24px; align-items: center; justify-content: center; }
+  .modal.open { display: flex; animation: pop .18s steps(4) both; }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .modal.open { animation: none; } }
+  .dlg { background: var(--bg); border: 1px solid var(--ink); width: min(560px, 100%); box-shadow: 6px 6px 0 var(--ink); padding: 0; }
+  .dlg .top { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--ink); }
+  .dlg .top h2 { margin: 0; font: 600 13px/1 var(--mono); flex: 1; }
+  .dlg .inner { padding: 14px 14px 16px; }
+  .dlg .inner .note { margin: 0 0 4px; }
+  .lp { background: var(--bg); border: 1px solid var(--ink); height: 100%; width: 100%; display: flex; flex-direction: column; box-shadow: 6px 6px 0 var(--ink); max-width: 1400px; margin: 0 auto; }
+  .lp .top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--ink); }
+  .lp .top h2 { margin: 0 8px 0 0; font: 600 13px/1 var(--mono); }
+  .lp .top .sp { flex: 1; }
+  .lp input[type=text] { font: 12px/1 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 7px 9px; width: 180px; outline: none; border-radius: 0; }
+  .lp input[type=text]:focus { background: #f4efe2; }
+  .lp .body { flex: 1; overflow: auto; padding: 8px 12px 12px; font: 12px/1.55 var(--mono); -webkit-overflow-scrolling: touch; position: relative; }
+  .ll { display: flex; gap: 10px; padding: 1px 0; border-bottom: 1px dotted var(--hair); }
+  .ll time { color: var(--mute); flex: none; }
+  .ll span { white-space: pre-wrap; word-break: break-word; min-width: 0; }
+  .ll.err span { color: var(--bad); } .ll.warn span { color: var(--warn); } .ll.dim span { color: var(--mute); }
+  .lp .foot2 { display: flex; justify-content: space-between; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--ink); font: 11px/1 var(--mono); color: var(--mute); }
+  #logJump { position: absolute; right: 16px; bottom: 12px; display: none; }
+  .fchip.on { background: var(--ink); color: var(--bg); }
+  .tuned { font: 12px/1.6 var(--mono); color: var(--mute); border: 1px solid var(--hair); padding: 8px 10px; margin-bottom: 14px; }
+  .tuned b { color: var(--warn); font-weight: 500; }
+  @media (max-width: 720px) {
+    #saveBar { left: 12px; right: 12px; transform: none; bottom: 12px; }
+    .modal { padding: 0; } .dlg { width: 100%; box-shadow: none; } .lp { box-shadow: none; border: 0; } .lp input[type=text] { width: 100%; }
+    #toasts { left: 12px; right: 12px; bottom: 12px; max-width: none; } .ll { flex-direction: column; gap: 0; }
+  }
+
+
+  #cfmModal { z-index: 42; }
+  .dlg .inner p { margin: 0 0 14px; font: 13px/1.55 var(--sans); }
+  .dlg .btns { display: flex; justify-content: flex-end; gap: 8px; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); }
+  button.danger:hover:not(:disabled) { background: transparent; color: var(--bad); }
+  #saveBar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 45; background: var(--bg); border: 1px solid var(--ink); box-shadow: 5px 5px 0 var(--ink); padding: 10px 12px; display: none; align-items: center; gap: 10px; flex-wrap: wrap; font: 12px/1.4 var(--mono); max-width: calc(100vw - 24px); }
+  #saveBar.show { display: flex; }
+  #saveBar .sp { flex: 1; min-width: 8px; }
+  .row.dirty { border-left: 3px solid var(--warn); padding-left: 8px; }
+  .lab .links { display: flex; gap: 8px; }
+
   details summary { cursor: pointer; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; list-style: none; padding: 2px 0; }
   details summary::-webkit-details-marker { display: none; }
   details summary::before { content: "+ "; } details[open] summary::before { content: "− "; }
@@ -145,7 +197,6 @@
     #accTable td.n { grid-column: 1 / -1; }
     #accTable td.a { grid-column: 1 / -1; text-align: left; }
     #accTable td.a button { margin: 0 6px 0 0; }
-    #msg { margin-left: 0; width: 100%; text-align: left; }
   }
 </style>
 </head>
@@ -156,6 +207,7 @@
     <div class="chips">
       <button class="chip" id="chipStateful" onclick="toggleCfg('DS_STATEFUL')"><i></i>stateful</button>
       <button class="chip" id="chipPow" onclick="toggleCfg('DS_POW_PREFETCH')"><i></i>dự đoán pow</button>
+      <button class="chip" onclick="openLog()">log</button>
     </div>
     <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
   </header>
@@ -211,9 +263,9 @@
       <div class="actions" style="margin-bottom:14px">
         <div class="lab" style="margin:0;flex:1">Tài khoản</div>
         <button class="solid sm" id="btnLogin" onclick="loginStart()">+ Login</button>
+        <button class="sm" onclick="openAdd()">+ Thêm tay</button>
         <button class="sm" id="btnScan" onclick="captureAll()">Quét tab</button>
         <button class="sm" id="btnBuild" onclick="buildProfile()">Build profile</button>
-        <div id="msg"></div>
       </div>
       <div class="scroll"><table id="accTable">
         <thead><tr><th>Tài khoản</th><th>Tải</th><th>Trạng thái</th><th class="hide-s">ok / rỗng / lỗi</th><th></th></tr></thead>
@@ -223,22 +275,13 @@
     </div>
 
     <div class="cell c12">
-      <div class="lab">Cấu hình <em id="cfgMsg"></em></div>
+      <div class="lab"><span>Cấu hình</span><span class="links"><button class="sm" onclick="restartFlow('idle')">Khởi động lại khi rảnh</button><button class="sm del" onclick="restartFlow('now')">Hard reset</button></span></div>
+      <div class="tuned"><b>Mặc định đã được tối ưu sẵn</b> và đã đo trên dsh thật (stateful, dự đoán PoW, mức suy nghĩ, ngữ cảnh 500K…). Đổi giá trị = tự chịu: tăng đồng thời mỗi tài khoản hay nới burst dễ bị DeepSeek giới hạn/khoá; hạ TTL hay trần ngữ cảnh làm mất stateful, chậm hơn. Sửa xong bấm <b>Lưu</b>: server đợi hết request rồi tự khởi động lại để áp dụng; hoặc Hard reset để khởi động lại ngay (cắt các request đang chạy). Nút ↺ trả về mặc định.</div>
       <div class="cfg" id="cfg"></div>
     </div>
 
-    <div class="cell c6">
-      <details id="addBox"><summary>Thêm tài khoản thủ công</summary>
-        <div class="note">Trên tab đã đăng nhập chat.deepseek.com: F12 → Console → gõ <code>copy(localStorage.userToken)</code> → dán vào ô dưới. Chỉ cần token, không cần cookie.</div>
-        <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" placeholder='{"value":"…","__version":"0"}  hoặc token trần'></textarea>
-        <div class="actions" style="margin-top:8px">
-          <input id="lblIn" placeholder="nhãn (bỏ trống = email)" autocomplete="off">
-          <button class="solid sm" id="btnAdd" onclick="addManual()">Thêm</button>
-          <span id="addMsg" class="note" style="margin:0"></span>
-        </div>
-      </details>
-    </div>
-    <div class="cell c6">
+
+    <div class="cell c12">
       <details><summary>API</summary>
 <pre>curl http://127.0.0.1:8790/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -252,10 +295,60 @@ reasoning_effort none | auto | max</pre>
   </main>
 </div>
 
+<div id="addModal" class="modal" onclick="if(event.target===this)closeAdd()">
+  <div class="dlg">
+    <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" onclick="closeAdd()">×</button></div>
+    <div class="inner">
+      <p class="note">Trên tab đã đăng nhập chat.deepseek.com: F12 → Console → gõ <code>copy(localStorage.userToken)</code> → dán vào ô dưới. Chỉ cần token, không cần cookie.</p>
+      <textarea id="tokIn" rows="4" spellcheck="false" autocomplete="off" placeholder='{"value":"…","__version":"0"}  hoặc token trần'></textarea>
+      <div class="actions" style="margin-top:10px">
+        <input id="lblIn" placeholder="nhãn (bỏ trống = email)" autocomplete="off">
+        <button class="solid sm" id="btnAdd" onclick="addManual()">Thêm</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="cfmModal" class="modal" onclick="if(event.target===this)askDone(false)">
+  <div class="dlg">
+    <div class="top"><h2 id="cfmTitle"></h2><button class="sm" onclick="askDone(false)">×</button></div>
+    <div class="inner"><p id="cfmText"></p><div class="btns"><button class="sm" onclick="askDone(false)">Huỷ</button><button class="sm solid" id="cfmOk" onclick="askDone(true)">OK</button></div></div>
+  </div>
+</div>
+<div id="saveBar"></div>
+<div id="toasts"></div>
+<canvas id="veil"></canvas>
+<div id="logModal" class="modal" onclick="if(event.target===this)closeLog()">
+  <div class="lp">
+    <div class="top">
+      <h2>log <span id="logState" style="font-weight:400;color:var(--mute)"></span></h2>
+      <button class="sm fchip on" data-f="all" onclick="logFilter(this)">tất cả</button>
+      <button class="sm fchip" data-f="err" onclick="logFilter(this)">lỗi</button>
+      <button class="sm fchip" data-f="req" onclick="logFilter(this)">req</button>
+      <button class="sm fchip" data-f="conv" onclick="logFilter(this)">conv</button>
+      <button class="sm fchip" data-f="pow" onclick="logFilter(this)">pow</button>
+      <input type="text" id="logQ" placeholder="lọc…" oninput="logRender()" autocomplete="off">
+      <span class="sp"></span>
+      <button class="sm" id="logPause" onclick="logTogglePause()">tạm dừng</button>
+      <button class="sm" onclick="logClear()">xoá</button>
+      <button class="sm" onclick="logCopy()">copy</button>
+      <button class="sm solid" onclick="closeLog()">×</button>
+    </div>
+    <div class="body" id="logBody"><button class="sm solid" id="logJump" onclick="logBottom(true)">↓ mới</button></div>
+    <div class="foot2"><span id="logCount"></span><span>Esc để đóng</span></div>
+  </div>
+</div>
 <script>
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-const say = (text, kind) => { const m = $('msg'); m.textContent = text || ''; m.className = kind || ''; };
+function say(text, kind) {
+  if (!text) return;
+  const box = $('toasts'), t = el('div', 'toast ' + (kind === 'err' ? 'err' : kind === 'ok' ? 'ok' : 'wait'));
+  const x = el('b', null, '×'); x.onclick = () => t.remove();
+  t.append(el('span', null, text), x); box.append(t);
+  while (box.children.length > 4) box.firstChild.remove();
+  if (kind !== 'wait') setTimeout(() => t.remove(), kind === 'err' ? 9000 : 5000);
+  return t;
+}
 
 const fmtTok = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
 const fmtUsd = (v) => '$' + (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
@@ -266,6 +359,7 @@ const dur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 36
 async function post(url) { return (await fetch(url, {method: 'POST'})).json(); }
 
 async function buildProfile() {
+  if (!(await ask('Build profile?', 'Mở Chrome login riêng và dạo web khoảng 40 giây để nuôi fingerprint. Làm một lần đầu tiên là đủ.', 'Build'))) return;
   const b = $('btnBuild'); b.disabled = true; say('đang build ~40s…');
   try { const d = await post('/api/build_profile'); say(d.ok ? (d.note || 'đã build') : d.error, d.ok ? 'ok' : 'err'); }
   catch (e) { say(e.message, 'err'); }
@@ -289,25 +383,31 @@ async function captureAll() {
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
 async function addManual() {
-  const b = $('btnAdd'), m = $('addMsg');
+  const b = $('btnAdd');
   const token = $('tokIn').value.trim();
-  if (!token) { m.textContent = 'dán token trước'; m.className = 'note bad'; return; }
-  b.disabled = true; m.textContent = 'đang kiểm tra token…'; m.className = 'note';
+  if (!token) return say('dán token trước', 'err');
+  b.disabled = true;
   try {
     const r = await fetch('/api/accounts', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token, label: $('lblIn').value})});
     const d = await r.json();
-    if (!r.ok || d.error) { m.textContent = d.error || ('lỗi ' + r.status); m.className = 'note bad'; return; }
-    m.textContent = 'đã thêm ' + (d.label || ''); m.className = 'note good';
+    if (!r.ok || d.error) return say(d.error || ('lỗi ' + r.status), 'err');
+    say('đã thêm ' + (d.label || 'tài khoản'), 'ok');
     $('tokIn').value = ''; $('lblIn').value = '';
-    loadStats();
-  } catch (e) { m.textContent = e.message; m.className = 'note bad'; }
+    closeAdd(); loadStats();
+  } catch (e) { say(e.message, 'err'); }
   finally { b.disabled = false; }
 }
-async function verify(id) { await post('/api/accounts/' + id + '/verify'); loadStats(); }
-async function reset(id) { await post('/api/accounts/' + id + '/reset'); loadStats(); }
-async function del(id) {
-  if (!confirm('Xoá tài khoản này?')) return;
-  await fetch('/api/accounts/' + id, {method: 'DELETE'}); loadStats();
+async function verify(id, label) {
+  if (!(await ask('Verify tài khoản?', `Gọi DeepSeek kiểm tra token của ${label}. Nếu token chết, tài khoản bị đánh dấu cần đăng nhập lại.`, 'Verify'))) return;
+  await post('/api/accounts/' + id + '/verify'); loadStats(); say('đã verify ' + label, 'ok');
+}
+async function reset(id, label) {
+  if (!(await ask('Reset tài khoản?', `Xoá lỗi/cooldown của ${label}, xoá các phiên web đang giữ và kiểm tra lại token. Hội thoại stateful đang dùng tài khoản này sẽ gửi lại đủ ngữ cảnh ở bước kế.`, 'Reset', true))) return;
+  await post('/api/accounts/' + id + '/reset'); loadStats(); say('đã reset ' + label, 'ok');
+}
+async function del(id, label) {
+  if (!(await ask('Xoá tài khoản?', `Xoá ${label} khỏi pool. Không hoàn tác được; muốn dùng lại phải thêm lại token.`, 'Xoá', true))) return;
+  await fetch('/api/accounts/' + id, {method: 'DELETE'}); loadStats(); say('đã xoá ' + label, 'ok');
 }
 
 function tag(kind, text) { const t = el('span', 'tag ' + kind); t.append(el('i'), document.createTextNode(text)); return t; }
@@ -328,7 +428,7 @@ function accRow(a, perAcc) {
   const cnt = el('td', 'hide-s', `${a.total_ok} / ${a.total_empty} / ${a.total_error}`);
   const act = el('td', 'act a');
   const mk = (text, cls, fn, title) => { const b = el('button', 'sm ' + cls, text); if (title) b.title = title; b.onclick = fn; return b; };
-  act.append(mk('verify', '', () => verify(a.id)), mk('reset', '', () => reset(a.id), 'xoá lỗi/cooldown và phiên web đang giữ, kiểm tra lại token'), mk('xoá', 'del', () => del(a.id)));
+  act.append(mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label), 'xoá lỗi/cooldown và phiên web đang giữ, kiểm tra lại token'), mk('xoá', 'del', () => del(a.id, a.label)));
   tr.append(name, load, st, cnt, act);
   return tr;
 }
@@ -427,64 +527,256 @@ async function loadStats() {
 }
 
 
-/* ---- cấu hình ---- */
-let CFG = [];
-async function saveCfg(key, value) {
-  const m = $('cfgMsg');
-  try {
-    const r = await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({[key]: value})});
-    const d = await r.json();
-    if (!d.ok) { m.textContent = d.error; m.className = 'bad'; return false; }
-    m.textContent = 'đã lưu ' + key; m.className = 'good';
-    setTimeout(() => { if (m.textContent === 'đã lưu ' + key) m.textContent = ''; }, 2500);
-    await loadCfg(); return true;
-  } catch (e) { m.textContent = e.message; m.className = 'bad'; return false; }
+/* ---- hộp xác nhận (thay confirm() của trình duyệt) ---- */
+let ASK = null;
+function ask(title, text, okLabel, danger) {
+  return new Promise((resolve) => {
+    $('cfmTitle').textContent = title; $('cfmText').textContent = text;
+    const ok = $('cfmOk'); ok.textContent = okLabel || 'OK'; ok.className = 'sm ' + (danger ? 'danger' : 'solid');
+    ASK = resolve; openModal('cfmModal'); setTimeout(() => ok.focus(), 50);
+  });
 }
-function toggleCfg(key) { const c = CFG.find((x) => x.key === key); if (c) saveCfg(key, c.value === '1' ? '0' : '1'); }
+function askDone(v) { if (!ASK) return; const r = ASK; ASK = null; closeModal('cfmModal'); r(v); }
+
+/* ---- cấu hình: sửa → chờ Lưu → (đợi rảnh) khởi động lại để áp dụng ---- */
+let CFG = [], PENDING = {}, BUSY = false;
+const eff = (c) => (c.key in PENDING ? (PENDING[c.key] === null ? c.default : PENDING[c.key]) : c.value);
+
+function stage(key, value) {
+  const c = CFG.find((x) => x.key === key); if (!c) return;
+  // trùng giá trị đang chạy (và không đang ép về mặc định) thì bỏ khỏi danh sách chờ
+  if (value !== null && String(value) === c.value) delete PENDING[key]; else PENDING[key] = value;
+  renderCfg(); renderBar();
+}
+function toggleCfg(key) { const c = CFG.find((x) => x.key === key); if (c) stage(key, eff(c) === '1' ? '0' : '1'); }
 
 function cfgRow(c) {
-  const row = el('div', 'row');
-  const left = el('div');
-  left.append(el('div', 't', c.label));
+  const v = eff(c), dirty = c.key in PENDING;
+  const row = el('div', 'row' + (dirty ? ' dirty' : ''));
+  const left = el('div'); left.append(el('div', 't', c.label));
   const k = el('div', 'k', c.key + (c.unit ? ' · ' + c.unit : '') + ' · mặc định ' + c.default);
-  if (!c.live) k.append(document.createTextNode(' · '), Object.assign(el('b', null, 'cần restart')));
+  if (!c.live) k.append(document.createTextNode(' · '), el('b', null, 'cần restart'));
   if (c.env && !c.overridden) k.append(document.createTextNode(' · env'));
   left.append(k);
   const ctl = el('div', 'ctl');
   if (c.kind === 'bool') {
-    const b = el('button', 'sw' + (c.value === '1' ? ' on' : '')); b.title = c.value === '1' ? 'đang bật' : 'đang tắt';
-    b.onclick = () => saveCfg(c.key, c.value === '1' ? '0' : '1'); ctl.append(b);
+    const b = el('button', 'sw' + (v === '1' ? ' on' : '')); b.title = v === '1' ? 'đang bật' : 'đang tắt';
+    b.onclick = () => stage(c.key, v === '1' ? '0' : '1'); ctl.append(b);
   } else if (c.kind === 'choice') {
-    const sel = el('select'); for (const o of c.choices) { const op = el('option', null, o); op.value = o; if (o === c.value) op.selected = true; sel.append(op); }
-    sel.onchange = () => saveCfg(c.key, sel.value); ctl.append(sel);
+    const sel = el('select'); for (const o of c.choices) { const op = el('option', null, o); op.value = o; if (o === v) op.selected = true; sel.append(op); }
+    sel.onchange = () => stage(c.key, sel.value); ctl.append(sel);
   } else {
-    const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.value = c.value; inp.inputMode = 'numeric';
-    const commit = async () => { if (inp.value === c.value) return; const ok = await saveCfg(c.key, inp.value); if (!ok) { inp.className = 'bad'; } };
-    inp.onchange = commit; inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
+    const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.value = v; inp.inputMode = 'numeric';
+    inp.onchange = () => stage(c.key, inp.value); inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
     ctl.append(inp);
   }
-  if (c.overridden) { const x = el('button', 'x', '↺'); x.title = 'về mặc định'; x.onclick = () => saveCfg(c.key, null); ctl.append(x); }
+  if (c.overridden || dirty) { const x = el('button', 'x', '↺'); x.title = 'về mặc định'; x.onclick = () => stage(c.key, null); ctl.append(x); }
   row.append(left, ctl);
   return row;
 }
 
-async function loadCfg() {
-  try {
-    CFG = (await (await fetch('/api/settings')).json()).items;
-    for (const [id, key] of [['chipStateful', 'DS_STATEFUL'], ['chipPow', 'DS_POW_PREFETCH']]) {
-      $(id).className = 'chip' + (CFG.find((x) => x.key === key)?.value === '1' ? ' on' : '');
-    }
-    const box = $('cfg');
-    if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return; // đang gõ: không vẽ lại
-    box.textContent = '';
-    const groups = [...new Set(CFG.map((c) => c.group))];
-    for (const g of groups) {
-      const col = el('div'); col.append(el('h4', null, g));
-      for (const c of CFG.filter((x) => x.group === g)) col.append(cfgRow(c));
-      box.append(col);
-    }
-  } catch (e) {}
+function renderCfg() {
+  const box = $('cfg');
+  if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return; // đang gõ: không vẽ lại
+  box.textContent = '';
+  for (const g of [...new Set(CFG.map((c) => c.group))]) {
+    const col = el('div'); col.append(el('h4', null, g));
+    for (const c of CFG.filter((x) => x.group === g)) col.append(cfgRow(c));
+    box.append(col);
+  }
+  for (const [id, key] of [['chipStateful', 'DS_STATEFUL'], ['chipPow', 'DS_POW_PREFETCH']]) {
+    const c = CFG.find((x) => x.key === key);
+    $(id).className = 'chip' + (c && eff(c) === '1' ? ' on' : '') + (c && key in PENDING ? ' dirty' : '');
+  }
 }
+
+async function loadCfg() {
+  try { CFG = (await (await fetch('/api/settings')).json()).items; renderCfg(); } catch (e) {}
+}
+
+function renderBar(extra) {
+  const bar = $('saveBar'), n = Object.keys(PENDING).length;
+  bar.textContent = '';
+  if (extra) { bar.className = 'show'; bar.append(...extra); return; }
+  if (!n) { bar.className = ''; return; }
+  bar.className = 'show';
+  const save = el('button', 'sm solid', 'Lưu & khởi động lại khi rảnh'); save.onclick = () => saveFlow('idle');
+  const hard = el('button', 'sm del', 'Hard reset'); hard.onclick = () => saveFlow('now');
+  const cancel = el('button', 'sm', 'Huỷ'); cancel.onclick = () => { PENDING = {}; renderCfg(); renderBar(); };
+  bar.append(el('span', null, n + ' thay đổi chưa lưu'), el('span', 'sp'), save, hard, cancel);
+}
+
+async function saveChanges() {
+  const r = await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(PENDING)});
+  const d = await r.json();
+  if (!d.ok) { say(d.error || 'không lưu được', 'err'); return false; }
+  PENDING = {}; await loadCfg(); return true;
+}
+
+async function restartFlow(mode) {
+  if (Object.keys(PENDING).length) return saveFlow(mode);
+  if (mode === 'now') {
+    const ok = await ask('Hard reset?', 'Khởi động lại server ngay. Mọi request đang chạy bị cắt (dsh sẽ tự thử lại); hội thoại stateful đang giữ mất, bước kế gửi lại đủ ngữ cảnh.', 'Hard reset', true);
+    if (!ok) return;
+  }
+  doRestart(mode);
+}
+
+async function saveFlow(mode) {
+  if (BUSY) return;
+  if (mode === 'now') {
+    const ok = await ask('Lưu và hard reset?', 'Lưu cấu hình rồi khởi động lại server ngay. Mọi request đang chạy bị cắt (dsh sẽ tự thử lại).', 'Lưu & hard reset', true);
+    if (!ok) return;
+  }
+  BUSY = true;
+  try { if (!(await saveChanges())) return; say('đã lưu cấu hình', 'ok'); await doRestart(mode); }
+  catch (e) { say(e.message, 'err'); }
+  finally { BUSY = false; }
+}
+
+async function doRestart(mode) {
+  const boot0 = (await (await fetch('/api/restart')).json()).boot;
+  await fetch('/api/restart', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode})});
+  const cancel = el('button', 'sm', 'Huỷ');
+  const msg = el('span', null, mode === 'idle' ? 'đang chờ hết request để khởi động lại…' : 'đang khởi động lại…');
+  cancel.onclick = async () => { await fetch('/api/restart', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: 'cancel'})}); renderBar(); say('đã huỷ khởi động lại', 'ok'); clearInterval(timer); };
+  renderBar(mode === 'idle' ? [msg, el('span', 'sp'), cancel] : [msg]);
+  const t0 = Date.now();
+  const timer = setInterval(async () => {
+    try {
+      const s = await (await fetch('/api/restart', {cache: 'no-store'})).json();
+      if (s.boot !== boot0) { clearInterval(timer); location.reload(); return; }
+      if (s.pending) msg.textContent = s.in_flight ? `đang chờ ${s.in_flight} request chạy xong để khởi động lại… ${Math.round((Date.now() - t0) / 1000)}s` : 'sắp khởi động lại…';
+    } catch (e) { msg.textContent = 'đang khởi động lại…'; } // server đang tắt/mở
+    if (Date.now() - t0 > 180000) { clearInterval(timer); renderBar(); say('khởi động lại lâu quá — kiểm tra journalctl', 'err'); }
+  }, 700);
+}
+
+/* ---- popup log realtime ---- */
+const LOG = {es: null, lines: [], paused: false, filter: 'all', stick: true, max: 3000};
+const FILTERS = {
+  err: /ds-fail|ds-error|ds-stall|ds-stream|ds-truncated|toolcall-(invalid|unparsed)|lỗi|error|panic|failed/i,
+  req: /^\[req\]/, conv: /^\[conv\]/, pow: /^\[pow\]/,
+};
+const logClass = (s) => FILTERS.err.test(s) ? 'err' : /miss|bận|truncated|cooldown|nghỉ/i.test(s) ? 'warn' : /^\[(usage|ds-timing|pow|pricing)\]/.test(s) ? 'dim' : '';
+const logTime = (ms) => new Date(ms).toLocaleTimeString([], {hour12: false}) + '.' + String(ms % 1000).padStart(3, '0');
+
+function logVisible(l) {
+  if (LOG.filter !== 'all' && !FILTERS[LOG.filter].test(l.line)) return false;
+  const q = $('logQ').value.trim().toLowerCase();
+  return !q || l.line.toLowerCase().includes(q);
+}
+function logNode(l) {
+  const d = el('div', 'll ' + logClass(l.line)); d.append(el('time', null, logTime(l.t)), el('span', null, l.line)); return d;
+}
+function logRender() {
+  const body = $('logBody'), jump = $('logJump');
+  [...body.querySelectorAll('.ll')].forEach((n) => n.remove());
+  const frag = document.createDocumentFragment();
+  let shown = 0;
+  for (const l of LOG.lines) if (logVisible(l)) { frag.append(logNode(l)); shown++; }
+  body.insertBefore(frag, jump);
+  $('logCount').textContent = `${shown} / ${LOG.lines.length} dòng`;
+  logBottom(false);
+}
+function logAdd(l) {
+  LOG.lines.push(l);
+  if (LOG.lines.length > LOG.max) LOG.lines.splice(0, LOG.lines.length - LOG.max);
+  if (LOG.paused || !logVisible(l)) return;
+  const body = $('logBody');
+  body.insertBefore(logNode(l), $('logJump'));
+  const nodes = body.querySelectorAll('.ll');
+  if (nodes.length > LOG.max) nodes[0].remove();
+  $('logCount').textContent = `${nodes.length} / ${LOG.lines.length} dòng`;
+  if (LOG.stick) logBottom(false); else $('logJump').style.display = 'block';
+}
+function logBottom(force) {
+  const body = $('logBody');
+  if (force) LOG.stick = true;
+  if (LOG.stick) { body.scrollTop = body.scrollHeight; $('logJump').style.display = 'none'; }
+}
+function openLog() {
+  openModal('logModal');
+  if (LOG.es) return;
+  LOG.lines = []; logRender();
+  const es = new EventSource('/api/logs/stream?backlog=400');
+  LOG.es = es;
+  es.onopen = () => { $('logState').textContent = '● trực tiếp'; };
+  es.onmessage = (e) => { try { logAdd(JSON.parse(e.data)); } catch (_) {} };
+  es.onerror = () => { $('logState').textContent = '○ mất kết nối, đang nối lại…'; };
+}
+function closeLog() {
+  closeModal('logModal');
+  if (LOG.es) { LOG.es.close(); LOG.es = null; }
+}
+function openAdd() { openModal('addModal'); setTimeout(() => $('tokIn').focus(), 60); }
+function closeAdd() { closeModal('addModal'); }
+
+/* ---- lớp phủ: trang phía sau "tan" thành lưới ký tự ASCII (không blur) ---- */
+const VEIL = {open: 0, t0: 0, dir: 0, raf: 0, order: null, drawn: 0, cols: 0, rows: 0};
+const RAMP = ['.', ':', '·', '+', '*', '=', '#', '%'];
+function veilBuild() {
+  const c = $('veil'), dpr = Math.min(2, window.devicePixelRatio || 1), W = innerWidth, H = innerHeight;
+  c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); c.style.width = W + 'px'; c.style.height = H + 'px';
+  const cw = 9, chh = 16, cols = Math.ceil(W / cw), rows = Math.ceil(H / chh), n = cols * rows;
+  Object.assign(VEIL, {c, dpr, cw, chh, cols, rows, n, drawn: 0});
+  VEIL.order = new Uint32Array(n); for (let i = 0; i < n; i++) VEIL.order[i] = i;
+  for (let i = n - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = VEIL.order[i]; VEIL.order[i] = VEIL.order[j]; VEIL.order[j] = t; }
+  const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.font = `${chh - 3}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`; ctx.textBaseline = 'top';
+  VEIL.ctx = ctx;
+}
+function veilCell(i) {
+  const {ctx, cols, cw, chh} = VEIL, x = (i % cols), y = (i / cols) | 0;
+  const nz = (Math.sin(x * 0.21 + Math.sin(y * 0.13) * 2) + Math.sin(y * 0.17 + x * 0.05) + 2) / 4 + (Math.random() - 0.5) * 0.35;
+  const g = RAMP[Math.max(0, Math.min(RAMP.length - 1, (nz * RAMP.length) | 0))];
+  ctx.clearRect(x * cw, y * chh, cw, chh);
+  ctx.fillStyle = 'rgba(235,228,211,0.9)'; ctx.fillRect(x * cw, y * chh, cw, chh);
+  ctx.fillStyle = `rgba(29,27,23,${0.16 + nz * 0.42})`; ctx.fillText(g, x * cw, y * chh);
+}
+function veilStep(now) {
+  const dur = VEIL.dir > 0 ? 340 : 220, k = Math.min(1, (now - VEIL.t0) / dur), target = Math.floor((VEIL.dir > 0 ? k : 1 - k) * VEIL.n);
+  if (VEIL.dir > 0) { while (VEIL.drawn < target) veilCell(VEIL.order[VEIL.drawn++]); }
+  else { while (VEIL.drawn > target) { const i = VEIL.order[--VEIL.drawn]; const x = i % VEIL.cols, y = (i / VEIL.cols) | 0; VEIL.ctx.clearRect(x * VEIL.cw, y * VEIL.chh, VEIL.cw, VEIL.chh); } }
+  if (k < 1) VEIL.raf = requestAnimationFrame(veilStep);
+  else if (VEIL.dir < 0) { VEIL.c.style.display = 'none'; VEIL.raf = 0; }
+}
+function veilShow() {
+  if (VEIL.open++ > 0) return;
+  cancelAnimationFrame(VEIL.raf);
+  if (!VEIL.c || VEIL.cols !== Math.ceil(innerWidth / 9) || VEIL.rows !== Math.ceil(innerHeight / 16)) veilBuild();
+  VEIL.c.style.display = 'block'; VEIL.dir = 1; VEIL.t0 = performance.now();
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { while (VEIL.drawn < VEIL.n) veilCell(VEIL.order[VEIL.drawn++]); return; }
+  VEIL.raf = requestAnimationFrame(veilStep);
+}
+function veilHide() {
+  if (VEIL.open === 0 || --VEIL.open > 0) return;
+  cancelAnimationFrame(VEIL.raf);
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { VEIL.ctx.clearRect(0, 0, innerWidth, innerHeight); VEIL.drawn = 0; VEIL.c.style.display = 'none'; return; }
+  VEIL.dir = -1; VEIL.t0 = performance.now(); VEIL.raf = requestAnimationFrame(veilStep);
+}
+window.addEventListener('resize', () => { if (VEIL.open === 0) VEIL.cols = 0; });
+function openModal(id) { const m = $(id); if (m.classList.contains('open')) return; m.classList.add('open'); document.body.style.overflow = 'hidden'; veilShow(); }
+function closeModal(id) { const m = $(id); if (!m.classList.contains('open')) return; m.classList.remove('open'); veilHide(); if (!document.querySelector('.modal.open')) document.body.style.overflow = ''; }
+function logFilter(btn) {
+  LOG.filter = btn.dataset.f;
+  document.querySelectorAll('.fchip').forEach((b) => b.classList.toggle('on', b === btn));
+  logRender();
+}
+function logTogglePause() {
+  LOG.paused = !LOG.paused;
+  $('logPause').textContent = LOG.paused ? 'tiếp tục' : 'tạm dừng';
+  $('logPause').classList.toggle('solid', LOG.paused);
+  if (!LOG.paused) logRender();
+}
+function logClear() { LOG.lines = []; logRender(); }
+async function logCopy() {
+  const text = LOG.lines.filter(logVisible).map((l) => logTime(l.t) + ' ' + l.line).join('\n');
+  try { await navigator.clipboard.writeText(text); say('đã copy ' + text.split('\n').length + ' dòng', 'ok'); } catch (e) { say('không copy được: ' + e.message, 'err'); }
+}
+document.addEventListener('keydown', (e) => { if (e.key !== 'Escape') return; if ($('cfmModal').classList.contains('open')) askDone(false); else if ($('addModal').classList.contains('open')) closeAdd(); else if ($('logModal').classList.contains('open')) closeLog(); });
+document.addEventListener('DOMContentLoaded', () => {
+  $('logBody').addEventListener('scroll', () => { const b = $('logBody'); LOG.stick = b.scrollHeight - b.scrollTop - b.clientHeight < 24; if (LOG.stick) $('logJump').style.display = 'none'; });
+});
 
 loadStats(); loadCfg();
 setInterval(loadStats, 5000);

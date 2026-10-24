@@ -37,7 +37,7 @@ fn pow_slots() -> std::sync::MutexGuard<'static, std::collections::HashMap<Strin
 fn pow_cache_take(token: &str) -> Option<String> {
     let mut m = pow_slots();
     match m.remove(token) {
-        Some(PowSlot::Ready(t, h)) if t.elapsed().as_secs() < POW_MAX_AGE_SECS => { eprintln!("[pow] dùng bản tải sẵn"); Some(h) }
+        Some(PowSlot::Ready(t, h)) if t.elapsed().as_secs() < POW_MAX_AGE_SECS => { crate::elog!("[pow] dùng bản tải sẵn"); Some(h) }
         Some(PowSlot::Pending) => { m.insert(token.to_string(), PowSlot::Pending); None }
         _ => None,
     }
@@ -54,6 +54,7 @@ fn pow_cache_claim(token: &str) -> bool {
 }
 
 fn pow_cache_put(token: &str, header: String) { pow_slots().insert(token.to_string(), PowSlot::Ready(std::time::Instant::now(), header)); }
+fn pow_cache_release_any(token: &str) { pow_slots().remove(token); }
 fn pow_cache_release(token: &str) { let mut m = pow_slots(); if matches!(m.get(token), Some(PowSlot::Pending)) { m.remove(token); } }
 
 /// Event từ stream DS — server push thẳng ra SSE OpenAI
@@ -207,8 +208,12 @@ impl DsClient {
 
     /// PoW cho /chat/completion: dùng bản đã tải sẵn nếu còn tươi (challenge sống 300s), không thì giải mới.
     async fn completion_pow(&self) -> Result<String> {
-        if let Some(h) = pow_cache_take(&self.token) {
-            return Ok(h);
+        if crate::settings::boolean("DS_POW_PREFETCH") {
+            if let Some(h) = pow_cache_take(&self.token) {
+                return Ok(h);
+            }
+        } else {
+            pow_cache_release_any(&self.token); // tắt dự đoán: bỏ bản còn sót, giải mới như thường
         }
         self.pow_header("/api/v0/chat/completion").await
     }
@@ -239,7 +244,7 @@ impl DsClient {
         let t0 = std::time::Instant::now();
         let answer = solve_pow_async(challenge_hex.clone(), salt.clone(), expire_at, difficulty).await
             .context("PoW solve failed within difficulty bound")?;
-        eprintln!("[pow] difficulty={} answer={} solve_ms={}", difficulty, answer, t0.elapsed().as_millis());
+        crate::elog!("[pow] difficulty={} answer={} solve_ms={}", difficulty, answer, t0.elapsed().as_millis());
         let payload = json!({
             "algorithm": ch["algorithm"], "challenge": challenge_hex, "salt": salt,
             "answer": answer, "signature": signature, "target_path": ch["target_path"],
@@ -329,7 +334,7 @@ impl DsClient {
         });
         let pow_header = base64::engine::general_purpose::STANDARD.encode(pow_payload.to_string());
 
-        eprintln!(
+        crate::elog!(
             "[pow] difficulty={} answer={} solve_ms={}",
             difficulty, answer, solve_ms
         );
@@ -452,9 +457,9 @@ pub async fn chat_stream(
         const STALL_SECS: u64 = 90;
         loop {
             let chunk = match tokio::time::timeout(std::time::Duration::from_secs(STALL_SECS), stream.next()).await {
-                Err(_) => { eprintln!("[ds-stall] không có dữ liệu {}s (sau {}ms, {} bytes) — bỏ stream", STALL_SECS, t0.elapsed().as_millis(), total_bytes); truncated = Some(format!("DeepSeek ngừng gửi dữ liệu {}s", STALL_SECS)); break; }
+                Err(_) => { crate::elog!("[ds-stall] không có dữ liệu {}s (sau {}ms, {} bytes) — bỏ stream", STALL_SECS, t0.elapsed().as_millis(), total_bytes); truncated = Some(format!("DeepSeek ngừng gửi dữ liệu {}s", STALL_SECS)); break; }
                 Ok(None) => break,
-                Ok(Some(Err(e))) => { eprintln!("[ds-stream-err] {} (sau {}ms, {} bytes)", e, t0.elapsed().as_millis(), total_bytes); truncated = Some(format!("stream lỗi giữa chừng: {}", e)); break; }
+                Ok(Some(Err(e))) => { crate::elog!("[ds-stream-err] {} (sau {}ms, {} bytes)", e, t0.elapsed().as_millis(), total_bytes); truncated = Some(format!("stream lỗi giữa chừng: {}", e)); break; }
                 Ok(Some(Ok(c))) => c,
             };
             first_byte_ms.get_or_insert_with(|| t0.elapsed().as_millis());
@@ -563,9 +568,9 @@ pub async fn chat_stream(
                 }
             }
         }
-        eprintln!("[ds-timing] first_byte={}ms total={}ms bytes={} sse_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, sse_chars);
+        crate::elog!("[ds-timing] first_byte={}ms total={}ms bytes={} sse_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, sse_chars);
         if !has_content {
-            eprintln!("[ds-stream] stream không có fragment RESPONSE nào (nghi throttle/rỗng)");
+            crate::elog!("[ds-stream] stream không có fragment RESPONSE nào (nghi throttle/rỗng)");
         }
         if let Some(r) = truncated { let _ = tx.send(StreamEv::Truncated(r)); }
         let _ = tx.send(StreamEv::Done);

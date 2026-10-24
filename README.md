@@ -351,3 +351,11 @@ Các giá trị `DS_*` hay chỉnh (stateful, dự đoán PoW, TTL phiên, trầ
 ## Thêm tài khoản thủ công
 
 Trên dashboard, mục **Thêm tài khoản thủ công**: mở tab đã đăng nhập chat.deepseek.com, F12 → Console → `copy(localStorage.userToken)`, dán vào ô rồi bấm Thêm. Nhận cả dạng `{"value":"…","__version":"0"}`, chuỗi có nháy, `Bearer …` hoặc token trần. Token được kiểm tra với DeepSeek trước khi lưu; trùng token thì báo đã có. Không cần cookie. Cũng gọi được bằng `POST /api/accounts` với `{"token":"…","label":"tuỳ chọn"}`.
+
+## Log trực tiếp, popup, khởi động lại
+
+- **Log**: nút `log` ở đầu dashboard mở popup log realtime (SSE `GET /api/logs/stream`, vòng đệm 3000 dòng, lọc lỗi/req/conv/pow, tìm chữ, tạm dừng, copy). Mọi dòng vẫn ra stderr như cũ. `GET /api/logs?after=<seq>` để lấy dạng JSON.
+- **Popup**: log, thêm tài khoản và hộp xác nhận (xoá / reset / verify / hard reset / build profile) là popup; phía sau tan thành lưới ASCII thay vì blur (tắt hiệu ứng khi hệ điều hành bật "giảm chuyển động").
+- **Lưu cấu hình**: sửa trong mục Cấu hình chưa lưu ngay, hiện thanh *Lưu & khởi động lại khi rảnh* hoặc *Hard reset*. Lưu → ghi `settings.json` → đợi đến lúc không còn request nào → server tự khởi động lại (`exec` lại chính binary, cùng PID, nạp luôn bản build mới nếu có) → trang tự tải lại. Hard reset khởi động lại ngay và cắt request đang chạy. Trước khi khởi động lại, harness ghi đĩa và xoá các phiên web đang giữ để không để mồ côi trên DeepSeek.
+- API: `POST /api/restart` với `{"mode":"idle" | "now" | "cancel"}`, `GET /api/restart` trả trạng thái chờ.
+- Log và `/api/*` chỉ cho loopback; nếu đặt reverse proxy trên cùng máy thì mọi request trông như loopback, nên đừng phơi dashboard ra ngoài.

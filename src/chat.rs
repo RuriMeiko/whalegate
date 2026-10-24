@@ -166,7 +166,7 @@ async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
     if let Some(src) = part.get("source") {
         if let (Some(mt), Some(d)) = (src.get("media_type").and_then(|x| x.as_str()), src.get("data").and_then(|x| x.as_str())) {
             if d.len() / 4 * 3 > cap {
-                eprintln!("[image] base64 vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
+                crate::elog!("[image] base64 vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
                 return None;
             }
             return b64.decode(d.trim()).ok().map(|b| (b, mt.to_string()));
@@ -178,7 +178,7 @@ async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
     if let Some(rest) = url.strip_prefix("data:") {
         let (meta, data) = rest.split_once(',')?;
         if data.len() / 4 * 3 > cap {
-            eprintln!("[image] data URL vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
+            crate::elog!("[image] data URL vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
             return None;
         }
         let mime = meta.split(';').next().unwrap_or("image/png").to_string();
@@ -187,7 +187,7 @@ async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
     if url.starts_with("http://") || url.starts_with("https://") {
         let parsed = reqwest::Url::parse(url).ok()?;
         if !url_is_public(&parsed) {
-            eprintln!("[image] chặn URL nội bộ/không hợp lệ: {}", head_chars(url, 120));
+            crate::elog!("[image] chặn URL nội bộ/không hợp lệ: {}", head_chars(url, 120));
             return None;
         }
         let client = reqwest::Client::builder()
@@ -209,7 +209,7 @@ async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.ok()?;
             if buf.len() + chunk.len() > cap {
-                eprintln!("[image] ảnh vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
+                crate::elog!("[image] ảnh vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
                 return None;
             }
             buf.extend_from_slice(&chunk);
@@ -540,7 +540,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                     p
                 }
                 Err(e) => {
-                    eprintln!("[ds-error] attempt {} acc {}: {:#}", attempt, &acc_id[..8.min(acc_id.len())], e);
+                    crate::elog!("[ds-error] attempt {} acc {}: {:#}", attempt, &acc_id[..8.min(acc_id.len())], e);
                     last_err = Some(format!("{:#}", e));
                     if format!("{:#}", e).contains("AUTH_INVALID") {
                         mark_auth_invalid(&st, &acc_id).await;
@@ -574,7 +574,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             think_buf.push_str(&t);
                             let cut = safe_flush_len(&think_buf);
                             if has_tool_marker(&think_buf) {
-                                eprintln!("[toolcall-guard] DSML trong reasoning — cắt từ marker");
+                                crate::elog!("[toolcall-guard] DSML trong reasoning — cắt từ marker");
                                 think_dropped = true;
                             }
                             if cut > 0 {
@@ -597,7 +597,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         }
                     }
                     StreamEv::MsgId(m) => { msg_id = Some(m); }
-                    StreamEv::Usage(u) => { real_usage = Some(u); eprintln!("[usage] accumulated_token_usage={} (stateful={})", u, stateful_attempt); }
+                    StreamEv::Usage(u) => { real_usage = Some(u); crate::elog!("[usage] accumulated_token_usage={} (stateful={})", u, stateful_attempt); }
                     StreamEv::Truncated(why) => { truncated = Some(why); }
                     StreamEv::Done => {
                         if !think_dropped && !think_buf.is_empty() {
@@ -627,7 +627,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             let bad = calls.iter().find(|c| !call_is_valid(&ctx.tools, c)).map(|c| c.name.clone());
                             if let (Some(n), true) = (bad, attempt < 2) {
                                 save_sample("invalid", &full_text);
-                                eprintln!("[toolcall-invalid] attempt {} tool={:?} args thiếu/không hợp lệ — retry; raw={:?}", attempt, n, full_text);
+                                crate::elog!("[toolcall-invalid] attempt {} tool={:?} args thiếu/không hợp lệ — retry; raw={:?}", attempt, n, full_text);
                                 last_err = Some(format!("tool-call không hợp lệ ({})", n));
                                 // lỗi do model: không phạt acc, NHƯNG phải loại acc khỏi lượt sau —
                                 // chạy lại đúng acc + đúng prompt gần như chắc chắn ra lại đúng output hỏng
@@ -642,7 +642,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             finished = true;
                             }
                         } else if let Some(why) = truncated.clone() {
-                            eprintln!("[ds-truncated] attempt {}: {}", attempt, why);
+                            crate::elog!("[ds-truncated] attempt {}: {}", attempt, why);
                             last_err = Some(why);
                             if attempt == 2 && has_content && !has_tool_marker(&full_text) {
                                 // lượt cuối: trả phần đã có, báo 'length' để client biết bị cắt
@@ -661,7 +661,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         } else if has_tool_marker(&full_text) {
                             // có marker tool-call nhưng parse trượt: log nguyên văn để vá, retry; lỗi do model nên không phạt acc
                             save_sample("unparsed", &full_text);
-                            eprintln!("[toolcall-unparsed] attempt {}; raw={:?}", attempt, full_text);
+                            crate::elog!("[toolcall-unparsed] attempt {}; raw={:?}", attempt, full_text);
                             // lượt cuối vẫn trượt → báo lỗi rõ (không trả completion rỗng làm client 'Stopped' im lặng)
                             last_err = Some("tool-call không parse được sau 3 lần thử".into());
                             fail_acc(&st, &acc_id, "unparsed", false).await;
@@ -685,7 +685,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
 
         if !finished {
             let msg = last_err.unwrap_or_else(|| "DeepSeek web không trả dữ liệu".into());
-            eprintln!("[ds-fail] {}", msg);
+            crate::elog!("[ds-fail] {}", msg);
             yield Out::Error(msg);
         }
     }
@@ -783,7 +783,7 @@ pub(crate) async fn api_chat_completions(
     let msgs = fit_messages(&req.messages, max_chars);
     let tools_hdr = render_tools_spec(&req.tools);
     let prompt = format!("{}\n{}\n", tools_hdr, messages_to_prompt(&msgs));
-    eprintln!(
+    crate::elog!(
         "[req] model={} stream={} tools={} msgs={}→{} prompt_chars={} thinking={}",
         model_name, stream, req.tools.as_ref().map_or(0, |t| t.len()), req.messages.len(), msgs.len(),
         prompt.chars().count(), thinking
@@ -812,7 +812,7 @@ pub(crate) async fn api_chat_completions(
                 .collect()
         };
         for conv in stale {
-            eprintln!("[conv] new_thread=true — bỏ phiên cũ {}", &conv.sid[..8.min(conv.sid.len())]);
+            crate::elog!("[conv] new_thread=true — bỏ phiên cũ {}", &conv.sid[..8.min(conv.sid.len())]);
             st.sessions.lk().remove(&conv.sid);
             let acc = { st.store.read().await.accounts.iter().find(|a| a.id == conv.acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
             spawn_delete_session(acc, conv.sid.clone());
@@ -832,17 +832,17 @@ pub(crate) async fn api_chat_completions(
                     Ok(l) => {
                         let delta_images = collect_images_cached(&req.messages[k..], 4, &mut img_cache).await;
                         st.stat_conv_hit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        eprintln!("[conv] nối tiếp phiên {} (+{} msg, delta {} ký tự, phiên đã {} ký tự)", &conv.sid[..8.min(conv.sid.len())], n - k, delta.chars().count(), conv.chars);
+                        crate::elog!("[conv] nối tiếp phiên {} (+{} msg, delta {} ký tự, phiên đã {} ký tự)", &conv.sid[..8.min(conv.sid.len())], n - k, delta.chars().count(), conv.chars);
                         cont = Some(ContPlan { acc_id: conv.acc_id.clone(), sid: conv.sid.clone(), parent_id: conv.parent_id, delta_prompt: delta, delta_images, base_chars: conv.chars, tokens: conv.tokens });
                         lease = Some(l);
                     }
                     Err(_) => {
-                        eprintln!("[conv] acc giữ phiên đang bận — gửi đủ ngữ cảnh ở acc khác");
+                        crate::elog!("[conv] acc giữ phiên đang bận — gửi đủ ngữ cảnh ở acc khác");
                         st.convs.lk().insert(pf[k], conv);
                     }
                 }
             } else {
-                eprintln!("[conv] bỏ phiên (tools đổi / quá dài / acc mất) — gửi đủ ngữ cảnh");
+                crate::elog!("[conv] bỏ phiên (tools đổi / quá dài / acc mất) — gửi đủ ngữ cảnh");
                 st.sessions.lk().remove(&conv.sid);
                 spawn_delete_session(acc_creds, conv.sid.clone());
             }
@@ -850,14 +850,14 @@ pub(crate) async fn api_chat_completions(
     }
     if stateful_on && cont.is_none() {
         st.stat_conv_miss.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n > 2 { eprintln!("[conv] miss: {} msg, {} hội thoại đang giữ — gửi đủ ngữ cảnh", n, st.convs.lk().len()); }
+        if n > 2 { crate::elog!("[conv] miss: {} msg, {} hội thoại đang giữ — gửi đủ ngữ cảnh", n, st.convs.lk().len()); }
     }
     let lease = match lease {
         Some(l) => l,
         None => acquire(&st, &[], None, Instant::now() + Duration::from_secs(queue_wait_secs())).await?,
     };
     let images = collect_images_cached(&msgs, 4, &mut img_cache).await;
-    if !images.is_empty() { eprintln!("[req] {} ảnh đính kèm", images.len()); }
+    if !images.is_empty() { crate::elog!("[req] {} ảnh đính kèm", images.len()); }
     let reg = if stateful_on { Some(RegPlan { pf_n: pf[n], tools_hash: th }) } else { None };
     let ctx = ChatCtx { prompt, cont, reg, images, thinking, search, tools: req.tools.clone() };
     let mut outs = Box::pin(run_chat(st, ctx, lease));

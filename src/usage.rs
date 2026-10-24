@@ -75,6 +75,9 @@ pub fn record(prompt: u64, cached: u64, completion: u64) {
     s.dirty = true;
 }
 
+/// Ghi đĩa ngay (dùng trước khi khởi động lại).
+pub fn flush_blocking() { flush(); }
+
 fn flush() {
     let (json, ok) = {
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
@@ -104,8 +107,8 @@ pub fn spawn_background() {
     tokio::spawn(async {
         loop {
             match fetch_pricing().await {
-                Ok(p) => { eprintln!("[pricing] {} hit {:?} miss {:?} out {:?}", p.model, p.hit, p.miss, p.out); *pricing_cell().write().unwrap_or_else(|e| e.into_inner()) = p; }
-                Err(e) => eprintln!("[pricing] không lấy được giá live ({e}) — dùng bảng giá hiện có"),
+                Ok(p) => { crate::elog!("[pricing] {} hit {:?} miss {:?} out {:?}", p.model, p.hit, p.miss, p.out); *pricing_cell().write().unwrap_or_else(|e| e.into_inner()) = p; }
+                Err(e) => crate::elog!("[pricing] không lấy được giá live ({e}) — dùng bảng giá hiện có"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(PRICING_REFRESH_SECS)).await;
         }

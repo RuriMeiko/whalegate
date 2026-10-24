@@ -1,4 +1,6 @@
 // Server: axum webapp — UI quản lý account + OpenAI-compatible API
+#[macro_use]
+mod logbuf;
 mod chat;
 mod client;
 mod chrome_capture;

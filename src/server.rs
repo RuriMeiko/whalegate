@@ -170,7 +170,7 @@ pub(crate) async fn load_store() -> Store {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Store::default(),
         Err(e) => {
-            eprintln!("[store] không đọc được {}: {} — dùng store rỗng", path, e);
+            crate::elog!("[store] không đọc được {}: {} — dùng store rỗng", path, e);
             return Store::default();
         }
     };
@@ -178,9 +178,9 @@ pub(crate) async fn load_store() -> Store {
         Ok(s) => s,
         Err(e) => {
             let bak = format!("{}.corrupt-{}", path, now());
-            eprintln!("[store] {} hỏng ({}): giữ bản sao tại {} — dùng store rỗng", path, e, bak);
+            crate::elog!("[store] {} hỏng ({}): giữ bản sao tại {} — dùng store rỗng", path, e, bak);
             if let Err(e2) = tokio::fs::rename(&path, &bak).await {
-                eprintln!("[store] không đổi tên được file hỏng: {}", e2);
+                crate::elog!("[store] không đổi tên được file hỏng: {}", e2);
             }
             Store::default()
         }
@@ -222,7 +222,7 @@ pub(crate) async fn flush_store(st: &Arc<AppState>) {
     let snap = st.store.read().await.clone();
     match write_store_atomic(&snap).await {
         Ok(()) => st.store_written.store(ver, std::sync::atomic::Ordering::Release),
-        Err(e) => eprintln!("[store] ghi accounts.json lỗi: {:#}", e),
+        Err(e) => crate::elog!("[store] ghi accounts.json lỗi: {:#}", e),
     }
 }
 
@@ -275,6 +275,82 @@ pub(crate) struct AppState {
 
 // ---------- handlers ----------
 
+// ---------- khởi động lại ----------
+
+static RESTART_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RESTART_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn boot_id() -> u64 {
+    static B: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *B.get_or_init(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0))
+}
+
+fn total_in_flight(st: &AppState) -> u32 {
+    st.in_flight.lk().values().map(|v| v.load(std::sync::atomic::Ordering::Acquire)).sum()
+}
+
+#[derive(Deserialize)]
+struct RestartReq { mode: String }
+
+/// mode: "idle" = chờ đến lúc không còn request nào rồi khởi động lại; "now" = hard reset ngay; "cancel" = huỷ lệnh chờ.
+async fn api_restart(State(st): State<Arc<AppState>>, Json(r): Json<RestartReq>) -> (StatusCode, Json<Value>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    match r.mode.as_str() {
+        "idle" => {
+            if !RESTART_PENDING.swap(true, SeqCst) {
+                RESTART_SINCE.store(now(), SeqCst);
+                tokio::spawn(restart_when_idle(st));
+            }
+        }
+        "now" => {
+            RESTART_PENDING.store(true, SeqCst);
+            tokio::spawn(async move { tokio::time::sleep(std::time::Duration::from_millis(300)).await; do_restart(st).await; });
+        }
+        "cancel" => RESTART_PENDING.store(false, SeqCst),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "mode phải là idle | now | cancel"}))),
+    }
+    (StatusCode::OK, Json(json!({"ok": true})))
+}
+
+async fn api_restart_status(State(st): State<Arc<AppState>>) -> Json<Value> {
+    use std::sync::atomic::Ordering::SeqCst;
+    Json(json!({"pending": RESTART_PENDING.load(SeqCst), "since": RESTART_SINCE.load(SeqCst), "in_flight": total_in_flight(&st), "boot": boot_id()}))
+}
+
+async fn restart_when_idle(st: Arc<AppState>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    crate::elog!("[restart] chờ hết request rồi khởi động lại");
+    let mut quiet = 0;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if !RESTART_PENDING.load(SeqCst) { crate::elog!("[restart] đã huỷ"); return; }
+        if total_in_flight(&st) == 0 { quiet += 1; if quiet >= 4 { break; } } else { quiet = 0; }
+    }
+    do_restart(st).await;
+}
+
+/// Ghi mọi thứ xuống đĩa, xoá các phiên web đang giữ (không để mồ côi trên DS) rồi exec lại chính binary này
+/// (cùng PID nên systemd không thấy gì; cũng nạp luôn bản build mới nếu có). Lỗi exec → thoát, systemd khởi động lại.
+async fn do_restart(st: Arc<AppState>) {
+    crate::elog!("[restart] đang khởi động lại…");
+    flush_store(&st).await;
+    let _ = tokio::task::spawn_blocking(crate::usage::flush_blocking).await;
+    let sess: Vec<(String, String)> = st.sessions.lk().iter().map(|(sid, (acc, _))| (sid.clone(), acc.clone())).collect();
+    let mut jobs = Vec::new();
+    for (sid, acc_id) in sess {
+        let acc = { st.store.read().await.accounts.iter().find(|a| a.id == acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
+        if let Some((tok, ck)) = acc {
+            jobs.push(tokio::spawn(async move { if let Ok(c) = DsClient::new(tok, ck) { let _ = c.delete_session(&sid).await; } }));
+        }
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(4), futures::future::join_all(jobs)).await;
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().trim_end_matches(" (deleted)").to_string()).unwrap_or_else(|_| "deepseek-harness".into());
+    let err = std::process::Command::new(exe).args(std::env::args().skip(1)).exec();
+    crate::elog!("[restart] exec lỗi: {err} — thoát để systemd khởi động lại");
+    std::process::exit(1);
+}
+
 async fn api_settings_get() -> Json<Value> {
     Json(crate::settings::snapshot())
 }
@@ -293,6 +369,42 @@ async fn api_settings_set(Json(body): Json<std::collections::BTreeMap<String, Va
         if let Err(e) = r { return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": e}))); }
     }
     (StatusCode::OK, Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct LogsQ { after: Option<u64>, limit: Option<usize> }
+
+async fn api_logs(axum::extract::Query(q): axum::extract::Query<LogsQ>) -> Json<Value> {
+    let lines = crate::logbuf::since(q.after.unwrap_or(0), q.limit.unwrap_or(500).min(3000));
+    Json(json!({ "lines": lines }))
+}
+
+/// SSE: gửi backlog (`?backlog=N`, mặc định 300) rồi phát trực tiếp từng dòng mới.
+async fn api_logs_stream(axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>)
+    -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    let backlog: usize = q.get("backlog").and_then(|v| v.parse().ok()).unwrap_or(300).min(3000);
+    let mut rx = crate::logbuf::subscribe(); // đăng ký trước khi lấy backlog để không hụt dòng
+    let first = crate::logbuf::since(0, backlog);
+    let mut last = first.last().map(|l| l.seq).unwrap_or(0);
+    let stream = async_stream::stream! {
+        for l in first { yield Ok(Event::default().data(serde_json::to_string(&l).unwrap_or_default())); }
+        loop {
+            match rx.recv().await {
+                Ok(l) => {
+                    if l.seq <= last { continue; }
+                    last = l.seq;
+                    yield Ok(Event::default().data(serde_json::to_string(&l).unwrap_or_default()));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // người xem quá chậm: nạp lại từ vòng đệm
+                    for l in crate::logbuf::since(last, 3000) { last = l.seq; yield Ok(Event::default().data(serde_json::to_string(&l).unwrap_or_default())); }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
 }
 
 async fn api_usage() -> Json<Value> {
@@ -718,8 +830,8 @@ pub(crate) fn note_session_use(a: &mut Account, sid: &str) {
                     tokio::time::sleep(std::time::Duration::from_secs(600)).await;
                     if let Ok(c) = crate::client::DsClient::new(token, cookies) {
                         match c.delete_session(&old).await {
-                            Ok(()) => eprintln!("[session] đã xoá session cũ {}", old),
-                            Err(e) => eprintln!("[session] xoá session cũ {} lỗi: {}", old, e),
+                            Ok(()) => crate::elog!("[session] đã xoá session cũ {}", old),
+                            Err(e) => crate::elog!("[session] xoá session cũ {} lỗi: {}", old, e),
                         }
                     }
                 });
@@ -1697,6 +1809,7 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
         },
         "accounts": accounts,
         "now": now,
+        "boot": boot_id(),
     }))
 }
 
@@ -1791,8 +1904,8 @@ async fn api_build_profile(State(st): State<Arc<AppState>>) -> Json<Value> {
         let mut watching = st2.login_watching.lk();
         *watching = false;
         match res {
-            Ok(msg) => eprintln!("[build-profile] {}", msg),
-            Err(e) => eprintln!("[build-profile] lỗi: {}", e),
+            Ok(msg) => crate::elog!("[build-profile] {}", msg),
+            Err(e) => crate::elog!("[build-profile] lỗi: {}", e),
         }
     });
     Json(json!({
@@ -1821,7 +1934,7 @@ async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
             *watching = false;
         }
         if let Err(e) = res {
-            eprintln!("[login-flow] lỗi: {}", e);
+            crate::elog!("[login-flow] lỗi: {}", e);
         }
     });
     Json(json!({
@@ -1834,17 +1947,17 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
     // FLOW CŨ (user thích): mở tab DS trong Chrome chính (CDP 9333) → canh → tự tắt tab.
     // Chrome chính = profile real user → không dính lỗi device environment.
     let (target_id, ws_url) = crate::chrome_capture::open_ds_login_tab().await?;
-    eprintln!("[login-flow] tab login mở: {}", target_id);
+    crate::elog!("[login-flow] tab login mở: {}", target_id);
 
     // canh login tới 10 phút
     let res = crate::chrome_capture::watch_login_tab(ws_url, 600).await;
 
     // tự tắt tab login (Chrome chính giữ nguyên)
     let _ = crate::chrome_capture::close_target(&target_id).await;
-    eprintln!("[login-flow] tab đã đóng, session đã lưu");
+    crate::elog!("[login-flow] tab đã đóng, session đã lưu");
 
     let session = res?;
-    eprintln!("[login-flow] captured: {:?}", session.email);
+    crate::elog!("[login-flow] captured: {:?}", session.email);
 
     // lưu vào store (dedupe theo token — acc cũ chỉ refresh)
     {
@@ -1874,7 +1987,7 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
     }
     mark_dirty(&st);
     flush_store(&st).await;
-    eprintln!("[login-flow] tab đã đóng, session đã lưu");
+    crate::elog!("[login-flow] tab đã đóng, session đã lưu");
     Ok(())
 }
 
@@ -1907,7 +2020,7 @@ async fn auto_refresh_loop(st: Arc<AppState>) {
             if refreshed == 0 {
                 if let Some(new_tok) = &chrome_token {
                     if !store.accounts.iter().any(|a| &a.token == new_tok) {
-                        eprintln!("[auto-refresh] token mới trong Chrome chưa có trong pool — bỏ qua (dùng nút Capture nếu muốn thêm)");
+                        crate::elog!("[auto-refresh] token mới trong Chrome chưa có trong pool — bỏ qua (dùng nút Capture nếu muốn thêm)");
                     }
                 }
             }
@@ -1916,7 +2029,7 @@ async fn auto_refresh_loop(st: Arc<AppState>) {
         if refreshed > 0 {
             mark_dirty(&st);
             flush_store(&st).await;
-            eprintln!("[auto-refresh] cookies updated from chrome ({} acc)", refreshed);
+            crate::elog!("[auto-refresh] cookies updated from chrome ({} acc)", refreshed);
         }
     }
 }
@@ -2006,8 +2119,8 @@ async fn conv_sweeper(st: Arc<AppState>) {
             if let Some((tok, ck)) = acc {
                 if let Ok(cl) = DsClient::new(tok, ck) {
                     match cl.delete_session(&sid).await {
-                        Ok(()) => eprintln!("[conv] đã xoá phiên nhàn rỗi {}", &sid[..8.min(sid.len())]),
-                        Err(e) => eprintln!("[conv] xoá phiên {} lỗi: {}", sid, e),
+                        Ok(()) => crate::elog!("[conv] đã xoá phiên nhàn rỗi {}", &sid[..8.min(sid.len())]),
+                        Err(e) => crate::elog!("[conv] xoá phiên {} lỗi: {}", sid, e),
                     }
                 }
             }
@@ -2044,7 +2157,10 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/build_profile", post(api_build_profile))
         .route("/api/stats", get(api_stats))
         .route("/api/usage", get(api_usage))
+        .route("/api/logs", get(api_logs))
+        .route("/api/logs/stream", get(api_logs_stream))
         .route("/api/settings", get(api_settings_get).post(api_settings_set))
+        .route("/api/restart", get(api_restart_status).post(api_restart))
         .route("/v1/chat/completions", post(crate::chat::api_chat_completions))
         .route("/v1/models", get(api_models))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB — prompt dài (256K+ token)
@@ -2052,6 +2168,7 @@ pub async fn run(port: u16) -> Result<()> {
         .with_state(st.clone());
 
     // Background: dọn phiên nhàn rỗi, refresh cookies từ Chrome, ghi store gom lô
+    let _ = boot_id();
     crate::usage::spawn_background();
     tokio::spawn(conv_sweeper(st.clone()));
     tokio::spawn(store_flusher(st.clone()));
