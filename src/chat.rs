@@ -106,7 +106,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Kích thước tối đa cho một ảnh tải qua URL (DS_MAX_IMAGE_MB, mặc định 20MB).
 fn max_image_bytes() -> usize {
-    std::env::var("DS_MAX_IMAGE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(20) * 1024 * 1024
+    crate::settings::uint("DS_MAX_IMAGE_MB") as usize * 1024 * 1024
 }
 
 /// Cắt theo ký tự (không panic khi cắt giữa ký tự nhiều byte).
@@ -271,7 +271,7 @@ pub(crate) fn effort_to_thinking(effort: Option<&str>, legacy_r1: bool, thinking
         Some("none") | Some("off") | Some("minimal") | Some("false") | Some("0") => false,
         Some("") | None => {
             if legacy_r1 || thinking_flag == Some(true) { return true; }
-            let d = std::env::var("DS_DEFAULT_EFFORT").unwrap_or_else(|_| "none".into()).to_ascii_lowercase();
+            let d = crate::settings::get("DS_DEFAULT_EFFORT").to_ascii_lowercase();
             !matches!(d.as_str(), "none" | "off" | "")
         }
         Some(_) => true,
@@ -312,11 +312,11 @@ fn tools_hash(tools: &Option<Vec<Value>>) -> u64 {
 }
 
 fn stateful_enabled() -> bool {
-    std::env::var("DS_STATEFUL").map(|v| v != "0").unwrap_or(true)
+    crate::settings::boolean("DS_STATEFUL")
 }
 
 fn conv_max_chars() -> usize {
-    std::env::var("DS_CONV_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_200_000)
+    crate::settings::uint("DS_CONV_MAX_CHARS") as usize
 }
 
 fn spawn_delete_session(acc: Option<(String, String)>, sid: String) {
@@ -334,7 +334,7 @@ fn too_many(msg: &str) -> ApiErr {
 }
 
 fn queue_wait_secs() -> u64 {
-    std::env::var("DS_QUEUE_WAIT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(120)
+    crate::settings::uint("DS_QUEUE_WAIT_SECS")
 }
 
 /// Chọn acc ít bận nhất (rồi lâu chưa dùng nhất). `exclude` là loại trừ MỀM: bỏ qua các acc đó khi còn acc khác
@@ -779,7 +779,7 @@ pub(crate) async fn api_chat_completions(
         && !is_title_req;
     let search = req.search.unwrap_or(false);
 
-    let max_chars: usize = std::env::var("DS_PROMPT_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_200_000);
+    let max_chars: usize = crate::settings::uint("DS_PROMPT_MAX_CHARS") as usize;
     let msgs = fit_messages(&req.messages, max_chars);
     let tools_hdr = render_tools_spec(&req.tools);
     let prompt = format!("{}\n{}\n", tools_hdr, messages_to_prompt(&msgs));

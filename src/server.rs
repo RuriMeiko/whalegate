@@ -79,32 +79,12 @@ pub struct AccStats {
 
 impl AccStats {
     // Tunable qua env: DS_BURST_LIMIT, DS_BURST_WINDOW, DS_COOLDOWN
-    pub fn burst_limit() -> u32 {
-        static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-        *V.get_or_init(|| {
-            std::env::var("DS_BURST_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(6)
-        })
-    }
-    pub fn burst_window() -> u64 {
-        static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-        *V.get_or_init(|| {
-            std::env::var("DS_BURST_WINDOW").ok().and_then(|v| v.parse().ok()).unwrap_or(30)
-        })
-    }
-    pub fn cooldown() -> u64 {
-        static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-        *V.get_or_init(|| {
-            std::env::var("DS_COOLDOWN").ok().and_then(|v| v.parse().ok()).unwrap_or(10)
-        })
-    }
-    // CAP concurrent call trên 1 acc (env DS_MAX_CONC_PER_ACC, default 2).
+    pub fn burst_limit() -> u32 { crate::settings::uint("DS_BURST_LIMIT") as u32 }
+    pub fn burst_window() -> u64 { crate::settings::uint("DS_BURST_WINDOW") }
+    pub fn cooldown() -> u64 { crate::settings::uint("DS_COOLDOWN") }
+    // CAP concurrent call trên 1 acc (DS_MAX_CONC_PER_ACC, mặc định 2).
     // Cộng đồng report ban khi >2 call đồng thời/acc — 2 là ngưỡng an toàn.
-    pub fn max_conc() -> u32 {
-        static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-        *V.get_or_init(|| {
-            std::env::var("DS_MAX_CONC_PER_ACC").ok().and_then(|v| v.parse().ok()).unwrap_or(2)
-        })
-    }
+    pub fn max_conc() -> u32 { crate::settings::uint("DS_MAX_CONC_PER_ACC") as u32 }
 
     fn burst_active(&self, now: u64) -> bool {
         now.saturating_sub(self.burst_window_start) < Self::burst_window()
@@ -131,7 +111,7 @@ impl AccStats {
     /// Hỏng/rỗng: cooldown 15s, 30s, 60s … tối đa 10 phút (DS_FAIL_COOLDOWN_MAX).
     pub(crate) fn mark_fail(&mut self, now: u64) {
         self.fail_streak = self.fail_streak.saturating_add(1);
-        let max: u64 = std::env::var("DS_FAIL_COOLDOWN_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        let max: u64 = crate::settings::uint("DS_FAIL_COOLDOWN_MAX");
         let cd = (15u64 << (self.fail_streak - 1).min(10)).min(max);
         self.cooldown_until = now + cd;
     }
@@ -294,6 +274,26 @@ pub(crate) struct AppState {
 }
 
 // ---------- handlers ----------
+
+async fn api_settings_get() -> Json<Value> {
+    Json(crate::settings::snapshot())
+}
+
+/// Body: {"KEY": "value"} (nhiều khoá một lần) — value null hoặc "" = bỏ override, quay về env/mặc định.
+async fn api_settings_set(Json(body): Json<std::collections::BTreeMap<String, Value>>) -> (StatusCode, Json<Value>) {
+    for (k, v) in &body {
+        let r = match v {
+            Value::Null => crate::settings::set(k, None),
+            Value::String(s) if s.is_empty() => crate::settings::set(k, None),
+            Value::String(s) => crate::settings::set(k, Some(s)),
+            Value::Bool(x) => crate::settings::set(k, Some(if *x { "1" } else { "0" })),
+            Value::Number(x) => crate::settings::set(k, Some(&x.to_string())),
+            _ => Err(format!("{k}: giá trị không hợp lệ")),
+        };
+        if let Err(e) = r { return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": e}))); }
+    }
+    (StatusCode::OK, Json(json!({"ok": true})))
+}
 
 async fn api_usage() -> Json<Value> {
     Json(tokio::task::spawn_blocking(crate::usage::report).await.unwrap_or_else(|_| json!({})))
@@ -682,7 +682,7 @@ pub(crate) fn safe_flush_len(buf: &str) -> usize {
 /// Số lượt tối đa trên 1 session web trước khi đổi (DS_SESSION_ROTATE, mặc định 30).
 /// Prompt luôn gửi đủ lịch sử, session web không giữ ngữ cảnh → để nó phình vô hạn chỉ tổ chậm/nặng.
 pub(crate) fn session_rotate_limit() -> u32 {
-    std::env::var("DS_SESSION_ROTATE").ok().and_then(|v| v.parse().ok()).unwrap_or(30)
+    crate::settings::uint("DS_SESSION_ROTATE") as u32
 }
 
 /// Ghi nhận 1 lượt dùng session `sid` cho acc. Session khác session đang lưu (do xoay vòng) → thay mới,
@@ -1688,7 +1688,7 @@ async fn api_models() -> Json<Value> {
             "input_modalities": ["text", "image"],
             "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
             "reasoning_efforts": ["none", "auto", "max"],
-            "context_length": std::env::var("DS_CONTEXT_TOKENS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(500_000)
+            "context_length": crate::settings::uint("DS_CONTEXT_TOKENS")
         }]
     }))
 }
@@ -1969,8 +1969,8 @@ async fn access_guard(
 
 /// Dọn phiên web nhàn rỗi quá DS_CONV_TTL (mặc định 1800s): xoá trên DS, khỏi registry phiên và khỏi registry hội thoại.
 async fn conv_sweeper(st: Arc<AppState>) {
-    let ttl: u64 = std::env::var("DS_CONV_TTL").ok().and_then(|v| v.parse().ok()).unwrap_or(1800);
     loop {
+        let ttl: u64 = crate::settings::uint("DS_CONV_TTL"); // đọc mỗi vòng: đổi trên dashboard có hiệu lực ngay
         tokio::time::sleep(std::time::Duration::from_secs((ttl / 4).clamp(3, 60))).await;
         let t = now();
         let expired: Vec<(String, String)> = {
@@ -2023,6 +2023,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/build_profile", post(api_build_profile))
         .route("/api/stats", get(api_stats))
         .route("/api/usage", get(api_usage))
+        .route("/api/settings", get(api_settings_get).post(api_settings_set))
         .route("/v1/chat/completions", post(crate::chat::api_chat_completions))
         .route("/v1/models", get(api_models))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB — prompt dài (256K+ token)

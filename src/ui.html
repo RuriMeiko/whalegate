@@ -87,6 +87,31 @@
   #msg { font: 12px/1.4 var(--mono); color: var(--mute); margin-left: auto; text-align: right; }
   #msg.ok { color: var(--ok); } #msg.err { color: var(--bad); }
 
+
+  /* cấu hình */
+  .chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .chip { font: 500 11px/1 var(--mono); letter-spacing: .06em; padding: 7px 10px; border: 1px solid var(--ink); background: transparent; color: var(--ink); cursor: pointer; text-transform: uppercase; }
+  .chip i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; background: transparent; border: 1px solid var(--ink); vertical-align: 0; }
+  .chip.on { background: var(--ink); color: var(--bg); } .chip.on i { background: var(--bg); border-color: var(--bg); }
+  .cfg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
+  .cfg > div { padding: 0 16px 0 0; }
+  .cfg h4 { margin: 0 0 6px; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; font-weight: 400; padding-bottom: 8px; border-bottom: 1px solid var(--ink); }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 9px 0; border-bottom: 1px solid var(--hair); align-items: center; }
+  .row .t { font: 12px/1.35 var(--sans); }
+  .row .k { font: 10px/1 var(--mono); color: var(--mute); margin-top: 3px; word-break: break-all; }
+  .row .k b { color: var(--warn); font-weight: 400; }
+  .ctl { display: flex; align-items: center; gap: 6px; }
+  .ctl input, .ctl select { font: 12px/1 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 6px 7px; width: 96px; text-align: right; outline: none; border-radius: 0; }
+  .ctl select { width: auto; text-align: left; }
+  .ctl input:focus, .ctl select:focus { background: #f4efe2; }
+  .ctl input.bad { border-color: var(--bad); color: var(--bad); }
+  .ctl .u { font: 10px/1 var(--mono); color: var(--mute); min-width: 28px; }
+  .ctl .x { border: 0; padding: 4px 6px; font-size: 12px; color: var(--mute); }
+  .sw { width: 38px; height: 20px; border: 1px solid var(--ink); background: transparent; padding: 0; position: relative; }
+  .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; background: var(--ink); transition: left .12s; }
+  .sw.on { background: var(--ink); } .sw.on::after { left: 20px; background: var(--bg); }
+  .sw:hover:not(:disabled) { background: transparent; } .sw.on:hover:not(:disabled) { background: var(--ink); }
+
   details summary { cursor: pointer; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; list-style: none; padding: 2px 0; }
   details summary::-webkit-details-marker { display: none; }
   details summary::before { content: "+ "; } details[open] summary::before { content: "− "; }
@@ -95,6 +120,7 @@
   .foot { font: 11px/1.5 var(--mono); color: var(--mute); margin-top: 14px; }
 
   @media (max-width: 1100px) {
+    .cfg { grid-template-columns: repeat(2, 1fr); gap: 18px 0; }
     .c8, .c7, .c5, .c4 { grid-column: span 6; }
     .c3 { grid-column: span 6; }
     .c2 { grid-column: span 4; }
@@ -106,6 +132,7 @@
     .cell { padding: 12px 12px 14px; }
     .bars { height: 90px; }
     .hide-s { display: none; }
+    .cfg { grid-template-columns: 1fr; gap: 18px; } .cfg > div { padding-right: 0; }
     /* bảng tài khoản → mỗi tài khoản là một khối, không phải cuộn ngang */
     #accTable thead { display: none; }
     #accTable tr { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--hair); align-items: center; }
@@ -122,6 +149,10 @@
 <div class="wrap">
   <header>
     <h1>ds-harness</h1>
+    <div class="chips">
+      <button class="chip" id="chipStateful" onclick="toggleCfg('DS_STATEFUL')"><i></i>stateful</button>
+      <button class="chip" id="chipPow" onclick="toggleCfg('DS_POW_PREFETCH')"><i></i>dự đoán pow</button>
+    </div>
     <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
   </header>
 
@@ -185,6 +216,11 @@
         <tbody id="accBody"></tbody>
       </table></div>
       <div id="empty" class="empty">Chưa có tài khoản. Bấm + Login.</div>
+    </div>
+
+    <div class="cell c12">
+      <div class="lab">Cấu hình <em id="cfgMsg"></em></div>
+      <div class="cfg" id="cfg"></div>
     </div>
 
     <div class="cell c6">
@@ -365,8 +401,69 @@ async function loadStats() {
   } catch (e) { $('dot').className = 'dot off'; $('liveTxt').textContent = 'mất kết nối'; }
 }
 
-loadStats();
+
+/* ---- cấu hình ---- */
+let CFG = [];
+async function saveCfg(key, value) {
+  const m = $('cfgMsg');
+  try {
+    const r = await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({[key]: value})});
+    const d = await r.json();
+    if (!d.ok) { m.textContent = d.error; m.className = 'bad'; return false; }
+    m.textContent = 'đã lưu ' + key; m.className = 'good';
+    setTimeout(() => { if (m.textContent === 'đã lưu ' + key) m.textContent = ''; }, 2500);
+    await loadCfg(); return true;
+  } catch (e) { m.textContent = e.message; m.className = 'bad'; return false; }
+}
+function toggleCfg(key) { const c = CFG.find((x) => x.key === key); if (c) saveCfg(key, c.value === '1' ? '0' : '1'); }
+
+function cfgRow(c) {
+  const row = el('div', 'row');
+  const left = el('div');
+  left.append(el('div', 't', c.label));
+  const k = el('div', 'k', c.key + (c.unit ? ' · ' + c.unit : '') + ' · mặc định ' + c.default);
+  if (!c.live) k.append(document.createTextNode(' · '), Object.assign(el('b', null, 'cần restart')));
+  if (c.env && !c.overridden) k.append(document.createTextNode(' · env'));
+  left.append(k);
+  const ctl = el('div', 'ctl');
+  if (c.kind === 'bool') {
+    const b = el('button', 'sw' + (c.value === '1' ? ' on' : '')); b.title = c.value === '1' ? 'đang bật' : 'đang tắt';
+    b.onclick = () => saveCfg(c.key, c.value === '1' ? '0' : '1'); ctl.append(b);
+  } else if (c.kind === 'choice') {
+    const sel = el('select'); for (const o of c.choices) { const op = el('option', null, o); op.value = o; if (o === c.value) op.selected = true; sel.append(op); }
+    sel.onchange = () => saveCfg(c.key, sel.value); ctl.append(sel);
+  } else {
+    const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.value = c.value; inp.inputMode = 'numeric';
+    const commit = async () => { if (inp.value === c.value) return; const ok = await saveCfg(c.key, inp.value); if (!ok) { inp.className = 'bad'; } };
+    inp.onchange = commit; inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
+    ctl.append(inp);
+  }
+  if (c.overridden) { const x = el('button', 'x', '↺'); x.title = 'về mặc định'; x.onclick = () => saveCfg(c.key, null); ctl.append(x); }
+  row.append(left, ctl);
+  return row;
+}
+
+async function loadCfg() {
+  try {
+    CFG = (await (await fetch('/api/settings')).json()).items;
+    for (const [id, key] of [['chipStateful', 'DS_STATEFUL'], ['chipPow', 'DS_POW_PREFETCH']]) {
+      $(id).className = 'chip' + (CFG.find((x) => x.key === key)?.value === '1' ? ' on' : '');
+    }
+    const box = $('cfg');
+    if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return; // đang gõ: không vẽ lại
+    box.textContent = '';
+    const groups = [...new Set(CFG.map((c) => c.group))];
+    for (const g of groups) {
+      const col = el('div'); col.append(el('h4', null, g));
+      for (const c of CFG.filter((x) => x.group === g)) col.append(cfgRow(c));
+      box.append(col);
+    }
+  } catch (e) {}
+}
+
+loadStats(); loadCfg();
 setInterval(loadStats, 5000);
+setInterval(loadCfg, 15000);
 </script>
 </body>
 </html>

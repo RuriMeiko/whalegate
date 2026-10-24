@@ -12,7 +12,7 @@ pub const DEEPSEEK_API: &str = "https://chat.deepseek.com/api/v0";
 fn read_timeout_secs() -> u64 {
     static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        std::env::var("DS_READ_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(120)
+        crate::settings::uint("DS_READ_TIMEOUT_SECS")
     })
 }
 
@@ -85,7 +85,7 @@ fn device_id_for(token: &str) -> String {
 
 /// Lệch múi giờ tính bằng giây như web (UTC+7 → 25200). Đặt DS_TZ_OFFSET để đổi.
 fn tz_offset_secs() -> String {
-    std::env::var("DS_TZ_OFFSET").unwrap_or_else(|_| "25200".into())
+    crate::settings::get("DS_TZ_OFFSET")
 }
 
 impl DsClient {
@@ -216,7 +216,7 @@ impl DsClient {
     /// Tải + giải sẵn PoW cho request kế tiếp của acc này, chạy nền trong lúc stream hiện tại đang chạy.
     /// Mỗi challenge chỉ dùng một lần. DS_POW_PREFETCH=0 để tắt.
     fn prefetch_pow(&self) {
-        if std::env::var("DS_POW_PREFETCH").as_deref() == Ok("0") || !pow_cache_claim(&self.token) {
+        if !crate::settings::boolean("DS_POW_PREFETCH") || !pow_cache_claim(&self.token) {
             return;
         }
         let me = self.clone();
@@ -356,7 +356,7 @@ impl DsClient {
         let sse = String::from_utf8_lossy(&full).to_string();
 
         // debug: dump toàn bộ SSE raw (env DS_DEBUG_SSE=1)
-        if std::env::var("DS_DEBUG_SSE").as_deref() == Ok("1") {
+        if crate::settings::boolean("DS_DEBUG_SSE") {
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
                 .open("/tmp/ds_debug_sse.log") {
                 use std::io::Write;

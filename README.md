@@ -338,3 +338,12 @@ Dashboard (`/`) đếm token mỗi lượt hoàn tất (input không trúng cach
 - "Tiết kiệm" = chi phí nếu trả tiền API cho đúng lượng token đó. Cache miss tính đủ giá nên thiên về phía cao (API thật có cache theo prefix tự động).
 - Dự toán tháng = bình quân ngày của tối đa 7 ngày gần nhất × 30.
 - `GET /api/usage` trả toàn bộ số liệu dạng JSON.
+
+## Cấu hình trên dashboard
+
+Các giá trị `DS_*` hay chỉnh (stateful, dự đoán PoW, TTL phiên, trần ngữ cảnh, đồng thời mỗi acc, cooldown, múi giờ…) đổi được ngay trong mục **Cấu hình** của dashboard, có hiệu lực **không cần restart** (trừ khoản ghi "cần restart"). Hai nút ở đầu trang bật/tắt nhanh *stateful* và *dự đoán pow*.
+
+- Lưu ở `settings.json` cạnh `accounts.json`; nút ↺ trả khoá về mặc định.
+- Thứ tự ưu tiên: giá trị đã lưu trên dashboard → biến môi trường `DS_*` → mặc định.
+- API: `GET /api/settings` (danh sách, kiểu, khoảng hợp lệ), `POST /api/settings` với `{"DS_STATEFUL":"0","DS_CONV_TTL":600}`; `null` = bỏ giá trị đã lưu. Chỉ gọi được từ loopback như mọi `/api/*`.
+- `DS_API_KEY`, đường dẫn và cổng cố ý không nằm ở đây.

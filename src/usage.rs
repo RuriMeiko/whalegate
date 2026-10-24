@@ -233,7 +233,7 @@ impl Agg {
 
 pub fn report() -> Value {
     let now = now_secs();
-    let tz: i64 = std::env::var("DS_TZ_OFFSET").ok().and_then(|v| v.parse().ok()).unwrap_or(25200);
+    let tz: i64 = crate::settings::int("DS_TZ_OFFSET");
     let p = pricing_cell().read().unwrap_or_else(|e| e.into_inner()).clone();
     let s = store().lock().unwrap_or_else(|e| e.into_inner());
     let hnow = now / 3600;
