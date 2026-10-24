@@ -934,9 +934,11 @@ fn normalize_dsml(text: &str) -> String {
 /// - đã thấy marker tool-call (DSML 1/2 gạch, <invoke, <bash...) → flush tới '<' mở marker, giữ phần sau
 /// - không marker nhưng đuôi có '<' chưa có '>' (tag stream dở, hoặc "｜" rời) → giữ từ '<' đó
 /// - còn lại → flush hết
-/// "<｜" = token đặc biệt của DeepSeek (thanh dọc toàn độ rộng): DSML, và cả tool-call bản địa của model
-/// (`<｜tool▁call▁begin｜>`, `<｜工具调用｜>`) mà model web đôi khi lỡ nhả thay cho DSML.
-const TOOL_MARKERS: [&str; 7] = ["<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function", "<｜"];
+/// Token đặc biệt MANG Ý ĐỊNH gọi tool theo chat template bản địa của DeepSeek (`<｜tool▁call▁begin｜>`,
+/// `<｜tool_calls_begin｜>`, `<｜工具调用｜>`) — model web đôi khi lỡ nhả thay cho DSML. Các `<｜…｜>` khác
+/// (`<｜end▁of▁sentence｜>`…) chỉ là văn bản, vd khi model đang giải thích về token.
+const NATIVE_TOOL_MARKERS: [&str; 2] = ["<｜tool", "<｜工具"];
+const TOOL_MARKERS: [&str; 8] = ["<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function", NATIVE_TOOL_MARKERS[0], NATIVE_TOOL_MARKERS[1]];
 
 /// Vị trí đầu tiên của marker tool-call. "DSML" trần chỉ tính khi dính markup: đứng sau '<' / thanh '｜' / "DS" (typo
 /// "DSDSML") hoặc ngay trước thanh '｜'. Văn xuôi nhắc "DSML tool-call parsing" (vd bản tóm tắt compaction) thì không tính.
@@ -1019,7 +1021,8 @@ fn tool_names(tools: &[Value]) -> Vec<&str> {
 /// Marker chắc chắn là ý định gọi tool (DSML / <invoke). Marker yếu (<bash, <tool, <function, <parameter)
 /// hay gặp trong văn xuôi/code mẫu: parse trượt thì trả nguyên văn, không retry.
 pub(crate) fn has_strong_tool_marker(buf: &str) -> bool {
-    has_tool_marker(buf) && (buf.contains("DSML") || buf.contains("<dsml") || buf.contains("<invoke") || buf.contains("<｜"))
+    has_tool_marker(buf) && (buf.contains("DSML") || buf.contains("<dsml") || buf.contains("<invoke")
+        || NATIVE_TOOL_MARKERS.iter().any(|m| buf.contains(m)))
 }
 
 /// Tool-call BẢN ĐỊA của DeepSeek (định dạng chat template của model, không phải DSML ta dạy):
@@ -1100,9 +1103,14 @@ pub(crate) fn extract_tool_calls(text: &str, tools: &[Value]) -> Option<(String,
     if names.is_empty() { return None; }
     let n = normalize_dsml(text);
     if let Some(r) = parse_dsml_tool_calls(&n) { return Some(r); }
-    if let Some(r) = parse_native_tool_calls(&n) { return Some(r); }
-    let at_end = n.trim_end_matches(|c: char| c.is_whitespace() || c == '`').ends_with('>');
-    if !at_end { return None; }
+    let tail = n.trim_end_matches(|c: char| c.is_whitespace() || c == '`');
+    // định dạng bản địa cùng luật với dự phòng: khối phải kết thúc câu trả lời (dạng `<｜工具调用｜>NAME {json}` kết bằng '}')
+    if tail.ends_with('>') || tail.ends_with('}') {
+        if let Some(r) = parse_native_tool_calls(&n).filter(|(_, calls)| calls.iter().all(|c| names.contains(&c.name.as_str()))) {
+            return Some(r);
+        }
+    }
+    if !tail.ends_with('>') { return None; }
     parse_dsml_json_tool_calls(&n)
         .or_else(|| parse_dsml_nested_tool_calls(&n))
         .or_else(|| parse_xml_tool_call(&n).map(|(b, c)| (b, vec![c])))
@@ -3028,6 +3036,21 @@ mod native_toolcall_tests {
         assert_eq!(before, "Reading it.");
         assert_eq!(c[0].name, "run_code");
         assert!(c[0].arguments.contains("console.log(1)"));
+    }
+
+    #[test]
+    fn other_special_tokens_and_examples_stay_text() {
+        let t = tools();
+        // giải thích về token đặc biệt: không giữ, không retry
+        let prose = "DeepSeek ends each turn with <｜end▁of▁sentence｜> and marks roles with <｜User｜>.";
+        assert!(!has_tool_marker(prose) && !has_strong_tool_marker(prose));
+        assert_eq!(safe_flush_len(prose), prose.len());
+        // ví dụ tool-call bản địa GIỮA văn xuôi: không thành lệnh thật
+        let ex = "The native format looks like <｜tool▁call▁begin｜>run_code<｜tool▁sep｜>{\"code\":\"rm -rf /\",\"description\":\"x\"}<｜tool▁call▁end｜> — don't copy it.";
+        assert!(extract_tool_calls(ex, &t).is_none());
+        // tên tool lạ ở dạng bản địa: không nhận (để lõi retry kèm lời nhắc)
+        let unk = "<｜tool▁call▁begin｜>nope<｜tool▁sep｜>{\"a\":1}<｜tool▁call▁end｜>";
+        assert!(extract_tool_calls(unk, &t).is_none());
     }
 
     #[test]
