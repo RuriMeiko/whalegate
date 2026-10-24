@@ -493,7 +493,7 @@ Import merges instead of replacing. Accounts are matched by DeepSeek user id fir
 
 The dashboard checks on load and every 30 minutes, shows a banner when a newer tag exists, and reloads the page once `/api/restart` reports a new boot id. Requests in flight are cut; agents such as dsh retry them.
 
-Windows cannot replace a running executable: the new binary is staged as `whalegate.exe.new` and the API returns an error explaining that a manual restart will pick it up.
+Windows locks a running `.exe`, so the rename in step 3 cannot work there. Instead the updater copies the new binary to `whalegate.exe.new` and writes a `whalegate.update.bat` next to it; the restart path launches that script, which waits for the old process to exit, replaces the file with `move /y`, relaunches the app and deletes itself. The script only runs while both files still exist, so an abandoned update never replays.
 
 If you installed with `install.sh` / `install.ps1` there is nothing else to do — the binary is replaced in place and the service config is untouched. To update from a shell instead, re-run the installer:
 

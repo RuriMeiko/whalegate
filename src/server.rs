@@ -455,15 +455,26 @@ pub(crate) async fn do_restart(st: Arc<AppState>) {
         crate::elog!("[restart] exec lỗi: {err} — thoát để systemd khởi động lại");
         std::process::exit(1);
     }
-    // không có exec (Windows): chạy tiến trình mới rồi thoát; cổng được nhả khi tiến trình cũ kết thúc
+    // Windows: file .exe đang chạy bị khoá, nên nếu có script cập nhật thì giao cho nó —
+    // nó chờ tiến trình này thoát, move /y binary mới đè lên rồi chạy lại.
     #[cfg(not(unix))]
     {
-        if let Err(e) = std::process::Command::new(exe).args(std::env::args().skip(1)).spawn() {
-            crate::elog!("[restart] không chạy lại được: {e}");
-        }
+        let exe_path = std::path::PathBuf::from(&exe);
+        let bat = exe_path.with_extension("update.bat");
+        let staged = exe_path.with_extension("exe.new");
+        // Chỉ giao cho script khi cả hai file còn đó: nếu user đã chạy script thủ công (hoặc một
+        // lần update cũ bị bỏ dở), .bat có thể còn nhưng .exe.new đã mất — chạy nó sẽ lặp vô hạn.
+        let launched = if bat.is_file() && staged.is_file() {
+            crate::elog!("[restart] chạy {} để thay binary", bat.display());
+            std::process::Command::new("cmd").arg("/c").arg(&bat).spawn().is_ok()
+        } else {
+            let _ = std::fs::remove_file(&bat);
+            false
+        };
         std::process::exit(0);
     }
 }
+
 
 async fn api_settings_get() -> Json<Value> {
     Json(crate::settings::snapshot())

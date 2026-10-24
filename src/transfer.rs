@@ -284,6 +284,29 @@ fn target_triple() -> Option<&'static str> {
     else { None }
 }
 
+/// Script .bat thay binary trên Windows: chờ file cũ không còn bị khoá, move /y đè lên, chạy lại.
+/// Tách riêng để test được trên Linux (nội dung script là văn bản thuần).
+fn windows_update_script(staged: &std::path::Path, exe: &std::path::Path) -> String {
+    format!(
+        concat!(
+            "@echo off\r\n",
+            "setlocal\r\n",
+            "set \"NEW={}\"\r\n",
+            "set \"OLD={}\"\r\n",
+            ":wait\r\n",
+            "move /y \"%NEW%\" \"%OLD%\" >nul 2>&1\r\n",
+            "if errorlevel 1 (\r\n",
+            "  ping -n 2 127.0.0.1 >nul\r\n",
+            "  goto wait\r\n",
+            ")\r\n",
+            "start \"\" \"%OLD%\" %*\r\n",
+            "(goto) 2>nul & del \"%~f0\"\r\n",
+        ),
+        staged.display(),
+        exe.display(),
+    )
+}
+
 async fn download_and_install(tag: &str) -> Result<String> {
     let target = target_triple().ok_or_else(|| anyhow::anyhow!("không có bản dựng sẵn cho nền tảng này — build từ source"))?;
     let base = format!("https://github.com/{}/releases/download/{}", REPO, tag);
@@ -329,14 +352,23 @@ async fn download_and_install(tag: &str) -> Result<String> {
     }
 
     // 3) thay binary đang chạy. Linux/macOS: rename đè lên file đang chạy vẫn hợp lệ (inode cũ còn
-    //    sống tới khi tiến trình exec).
+    //    sống tới khi tiến trình exec). Windows thì không — xem nhánh dưới.
     let exe = std::env::current_exe()?;
     let exe = std::path::PathBuf::from(exe.to_string_lossy().trim_end_matches(" (deleted)").to_string());
     if is_win {
-        // Windows khoá file đang chạy: để binary mới cạnh bản cũ.
+        // Windows khoá file .exe đang chạy: kernel trả ERROR_ACCESS_DENIED cho mọi rename/copy
+        // đè lên nó. Nên chép binary mới cạnh bản cũ và để MỘT TIẾN TRÌNH KHÁC thay file sau khi
+        // tiến trình này thoát — do_restart chạy script đó thay vì exec chính binary cũ.
         let staged = exe.with_extension("exe.new");
         std::fs::copy(&new_bin, &staged)?;
-        anyhow::bail!("đã tải {} nhưng Windows không thay được file đang chạy — đã lưu {}; khởi động lại thủ công để dùng bản mới", tag, staged.display());
+        let helper = exe.with_extension("update.bat");
+        std::fs::write(&helper, windows_update_script(&staged, &exe))?;
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Ok(format!(
+            "đã tải {} — khởi động lại để {} thay binary (Windows khoá file .exe đang chạy)",
+            tag,
+            helper.display()
+        ));
     }
     let staged = exe.with_extension("new");
     std::fs::copy(&new_bin, &staged)?;
@@ -438,6 +470,21 @@ mod tests {
 
     /// Kiểm tra SHA-256 với vector chuẩn của NIST + vài độ dài biên (rỗng, đúng 55/56/64 byte
     /// quanh mốc padding) — một lỗi padding sẽ làm mọi bản cập nhật bị từ chối.
+    /// Script Windows phải quote đường dẫn (có thể chứa khoảng trắng), move /y đè binary cũ,
+    /// lặp tới khi file không còn bị khoá, chạy lại app, rồi tự xoá.
+    #[test]
+    fn windows_update_script_shape() {
+        let staged = std::path::Path::new(r"C:\Program Files\whalegate\whalegate.exe.new");
+        let exe = std::path::Path::new(r"C:\Program Files\whalegate\whalegate.exe");
+        let bat = windows_update_script(staged, exe);
+        assert!(bat.contains(r#"set "NEW=C:\Program Files\whalegate\whalegate.exe.new""#), "NEW: {}", bat);
+        assert!(bat.contains(r#"set "OLD=C:\Program Files\whalegate\whalegate.exe""#), "OLD: {}", bat);
+        assert!(bat.contains(r#"move /y "%NEW%" "%OLD%""#), "move: {}", bat);
+        assert!(bat.contains("goto wait"), "phải lặp khi file còn bị khoá");
+        assert!(bat.contains(r#"start "" "%OLD%" %*"#), "start: {}", bat);
+        assert!(bat.contains(r#"del "%~f0""#), "del self");
+        assert!(bat.starts_with("@echo off\r\n"), "CRLF cho cmd.exe");
+    }
     #[test]
     fn sha256_matches_known_vectors() {
         assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
