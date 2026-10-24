@@ -1,6 +1,6 @@
 [package]
-name = "deepseek-harness"
-version = "0.3.0"
+name = "whalegate"
+version = "0.4.0"
 edition = "2021"
 
 [dependencies]
@@ -13,10 +13,16 @@ tokio-tungstenite = "0.24"
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 base64 = "0.22"
 futures = "0.3"
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
+# Chỉ bản release đóng gói (CI) bật: nhúng OpenSSL tĩnh → binary Linux musl chạy được trên mọi distro.
+openssl = { version = "0.10", optional = true, features = ["vendored"] }
+
+[features]
+vendored-openssl = ["dep:openssl"]
 
 # Deploy chạy target/release: PoW (Keccak) và parse DSML hưởng lợi trực tiếp từ LTO + 1 codegen unit.
 # Không dùng panic=abort: một panic trong 1 request chỉ được giết task đó, không kéo sập cả proxy (mọi acc/phiên).

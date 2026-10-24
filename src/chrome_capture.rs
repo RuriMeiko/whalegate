@@ -38,14 +38,25 @@ fn login_cdp_http() -> String {
 /// fingerprint ổn định qua các lần login để DS risk-engine không flag
 /// "Current device environment error". Xoá tay bằng env DS_RESET_LOGIN_PROFILE=1.
 pub fn login_profile_dir() -> String {
-    std::env::var("DS_LOGIN_PROFILE").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        format!("{}/.ds-harness/login-profile", home)
-    })
+    std::env::var("DS_LOGIN_PROFILE").unwrap_or_else(|_| format!("{}/login-profile", crate::server::data_dir()))
 }
 
-/// Tìm binary Chrome trên máy.
+/// Tìm binary Chrome trên máy: DS_CHROME_BIN → đường dẫn cài mặc định (macOS/Windows) → tên lệnh trong PATH.
 fn find_chrome_binary() -> Result<String> {
+    if let Ok(bin) = std::env::var("DS_CHROME_BIN") {
+        if !bin.trim().is_empty() { return Ok(bin); }
+    }
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let installed = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
+        "/Applications/Chromium.app/Contents/MacOS/Chromium".to_string(),
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_string(),
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe".to_string(),
+        format!(r"{}\Google\Chrome\Application\chrome.exe", local),
+    ];
+    if let Some(p) = installed.iter().find(|p| std::path::Path::new(p.as_str()).is_file()) {
+        return Ok(p.clone());
+    }
     for bin in [
         "google-chrome-stable",
         "google-chrome",
@@ -69,7 +80,7 @@ fn find_chrome_binary() -> Result<String> {
 
 /// SPAWN Chrome instance RIÊNG cho login: port CDP riêng (9777, config
 /// DS_LOGIN_CDP_PORT) để không đụng Chrome chính; profile CỐ ĐỊNH
-/// (~/.ds-harness/login-profile) để fingerprint ổn định, tránh lỗi
+/// (~/.whalegate/login-profile) để fingerprint ổn định, tránh lỗi
 /// "Current device environment error" của DS risk-engine; mở thẳng trang sign_in DS.
 /// Trả (Child process, đường dẫn profile) — caller kill Chrome khi xong (GIỮ profile).
 pub async fn spawn_login_chrome() -> Result<(std::process::Child, String)> {

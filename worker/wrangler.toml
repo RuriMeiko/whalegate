@@ -3,7 +3,7 @@ main = "ds-proxy.js"
 compatibility_date = "2024-09-01"
 
 # Set qua dashboard hoặc `wrangler secret put`:
-#   UPSTREAMS    : ["https://ds-harness-1.example","https://ds-harness-2.example"]
+#   UPSTREAMS    : ["https://wg1.example","https://wg2.example"]
 #   WORKER_TOKEN : mật khẩu bearer client phải gửi
 
 # Nếu có KV namespace (free tier 1 namespace OK):

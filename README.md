@@ -52,6 +52,7 @@
 | 🧵 **Stateful** | Continues the same web conversation and sends only the new messages, so long agent loops stay fast and cheap |
 | 🔐 **Proof-of-work** | Built-in solver for `DeepSeekHashV1`, with optional prefetch for the next request |
 | 🌐 **Session capture** | Log in once in Chrome. The gateway grabs the token and cookies over CDP and refreshes the cookies every 5 minutes |
+| 📦 **One-line install** | Prebuilt static binaries for Linux (x86_64/arm64), macOS and Windows. The installer starts the gateway on login and configures dsh |
 | 📊 **Dashboard** | Accounts, live logs, token usage with "what this would cost on the API", latency p50/p90, and settings with graceful restart |
 
 ---
@@ -129,42 +130,67 @@ sequenceDiagram
 
 ## Quick start
 
-**Requirements:** Rust ≥ 1.75. Linux is tested. macOS and Windows should run, but the Chrome/CDP helpers may need tweaking. Chrome or Chromium is optional and only used for automatic session capture.
+### Install (recommended)
 
-```bash
-git clone https://github.com/RuriMeiko/whalegate.git
-cd whalegate
-cargo build --release          # → target/release/deepseek-harness
-
-DS_PORT=8790 ./target/release/deepseek-harness serve
-# dashboard: http://127.0.0.1:8790/
+**Linux / macOS**
+```sh
+curl -fsSL https://raw.githubusercontent.com/RuriMeiko/whalegate/main/install.sh | sh
 ```
 
-### Run in the background (systemd --user)
+**Windows** (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/RuriMeiko/whalegate/main/install.ps1 | iex
+```
+
+```mermaid
+flowchart LR
+    I["install script"] --> D["download binary<br/>for your OS/CPU<br/>+ verify SHA-256"]
+    D --> S["start in background<br/>+ on every login"]
+    S --> C{"dsh installed?"}
+    C -- yes --> W["write dsh config<br/>(provider, model, PTC)"]
+    C -- no --> O
+    W --> O["open http://127.0.0.1:8790/<br/>→ add an account"]
+```
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Binary | `~/.local/bin/whalegate` | `~/.local/bin/whalegate` | `%LOCALAPPDATA%\whalegate\whalegate.exe` |
+| Runs via | `systemd --user` unit `whalegate` | launchd agent `io.github.rurimeiko.whalegate` | hidden Startup entry |
+| Logs | `journalctl --user -u whalegate -f` | `~/Library/Logs/whalegate.log` | dashboard → **log** |
+
+Installer options are environment variables: `WHALEGATE_VERSION=v0.4.0`, `WHALEGATE_PORT=8790`, `WHALEGATE_NO_SERVICE=1` (binary only), `WHALEGATE_NO_DSH=1`. Re-running the installer upgrades in place. Prefer to click? Grab an archive from [Releases](https://github.com/RuriMeiko/whalegate/releases) and run `whalegate` (or double-click `whalegate.exe`).
+
+### Build from source
+
+Requires Rust ≥ 1.75.
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/ds-harness.service ~/.config/systemd/user/
-# the unit assumes the repo lives at ~/ds-harness — edit WorkingDirectory/ExecStart if you cloned elsewhere
-systemctl --user daemon-reload
-systemctl --user enable --now ds-harness
-journalctl --user -u ds-harness -f
+git clone https://github.com/RuriMeiko/whalegate.git ~/whalegate
+cd ~/whalegate
+cargo build --release          # → target/release/whalegate
+./target/release/whalegate     # dashboard: http://127.0.0.1:8790/
+
+# background service for a source checkout at ~/whalegate
+mkdir -p ~/.config/systemd/user && cp deploy/whalegate.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now whalegate
 ```
 
 ### CLI
 
 | Command | What it does |
 |---|---|
-| `deepseek-harness serve` | Run the gateway (default) |
-| `deepseek-harness whoami` | Print the current user for the first stored account |
-| `deepseek-harness chat "<prompt>"` | Send one raw prompt and dump the SSE stream |
-| `deepseek-harness chatraw "<prompt>" <thinking> <search>` | Same, with DeepThink and search toggles, for debugging |
+| `whalegate` / `whalegate serve` | Run the gateway (default) |
+| `whalegate setup-dsh [--preset ptc\|standard] [--profile <dir>] [--url <base>] [--context <tokens>]` | Point dsh at this gateway |
+| `whalegate version` | Print the version |
+| `whalegate whoami` | Print the current user for the first stored account |
+| `whalegate chat "<prompt>"` | Send one raw prompt and dump the SSE stream |
+| `whalegate chatraw "<prompt>" <thinking> <search>` | Same, with DeepThink and search toggles, for debugging |
 
 ---
 
 ## Adding accounts
 
-Accounts are stored in `~/.ds-harness/accounts.json`, which you can override with `DS_ACCOUNTS_PATH`. That file holds **live session tokens**: never commit or share it.
+Accounts are stored in `~/.whalegate/accounts.json`, which you can override with `DS_ACCOUNTS_PATH`. Upgrading from ds-harness moves `~/.ds-harness` there automatically. That file holds **live session tokens**: never commit or share it.
 
 ### Option 1: Chrome login (recommended)
 
@@ -441,9 +467,9 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DS_PORT` | `8787` | Listen port (binds `127.0.0.1`; the sample unit uses `8790`) |
+| `DS_PORT` | `8790` | Listen port (always binds `127.0.0.1`) |
 | `DS_API_KEY` | – | If set, `/v1/*` requires `Authorization: Bearer <key>` |
-| `DS_ACCOUNTS_PATH` | `~/.ds-harness/accounts.json` | Account store. Settings, usage and samples live next to it |
+| `DS_ACCOUNTS_PATH` | `~/.whalegate/accounts.json` | Account store. Settings, usage and samples live next to it |
 | ⚙️ `DS_STATEFUL` | `1` | Continue web conversations and send deltas only |
 | ⚙️ `DS_POW_PREFETCH` | `1` | Fetch and solve the next PoW ahead of time |
 | ⚙️ `DS_DEFAULT_EFFORT` | `none` | Effort when the client doesn't specify one |
@@ -460,7 +486,7 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `DS_MAX_IMAGE_MB` | `20` | Maximum size per image |
 | `DS_READ_TIMEOUT_SECS` | `120` | Socket read timeout (restart required) |
 | `DS_CHROME_BIN` | auto | Chrome/Chromium path for login |
-| `DS_LOGIN_CDP_PORT` / `DS_LOGIN_PROFILE` | `9777` / `~/.ds-harness/login-profile` | Dedicated login Chrome |
+| `DS_LOGIN_CDP_PORT` / `DS_LOGIN_PROFILE` | `9777` / `~/.whalegate/login-profile` | Dedicated login Chrome |
 | `DS_RESET_LOGIN_PROFILE` | – | `1` wipes the login profile before opening |
 | `DS_CN_HOLIDAYS` | – | Extra Chinese holidays (`YYYY-MM-DD,…`) for peak-price math |
 | `DS_DEBUG_SSE` | `0` | Dump raw SSE to `/tmp/ds_debug_sse.log` |
@@ -481,6 +507,7 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `GET` | `/api/stats` · `/api/usage` | Pool state (in-flight, cooldowns, stateful hit rate) / usage, cost and latency |
 | `GET` | `/api/logs` · `/api/logs/stream` | Logs as JSON / SSE |
 | `GET` / `POST` | `/api/settings` | Read or update settings (`null` resets a key) |
+| `GET` / `POST` | `/api/dsh` | dsh status / write the dsh config (`{"preset": "ptc" \| "standard"}`) |
 | `GET` / `POST` | `/api/restart` | Status / `{"mode": "idle" \| "now" \| "cancel"}` |
 
 > [!IMPORTANT]
@@ -490,16 +517,47 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 
 ## Using with dsh (PTC mode)
 
-dsh (`@deepseek-ai/dsh`) reads its model list from the profile's patch file, not from `/v1/models`. One script sets everything up. It is idempotent and backs up the file to `.bak.<timestamp>` first:
+dsh (`@deepseek-ai/dsh`, on Linux, macOS and Windows) reads its model list from the profile's patch file, not from `/v1/models`. whalegate writes that file for you. Use either:
 
-```bash
-deploy/setup-dsh.sh                                  # ~/.dsh/profiles/web → http://127.0.0.1:8790/v1
-deploy/setup-dsh.sh ~/.dsh/profiles/web http://host:8790/v1
-DS_CONTEXT_TOKENS=300000 deploy/setup-dsh.sh         # smaller window → earlier compaction
-DSH_PRESET=standard deploy/setup-dsh.sh              # keep the classic agent preset
+- **Dashboard → dsh → Configure** (choose PTC or standard), or
+- **`whalegate setup-dsh`** (`--preset standard` for the classic preset). The installers run this automatically when dsh is present.
+
+Either way the config is idempotent, backs up `cordis.patch.yml` to `.bak.<timestamp>`, and touches nothing else in the file:
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      whalegate:
+        api: openai-completions
+        baseURL: http://127.0.0.1:8790/v1
+        headers: { Authorization: Bearer whalegate-local }   # DS_API_KEY if you set one
+        compat: { supportsDeveloperRole: false, supportsReasoningEffort: true, supportsUsageInStreaming: true }
+        models:
+          - id: deepseek-web
+            contextWindow: 337000        # derived, see below
+            maxTokens: 32768
+            input: [text, image]
+            reasoningEfforts: { off: none, low: auto, max: max }
+- id: agent-default-model
+  config: { provider: whalegate, model: deepseek-web }
+- id: agent-preset-registry
+  config: { selectedDefault: ptc }
 ```
 
-The script adds a `ds-harness` provider with the `deepseek-web` model (images, 500K context, usage in stream, efforts `off→none`, `low→auto`, `max→max`), makes it the default model, and selects the **PTC** agent preset for new sessions. If the gateway has `DS_API_KEY`, set `DS_HARNESS_API_KEY` in `~/.dsh/.env`. It requires PyYAML.
+- **The key goes straight into `headers`.** dsh's OpenAI transport refuses to send a request without a credential, even to a keyless local server. Writing it inline means there's no `apiKeyEnv` or `.env` to set, which also fixes `no credential for provider route`.
+- **`contextWindow` is chosen so history never overflows.** dsh compacts at 80% of the window, while whalegate has to trim history itself once a prompt passes `DS_PROMPT_MAX_CHARS` (1.2M characters). Assuming a worst case of ~4 characters per token plus 10% headroom for the tool spec, the window is `DS_PROMPT_MAX_CHARS × 0.9 ÷ 4 ÷ 0.8`, capped by `DS_CONTEXT_TOKENS`. That gives ≈337K by default, so dsh always summarizes before the gateway would cut anything. Change *Prompt cap* on the dashboard and run the setup again to follow it.
+
+```mermaid
+flowchart LR
+    A["history grows"] --> B{"≥ 80% of contextWindow?<br/>(≈270K tokens)"}
+    B -- "yes" --> C["dsh summarizes old turns<br/>(clean, lossless log)"]
+    B -- "no" --> D["send as is"]
+    C --> D
+    D --> E{"prompt > DS_PROMPT_MAX_CHARS?"}
+    E -- "never reached<br/>with the derived window" --> F["DeepSeek web"]
+    E -. "only if misconfigured" .-> G["gateway trims old tool results / turns"]
+```
 
 **Why PTC (Programmatic Tool Calling)?** Instead of one schema per tool, the model sees a single `run_code` tool plus a generated TypeScript SDK, and writes one program that chains many tools:
 
@@ -553,15 +611,18 @@ src/
 ├── pow.rs             Keccak-f[1600] + DeepSeekHashV1 proof-of-work
 ├── chrome_capture.rs  CDP login, tab capture, cookie refresh
 ├── settings.rs        dashboard settings (saved → env → default)
+├── setup_dsh.rs       `whalegate setup-dsh` + dashboard dsh button (cross-platform config writer)
 ├── usage.rs           token accounting, live API pricing, latency
 ├── logbuf.rs          in-memory log ring for the live log view
 └── ui.html            dashboard (embedded in the binary)
-deploy/                systemd unit, dsh setup script
+deploy/                systemd unit for source checkouts, dsh setup wrapper
+install.sh, install.ps1 one-line installers (Linux/macOS, Windows)
+.github/workflows/     release pipeline: static musl, macOS, Windows builds → GitHub release
 worker/                Cloudflare Worker fan-out
-docs/                  README assets
+docs/                  README assets, release notes
 ```
 
-Malformed tool-call outputs are saved to `~/.ds-harness/samples.jsonl`. Replay them against the current parser with:
+Malformed tool-call outputs are saved to `~/.whalegate/samples.jsonl`. Replay them against the current parser with:
 
 ```bash
 cargo test --release replay_samples -- --ignored --nocapture
@@ -578,7 +639,8 @@ The `DeepSeekHashV1` PoW is SHA3-256 without round 0 of keccak-f, ported 1:1 fro
 - Tool calls arrive in one chunk when the model finishes the block, not as streamed argument deltas.
 - Sampling controls (`temperature`, `top_p`, `max_tokens`, `stop`, `response_format`) have no web equivalent.
 - No embeddings endpoint.
-- Chrome/CDP helpers are only reliable on a Linux desktop.
+- Chrome/CDP login is tested on Linux. macOS and Windows builds find Chrome in its standard locations (or `DS_CHROME_BIN`), but are less exercised.
+- Release binaries aren't code-signed, so macOS Gatekeeper and Windows SmartScreen may ask once.
 
 ---
 

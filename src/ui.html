@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>rurimeiko-ds-api/rust</title>
+<title>whalegate</title>
 <style>
   :root {
     --bg: #ebe4d3; --ink: #1d1b17; --mute: #5f5846; --hair: #cfc5ad;
@@ -159,9 +159,10 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>rurimeiko-ds-api<span class="sl">/rust</span></h1>
+    <h1>whalegate<span class="sl">/rust</span></h1>
     <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
     <button class="sm" onclick="openLog()">log</button>
+    <button class="sm" onclick="openDsh()">dsh</button>
     <button class="sm" onclick="openSettings()">cài đặt</button>
   </header>
 
@@ -207,6 +208,25 @@
       <button class="ghost sm" id="btnScan" onclick="captureAll()">Quét tab Chrome</button>
       <span class="sp"></span>
       <button class="ghost sm" id="btnBuild" onclick="buildProfile()">Build profile</button>
+    </div>
+  </div>
+</div>
+
+<!-- cấu hình dsh trỏ về gateway này -->
+<div id="dshModal" class="modal" onclick="if(event.target===this)closeModal('dshModal')">
+  <div class="dlg">
+    <div class="top"><h2>Cấu hình dsh</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('dshModal')">×</button></div>
+    <div class="inner">
+      <p>Ghi provider <b>whalegate</b> vào profile dsh trên máy này (Linux, macOS, Windows), đặt <b>DeepSeek Web</b> làm model mặc định. File cũ được backup trước khi sửa.</p>
+      <table><tbody id="dshInfo"></tbody></table>
+      <p class="sub" style="margin-top:10px">Cửa sổ ngữ cảnh báo cho dsh được tính từ <i>Trần prompt</i>: dsh tự nén ở 80% cửa sổ, nên luôn nén trước khi gateway phải cắt lịch sử.</p>
+      <div class="btns" style="margin-top:10px">
+        <select id="dshPreset" aria-label="Agent preset" style="flex:1;min-width:0">
+          <option value="ptc">PTC — model viết 1 chương trình gọi nhiều tool (ít lượt request)</option>
+          <option value="standard">standard — mỗi bước một tool-call</option>
+        </select>
+        <button class="solid" id="btnDsh" onclick="dshApply()">Cấu hình</button>
+      </div>
     </div>
   </div>
 </div>
@@ -536,6 +556,29 @@ let CFG = [], PENDING = {}, BUSY = false;
 const eff = (c) => (c.key in PENDING ? PENDING[c.key] : c.value);
 
 function openSettings() { openModal('setModal'); loadCfg(); }
+
+function openDsh() { openModal('dshModal'); dshLoad(); }
+async function dshLoad() {
+  const body = $('dshInfo'); body.textContent = '';
+  try {
+    const d = await (await fetch('/api/dsh')).json();
+    const row = (k, v) => { const tr = el('tr'); tr.append(el('td', null, k), el('td', null, v)); body.append(tr); };
+    row('Profile', d.found ? d.profile : d.profile + ' — chưa có (cài dsh rồi mở 1 lần)');
+    row('Trạng thái', d.configured ? 'đã trỏ về gateway này' : d.base_url ? 'đang trỏ ' + d.base_url : 'chưa cấu hình');
+    row('Base URL', d.expected.base_url);
+    row('Cửa sổ ngữ cảnh', fmtTok(d.expected.context_window) + ' token' + (d.context_window && d.context_window !== d.expected.context_window ? ' (hiện ' + fmtTok(d.context_window) + ')' : ''));
+    $('btnDsh').disabled = !d.found;
+  } catch (e) { say(e.message, 'err'); }
+}
+async function dshApply() {
+  const b = $('btnDsh'); b.disabled = true;
+  try {
+    const d = await post('/api/dsh', {preset: $('dshPreset').value});
+    if (!d.ok) return say(d.error, 'err');
+    say(d.changed ? 'Đã cấu hình dsh — mở lại dsh rồi chọn "DeepSeek Web (whalegate, free)"' : 'dsh đã đúng cấu hình, không cần đổi', 'ok');
+    dshLoad();
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
 function closeSettings() {
   if (Object.keys(PENDING).length && !BUSY) {
     const d = document.querySelector('#setModal .dlg'); d.classList.remove('shake'); void d.offsetWidth; d.classList.add('shake');

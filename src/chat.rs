@@ -134,7 +134,7 @@ fn repair_note(raw: &str, why: &str) -> String {
     )
 }
 
-/// Lưu mẫu response lỗi (parse trượt / call sai schema) vào ~/.ds-harness/samples.jsonl để biến thành test sau này.
+/// Lưu mẫu response lỗi (parse trượt / call sai schema) vào ~/.whalegate/samples.jsonl để biến thành test sau này.
 fn save_sample(kind: &str, raw: &str) {
     use std::io::Write;
     let path = std::path::Path::new(&creds_dir()).join("samples.jsonl");

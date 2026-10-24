@@ -7,9 +7,13 @@ mod chrome_capture;
 mod pow;
 mod server;
 mod settings;
+mod setup_dsh;
 mod usage;
 
 use anyhow::Result;
+
+/// Cổng mặc định khi không đặt DS_PORT (trùng với unit systemd, script cài và setup-dsh).
+pub(crate) const DEFAULT_PORT: u16 = 8790;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,11 +48,13 @@ async fn main() -> Result<()> {
             let port: u16 = std::env::var("DS_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(8787);
+                .unwrap_or(DEFAULT_PORT);
             server::run(port).await?;
         }
+        "setup-dsh" => setup_dsh::run(&args[2..])?,
+        "version" | "--version" | "-V" => println!("whalegate {}", env!("CARGO_PKG_VERSION")),
         _ => {
-            eprintln!("usage: deepseek-harness [serve|whoami|chat <prompt>]");
+            eprintln!("usage: whalegate [serve | setup-dsh [--help] | version | whoami | chat <prompt>]");
         }
     }
     Ok(())

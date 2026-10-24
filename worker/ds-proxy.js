@@ -1,4 +1,4 @@
-// DeepSeek Harness Worker Proxy — xoay nhiều upstream harness instance (multi-IP/multi-VPS)
+// whalegate Worker Proxy — xoay nhiều upstream whalegate instance (multi-IP/multi-VPS)
 // + cache-simple + rate-limit nhẹ. Free plan 100k req/ngày.
 //
 // Env vars (cấu hình trong dashboard):

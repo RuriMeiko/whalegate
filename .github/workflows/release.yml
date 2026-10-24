@@ -1,0 +1,104 @@
+# Build prebuilt binaries for every platform and attach them to a draft GitHub release.
+# Trigger: push a tag like v0.4.0 (release notes come from docs/releases/<tag>.md).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: fully static (musl + vendored OpenSSL) → runs on any distro
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, tool: cross }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04, tool: cross }
+          - { target: aarch64-apple-darwin, os: macos-14, tool: cargo }
+          - { target: x86_64-apple-darwin, os: macos-14, tool: cargo }
+          - { target: x86_64-pc-windows-msvc, os: windows-2022, tool: cargo }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.tool == 'cross'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (cross, static)
+        if: matrix.tool == 'cross'
+        run: cross build --release --locked --target ${{ matrix.target }} --features vendored-openssl
+
+      - name: Build
+        if: matrix.tool == 'cargo'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name=whalegate-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/release/whalegate README.md LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "whalegate-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/whalegate.exe", README.md, LICENSE "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse -Force "dist/$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whalegate-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums + installers
+        run: |
+          cp install.sh install.ps1 dist/
+          cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Release notes
+        id: notes
+        run: |
+          f="docs/releases/${GITHUB_REF_NAME}.md"
+          [ -f "$f" ] || f=docs/releases/latest.md
+          echo "path=$f" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: whalegate ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.path }}
+          files: dist/*

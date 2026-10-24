@@ -20,10 +20,42 @@ pub(crate) fn creds_dir() -> String {
 }
 
 fn creds_path() -> String {
-    std::env::var("DS_ACCOUNTS_PATH").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        format!("{}/.ds-harness/accounts.json", home)
-    })
+    std::env::var("DS_ACCOUNTS_PATH").unwrap_or_else(|_| format!("{}/accounts.json", data_dir()))
+}
+
+/// Thư mục dữ liệu ~/.whalegate. Lần đầu chạy sau khi đổi tên: chuyển nguyên ~/.ds-harness sang (account, cài đặt,
+/// usage, profile Chrome login) và để lại symlink tên cũ cho script/công cụ ngoài còn trỏ vào đó.
+pub(crate) fn data_dir() -> String {
+    static DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    // test không được đụng (hay migrate) dữ liệu thật của người dùng
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("whalegate-test-{}", std::process::id())).to_string_lossy().into_owned();
+    #[allow(unreachable_code)]
+    DIR.get_or_init(|| {
+        let home = std::path::PathBuf::from(home_dir());
+        let (new, old) = (home.join(".whalegate"), home.join(".ds-harness"));
+        let old_is_real_dir = std::fs::symlink_metadata(&old).map(|m| m.is_dir()).unwrap_or(false);
+        if !new.exists() && old_is_real_dir {
+            match std::fs::rename(&old, &new) {
+                Ok(()) => {
+                    #[cfg(unix)]
+                    let _ = std::os::unix::fs::symlink(&new, &old);
+                    eprintln!("[data] moved {} → {}", old.display(), new.display());
+                }
+                Err(e) => {
+                    eprintln!("[data] could not move {} ({}), keep using it", old.display(), e);
+                    return old.to_string_lossy().into_owned();
+                }
+            }
+        }
+        new.to_string_lossy().into_owned()
+    }).clone()
+}
+
+/// Thư mục home: HOME (Linux/macOS) hoặc USERPROFILE (Windows); không có thì thư mục tạm của hệ điều hành.
+pub(crate) fn home_dir() -> String {
+    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned())
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -315,6 +347,29 @@ async fn api_restart(State(st): State<Arc<AppState>>, Json(r): Json<RestartReq>)
     (StatusCode::OK, Json(json!({"ok": true})))
 }
 
+async fn api_dsh_status() -> Json<Value> {
+    Json(crate::setup_dsh::status())
+}
+
+#[derive(Deserialize, Default)]
+struct DshReq { preset: Option<String> }
+
+/// Nút "Cấu hình dsh": ghi provider whalegate vào profile dsh của máy đang chạy gateway.
+async fn api_dsh_setup(body: Option<Json<DshReq>>) -> Json<Value> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let mut o = crate::setup_dsh::Opts::defaults();
+    if let Some(p) = req.preset.filter(|p| matches!(p.as_str(), "ptc" | "standard")) { o.preset = p; }
+    let profile = crate::setup_dsh::default_profile();
+    match tokio::task::spawn_blocking(move || crate::setup_dsh::configure(&profile, &o)).await {
+        Ok(Ok(r)) => {
+            crate::elog!("[dsh] cấu hình {} (backup: {:?})", r.file.display(), r.backup);
+            Json(json!({"ok": true, "changed": r.backup.is_some() || r.created, "file": r.file.to_string_lossy()}))
+        }
+        Ok(Err(e)) => Json(json!({"ok": false, "error": format!("{:#}", e)})),
+        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
+    }
+}
+
 async fn api_restart_status(State(st): State<Arc<AppState>>) -> Json<Value> {
     use std::sync::atomic::Ordering::SeqCst;
     Json(json!({"pending": RESTART_PENDING.load(SeqCst), "since": RESTART_SINCE.load(SeqCst), "in_flight": total_in_flight(&st), "boot": boot_id()}))
@@ -347,11 +402,22 @@ async fn do_restart(st: Arc<AppState>) {
         }
     }
     let _ = tokio::time::timeout(std::time::Duration::from_secs(4), futures::future::join_all(jobs)).await;
-    use std::os::unix::process::CommandExt;
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().trim_end_matches(" (deleted)").to_string()).unwrap_or_else(|_| "deepseek-harness".into());
-    let err = std::process::Command::new(exe).args(std::env::args().skip(1)).exec();
-    crate::elog!("[restart] exec lỗi: {err} — thoát để systemd khởi động lại");
-    std::process::exit(1);
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().trim_end_matches(" (deleted)").to_string()).unwrap_or_else(|_| "whalegate".into());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(exe).args(std::env::args().skip(1)).exec();
+        crate::elog!("[restart] exec lỗi: {err} — thoát để systemd khởi động lại");
+        std::process::exit(1);
+    }
+    // không có exec (Windows): chạy tiến trình mới rồi thoát; cổng được nhả khi tiến trình cũ kết thúc
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = std::process::Command::new(exe).args(std::env::args().skip(1)).spawn() {
+            crate::elog!("[restart] không chạy lại được: {e}");
+        }
+        std::process::exit(0);
+    }
 }
 
 async fn api_settings_get() -> Json<Value> {
@@ -2029,7 +2095,7 @@ async fn api_models() -> Json<Value> {
     Json(json!({
         "object": "list",
         "data": [{
-            "id": "deepseek-web", "object": "model", "owned_by": "deepseek-harness",
+            "id": "deepseek-web", "object": "model", "owned_by": "whalegate",
             "input_modalities": ["text", "image"],
             "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
             "reasoning_efforts": ["none", "auto", "max"],
@@ -2410,6 +2476,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/logs/stream", get(api_logs_stream))
         .route("/api/settings", get(api_settings_get).post(api_settings_set))
         .route("/api/restart", get(api_restart_status).post(api_restart))
+        .route("/api/dsh", get(api_dsh_status).post(api_dsh_setup))
         .route("/v1/chat/completions", post(crate::chat::api_chat_completions))
         .route("/v1/models", get(api_models))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB — prompt dài (256K+ token)
@@ -2425,8 +2492,19 @@ pub async fn run(port: u16) -> Result<()> {
     tokio::spawn(auto_refresh_loop(st));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    println!("deepseek-harness listening on http://{}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // thử lại vài giây: lúc tự khởi động lại trên Windows tiến trình cũ có thể chưa kịp nhả cổng
+    let mut tries = 0;
+    let listener = loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => break l,
+            Err(e) if tries < 20 && e.kind() == std::io::ErrorKind::AddrInUse => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => return Err(anyhow::anyhow!("không mở được cổng {}: {} — đổi cổng bằng DS_PORT", port, e)),
+        }
+    };
+    println!("whalegate listening on http://{} — open it in a browser to add accounts", addr);
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }
@@ -2715,12 +2793,12 @@ mod xml_tests {
 
 #[cfg(test)]
 mod sample_replay {
-    /// Chạy lại các mẫu hỏng đã lưu (~/.ds-harness/samples.jsonl) qua parser hiện tại:
+    /// Chạy lại các mẫu hỏng đã lưu (~/.whalegate/samples.jsonl) qua parser hiện tại:
     ///   cargo test --release replay_samples -- --ignored --nocapture
     #[test]
     #[ignore]
     fn replay_samples() {
-        let p = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".ds-harness/samples.jsonl");
+        let p = std::path::PathBuf::from(super::home_dir()).join(".whalegate/samples.jsonl");
         let (mut ok, mut bad) = (0, 0);
         for l in std::fs::read_to_string(p).unwrap_or_default().lines() {
             let v: serde_json::Value = match serde_json::from_str(l) { Ok(v) => v, Err(_) => continue };

@@ -363,7 +363,7 @@ impl DsClient {
         // debug: dump toàn bộ SSE raw (env DS_DEBUG_SSE=1)
         if crate::settings::boolean("DS_DEBUG_SSE") {
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                .open("/tmp/ds_debug_sse.log") {
+                .open(std::env::temp_dir().join("ds_debug_sse.log")) {
                 use std::io::Write;
                 let _ = writeln!(f, "===== {} =====\n{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), sse);
             }
