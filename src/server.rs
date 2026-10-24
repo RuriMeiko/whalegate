@@ -934,13 +934,40 @@ pub(crate) fn note_session_use(a: &mut Account, sid: &str) {
     }
 }
 
-/// Pipeline parse tool-call DUY NHẤT (cả stream lẫn non-stream): chuẩn hoá biến thể rồi thử lần lượt các parser.
+/// Mọi parser, không lọc theo tools — chỉ còn dùng cho test/replay mẫu; runtime đi qua `extract_tool_calls`.
+#[cfg(test)]
 pub(crate) fn parse_any_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
     let n = normalize_dsml(text);
     parse_dsml_tool_calls(&n)
         .or_else(|| parse_dsml_json_tool_calls(&n))
         .or_else(|| parse_dsml_nested_tool_calls(&n))
         .or_else(|| parse_xml_tool_call(&n).map(|(b, c)| (b, vec![c])))
+}
+
+fn tool_names(tools: &[Value]) -> Vec<&str> {
+    tools.iter().filter_map(|t| t.get("function").unwrap_or(t).get("name").and_then(|n| n.as_str())).collect()
+}
+
+/// Marker chắc chắn là ý định gọi tool (DSML / <invoke). Marker yếu (<bash, <tool, <function, <parameter)
+/// hay gặp trong văn xuôi/code mẫu: parse trượt thì trả nguyên văn, không retry.
+pub(crate) fn has_strong_tool_marker(buf: &str) -> bool {
+    has_tool_marker(buf) && (buf.contains("DSML") || buf.contains("<dsml") || buf.contains("<invoke"))
+}
+
+/// Tool-call từ output của model, CHỈ khi request có tools. DSML chuẩn nhận ở bất kỳ đâu; các dạng dự phòng
+/// (JSON, nested, XML) chỉ nhận khi khối nằm cuối câu trả lời và mọi tên tool đều có trong `tools` —
+/// tránh biến HTML/XML/ví dụ `<bash command=…/>` trong văn xuôi thành lệnh thật.
+pub(crate) fn extract_tool_calls(text: &str, tools: &[Value]) -> Option<(String, Vec<DsmlToolCall>)> {
+    let names = tool_names(tools);
+    if names.is_empty() { return None; }
+    let n = normalize_dsml(text);
+    if let Some(r) = parse_dsml_tool_calls(&n) { return Some(r); }
+    let at_end = n.trim_end_matches(|c: char| c.is_whitespace() || c == '`').ends_with('>');
+    if !at_end { return None; }
+    parse_dsml_json_tool_calls(&n)
+        .or_else(|| parse_dsml_nested_tool_calls(&n))
+        .or_else(|| parse_xml_tool_call(&n).map(|(b, c)| (b, vec![c])))
+        .filter(|(_, calls)| calls.iter().all(|c| names.contains(&c.name.as_str())))
 }
 
 /// id tool-call duy nhất — `call_0` lặp ở mọi step làm model/client nhầm result ↔ call.
@@ -967,13 +994,84 @@ pub(crate) fn infer_tool_name(tools: &Option<Vec<Value>>, call: &mut DsmlToolCal
     if let Some((_, n)) = best { call.name = n; }
 }
 
-/// Call có hợp lệ theo schema không (tên có trong tools, đủ `required` kiểu string/số…). Lỗi → đừng gửi cho client.
+/// Call có hợp lệ theo schema không (tên có trong tools, args khớp JSON Schema). Lỗi → đừng gửi cho client.
+#[cfg(test)]
 pub(crate) fn call_is_valid(tools: &Option<Vec<Value>>, call: &DsmlToolCall) -> bool {
-    let Some(tools) = tools else { return true };
-    let Some(f) = tools.iter().filter_map(|t| t.get("function")).find(|f| f.get("name").and_then(|n| n.as_str()) == Some(call.name.as_str())) else { return false };
-    let Ok(Value::Object(args)) = serde_json::from_str::<Value>(&call.arguments) else { return false };
-    f.pointer("/parameters/required").and_then(|r| r.as_array())
-        .is_none_or(|r| r.iter().filter_map(|x| x.as_str()).all(|k| args.contains_key(k)))
+    tools.as_ref().is_none_or(|t| call_problem(t, call).is_none())
+}
+
+/// Lỗi tool-call đã parse (None = hợp lệ). Thông điệp đưa thẳng vào lời nhắc sửa lỗi cho model khi retry.
+pub(crate) enum CallProblem { UnknownTool, BadArgs(String) }
+
+pub(crate) fn call_problem(tools: &[Value], call: &DsmlToolCall) -> Option<CallProblem> {
+    let Some(f) = tools.iter().filter_map(|t| t.get("function")).find(|f| f.get("name").and_then(|n| n.as_str()) == Some(call.name.as_str())) else {
+        return Some(CallProblem::UnknownTool);
+    };
+    let args = match serde_json::from_str::<Value>(&call.arguments) {
+        Ok(v @ Value::Object(_)) => v,
+        _ => return Some(CallProblem::BadArgs("arguments must be a JSON object".into())),
+    };
+    let Some(schema) = f.get("parameters") else { return None };
+    let mut errs = Vec::new();
+    check_schema(schema, &args, "", &mut errs);
+    if errs.is_empty() { None } else { Some(CallProblem::BadArgs(errs.join("; "))) }
+}
+
+/// Validator JSON Schema tối giản (type/enum/required/properties/items/anyOf/oneOf) — đủ cho schema tool thường gặp.
+/// Không xét additionalProperties: client nào cũng tự bỏ qua khoá thừa, bắt lỗi chỉ tổ tốn retry.
+fn check_schema(sch: &Value, v: &Value, path: &str, errs: &mut Vec<String>) {
+    if errs.len() >= 5 { return; }
+    let at = if path.is_empty() { "arguments".to_string() } else { format!("\"{}\"", path) };
+    if let Some(alts) = sch.get("anyOf").or_else(|| sch.get("oneOf")).and_then(|a| a.as_array()) {
+        let ok = alts.iter().any(|a| { let mut e = Vec::new(); check_schema(a, v, path, &mut e); e.is_empty() });
+        if !ok { errs.push(format!("{} matches none of the allowed shapes", at)); }
+        return;
+    }
+    let type_ok = |t: &str| match t {
+        "string" => v.is_string(),
+        "integer" => v.is_i64() || v.is_u64(),
+        "number" => v.is_number(),
+        "boolean" => v.is_boolean(),
+        "array" => v.is_array(),
+        "object" => v.is_object(),
+        "null" => v.is_null(),
+        _ => true,
+    };
+    let types: Vec<&str> = match sch.get("type") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str()).collect(),
+        _ => vec![],
+    };
+    if !types.is_empty() && !types.iter().any(|t| type_ok(t)) {
+        errs.push(format!("{} must be {}", at, types.join(" or ")));
+        return;
+    }
+    if let Some(en) = sch.get("enum").and_then(|e| e.as_array()) {
+        if !en.contains(v) {
+            errs.push(format!("{} must be one of {}", at, en.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("|")));
+        }
+    }
+    if let Value::Object(obj) = v {
+        for r in sch.get("required").and_then(|r| r.as_array()).into_iter().flatten().filter_map(|r| r.as_str()) {
+            if !obj.contains_key(r) {
+                let p = if path.is_empty() { r.to_string() } else { format!("{}.{}", path, r) };
+                errs.push(format!("missing required \"{}\"", p));
+            }
+        }
+        if let Some(props) = sch.get("properties").and_then(|p| p.as_object()) {
+            for (k, x) in obj {
+                if let Some(ps) = props.get(k) {
+                    let p = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
+                    check_schema(ps, x, &p, errs);
+                }
+            }
+        }
+    }
+    if let (Value::Array(items), Some(isch)) = (v, sch.get("items")) {
+        for (i, x) in items.iter().enumerate() {
+            check_schema(isch, x, &format!("{}[{}]", path, i), errs);
+        }
+    }
 }
 
 /// Điền các property string bắt buộc mà model bỏ sót (vd bash.description) theo schema tools của client,
@@ -990,6 +1088,14 @@ pub(crate) fn fill_required_args(tools: &Option<Vec<Value>>, call: &mut DsmlTool
     if let Some(props) = params.get("properties").and_then(|p| p.as_object()) {
         for (k, sch) in props {
             let ty = sch.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+            // ngược lại: string="false" cho tham số chuỗi (vd content: 123) → về chuỗi
+            if ty == "string" {
+                if let Some(v @ (Value::Number(_) | Value::Bool(_))) = args.get(k) {
+                    let s = v.to_string();
+                    args.insert(k.clone(), Value::String(s));
+                }
+                continue;
+            }
             if !matches!(ty, "integer" | "number" | "boolean" | "array" | "object") { continue; }
             if let Some(Value::String(sv)) = args.get(k) {
                 if let Ok(v) = serde_json::from_str::<Value>(sv.trim()) {
@@ -1656,6 +1762,11 @@ pub(crate) struct ChatRequest {
     // OpenAI tools schema từ client (dsh) — render thành hướng dẫn DSML cho model
     #[serde(default)]
     pub(crate) tools: Option<Vec<Value>>,
+    // "auto" | "none" | "required" | {"type":"function","function":{"name":X}} (kiểu OpenAI)
+    #[serde(default)]
+    pub(crate) tool_choice: Option<Value>,
+    #[serde(default)]
+    pub(crate) parallel_tool_calls: Option<bool>,
 }
 
 // Render tool specs (OpenAI schema) thành hướng dẫn gọi DSML — NHẤN MẠNH: mọi parameter
@@ -1695,7 +1806,15 @@ pub(crate) fn render_tools_spec(tools: &Option<Vec<Value>>) -> String {
                     .unwrap_or_default();
                 let req_mark = if required.contains(&k.as_str()) { ", REQUIRED" } else { "" };
                 let pd = v.get("description").and_then(|x| x.as_str()).unwrap_or("");
-                out.push_str(&format!("  param {} ({}{}{}): {}\n", k, ty, en, req_mark, pd));
+                let def = v.get("default").map(|d| format!(" (default {})", d)).unwrap_or_default();
+                out.push_str(&format!("  param {} ({}{}{}): {}{}\n", k, ty, en, req_mark, pd, def));
+                // kiểu lồng (mảng object, object có properties, anyOf…): in schema rút gọn, không thì model đoán bừa hình dạng
+                let nested = ["items", "properties", "anyOf", "oneOf", "allOf", "$ref"].iter().any(|key| v.get(*key).is_some());
+                if nested {
+                    let mut s = v.clone();
+                    if let Some(o) = s.as_object_mut() { o.remove("description"); o.remove("default"); }
+                    out.push_str(&format!("    schema: {}\n", s));
+                }
             }
         }
     }
@@ -1822,17 +1941,15 @@ pub(crate) fn render_msg(m: &Value, call_names: &std::collections::HashMap<Strin
         }
         // tool result message
         "tool" => {
+            // kết quả rỗng (mkdir, touch… thành công) vẫn phải hiện, không thì model tưởng chưa chạy và gọi lại
             let text = render_content(m);
-            if text.is_empty() {
-                None
-            } else {
-                // kèm tên tool + id để model khớp result ↔ call (tránh lặp call)
-                let tcid = m["tool_call_id"].as_str().unwrap_or("");
-                match call_names.get(tcid) {
-                    Some(n) => Some(format!("tool_result ({}) [{}]: {}", n, tcid, text)),
-                    None if tcid.is_empty() => Some(format!("tool_result: {}", text)),
-                    None => Some(format!("tool_result [{}]: {}", tcid, text)),
-                }
+            let text = if text.trim().is_empty() { "(no output)".to_string() } else { text };
+            // kèm tên tool + id để model khớp result ↔ call (tránh lặp call)
+            let tcid = m["tool_call_id"].as_str().unwrap_or("");
+            match call_names.get(tcid) {
+                Some(n) => Some(format!("tool_result ({}) [{}]: {}", n, tcid, text)),
+                None if tcid.is_empty() => Some(format!("tool_result: {}", text)),
+                None => Some(format!("tool_result [{}]: {}", tcid, text)),
             }
         }
         _ => {
@@ -2661,5 +2778,76 @@ mod edit_account_tests {
     fn edit_route_accepts_partial_body() {
         let e: super::EditAccount = serde_json::from_str(r#"{"label":"mới"}"#).unwrap();
         assert!(e.token.is_none() && e.label.as_deref() == Some("mới"));
+    }
+}
+
+#[cfg(test)]
+mod tool_gate_tests {
+    use super::*;
+
+    fn bash_tools() -> Vec<Value> {
+        vec![json!({"type":"function","function":{"name":"bash","parameters":{"type":"object",
+            "properties":{"command":{"type":"string"},"description":{"type":"string"}},"required":["command"]}}})]
+    }
+
+    #[test]
+    fn prose_html_is_not_a_tool_call() {
+        let t = bash_tools();
+        assert!(extract_tool_calls("Dùng HTML: <div><span>hi</span></div> là xong.", &t).is_none());
+        assert!(extract_tool_calls("Ví dụ XML:\n<config><port>8080</port></config>", &t).is_none(), "tag không phải tên tool");
+        // ví dụ lệnh giữa văn xuôi: không được thành lệnh thật
+        assert!(extract_tool_calls("Lệnh: <bash command=\"rm -rf build\"/> trong tài liệu", &t).is_none());
+        // không có tools → không bao giờ có tool-call
+        assert!(extract_tool_calls("<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>", &[]).is_none());
+    }
+
+    #[test]
+    fn fallback_formats_still_parse_at_end() {
+        let t = bash_tools();
+        let (b, c) = extract_tool_calls("Xem repo.\n\n<bash> <command>pwd</command> </bash>", &t).expect("xml cuối câu");
+        assert_eq!((b.as_str(), c[0].name.as_str()), ("Xem repo.", "bash"));
+        assert!(extract_tool_calls("x\n<bash command=\"ls\" description=\"L\" />\n", &t).is_some());
+        assert!(!has_strong_tool_marker("dùng <function> trong TS") && has_strong_tool_marker("<｜｜DSML｜｜ calls>"));
+    }
+
+    #[test]
+    fn schema_validation_nested() {
+        let tools = vec![json!({"function":{"name":"todo","parameters":{"type":"object","required":["items"],"properties":{
+            "items":{"type":"array","items":{"type":"object","required":["text","status"],"properties":{
+                "text":{"type":"string"},"status":{"enum":["todo","done"]}}}}}}}})];
+        let call = |a: &str| DsmlToolCall { name: "todo".into(), arguments: a.into() };
+        assert!(call_problem(&tools, &call(r#"{"items":[{"text":"a","status":"done"}]}"#)).is_none());
+        let Some(CallProblem::BadArgs(e)) = call_problem(&tools, &call(r#"{"items":[{"text":"a","status":"later"},{"status":"todo"}]}"#)) else { panic!() };
+        assert!(e.contains("items[0].status") && e.contains("missing required \"items[1].text\""), "{}", e);
+        assert!(matches!(call_problem(&tools, &DsmlToolCall { name: "nope".into(), arguments: "{}".into() }), Some(CallProblem::UnknownTool)));
+        let Some(CallProblem::BadArgs(e)) = call_problem(&tools, &call(r#"{"items":"x"}"#)) else { panic!() };
+        assert!(e.contains("must be array"), "{}", e);
+    }
+
+    #[test]
+    fn nested_schema_is_rendered() {
+        let tools = Some(vec![json!({"function":{"name":"todo","parameters":{"properties":{
+            "items":{"type":"array","description":"list","items":{"type":"object","properties":{"done":{"type":"boolean"}}}},
+            "n":{"type":"integer","default":3}},"required":["items"]}}})]);
+        let s = render_tools_spec(&tools);
+        assert!(s.contains("schema: {\"items\":{\"properties\":{\"done\":{\"type\":\"boolean\"}}"), "{}", s);
+        assert!(s.contains("(default 3)"));
+    }
+
+    #[test]
+    fn string_param_coerced_back_to_string() {
+        let tools = Some(vec![json!({"function":{"name":"write","parameters":{"properties":{"content":{"type":"string"}}}}})]);
+        let mut c = DsmlToolCall { name: "write".into(), arguments: r#"{"content":123}"#.into() };
+        fill_required_args(&tools, &mut c);
+        assert_eq!(c.arguments, r#"{"content":"123"}"#);
+    }
+
+    #[test]
+    fn empty_tool_result_is_kept() {
+        let msgs = vec![
+            json!({"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"mkdir x\"}"}}]}),
+            json!({"role":"tool","tool_call_id":"c1","content":""}),
+        ];
+        assert!(messages_to_prompt(&msgs).contains("tool_result (bash) [c1]: (no output)"));
     }
 }

@@ -72,7 +72,66 @@ struct ChatCtx {
     images: Vec<Image>,
     thinking: bool,
     search: bool,
-    tools: Option<Vec<Value>>,
+    tools: Option<Vec<Value>>, // tools đang cho phép gọi (None khi không có tools hoặc tool_choice="none")
+    choice: ToolChoice,
+    parallel: bool,
+}
+
+/// `tool_choice` kiểu OpenAI (nhận thêm dạng Anthropic {"type":"any"} / {"type":"tool","name":X}).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ToolChoice { Auto, None, Required, Named(String) }
+
+impl ToolChoice {
+    pub(crate) fn from_req(v: Option<&Value>) -> ToolChoice {
+        match v {
+            Some(Value::String(s)) => match s.as_str() {
+                "none" => ToolChoice::None,
+                "required" | "any" => ToolChoice::Required,
+                _ => ToolChoice::Auto,
+            },
+            Some(o @ Value::Object(_)) => {
+                let name = o.pointer("/function/name").or_else(|| o.get("name")).and_then(|n| n.as_str());
+                match (name, o.get("type").and_then(|t| t.as_str())) {
+                    (Some(n), _) => ToolChoice::Named(n.to_string()),
+                    (None, Some("any")) => ToolChoice::Required,
+                    (None, Some("none")) => ToolChoice::None,
+                    _ => ToolChoice::Auto,
+                }
+            }
+            _ => ToolChoice::Auto,
+        }
+    }
+
+    fn must_call(&self) -> bool { matches!(self, ToolChoice::Required | ToolChoice::Named(_)) }
+}
+
+/// Dòng chỉ thị cuối prompt cho lượt này (cả prompt đủ lẫn delta stateful): spec tools giữ nguyên để
+/// không đổi tools_hash / không phá phiên web, chỉ thị mới quyết định có/không/bắt buộc gọi tool.
+pub(crate) fn tool_directive(choice: &ToolChoice, parallel: bool) -> String {
+    let mut d = match choice {
+        ToolChoice::Auto => String::new(),
+        ToolChoice::None => "For this reply do NOT call any tool; answer in plain text.".into(),
+        ToolChoice::Required => "For this reply you MUST call at least one tool.".into(),
+        ToolChoice::Named(n) => format!("For this reply you MUST call the tool \"{}\".", n),
+    };
+    if !parallel && *choice != ToolChoice::None {
+        if !d.is_empty() { d.push(' '); }
+        d.push_str("Call at most one tool in this reply.");
+    }
+    if d.is_empty() { d } else { format!("system: {}\n", d) }
+}
+
+/// Lời nhắc sửa lỗi cho lượt retry: đưa lại output hỏng + lý do, model sửa đúng chỗ thay vì đoán lại từ đầu
+/// (retry mù với cùng prompt hay ra lại y hệt).
+fn repair_note(raw: &str, why: &str) -> String {
+    let raw = raw.trim();
+    let shown = head_chars(raw, 6000);
+    let cut = if shown.len() < raw.len() { "\n…[cut]" } else { "" };
+    format!(
+        "assistant: {}{}\nsystem: Your previous reply could not be used: {}. Reply again with a corrected tool-call block \
+         in the exact format from # Tools (every REQUIRED parameter, correct JSON types, only listed tool names).\n",
+        shown, cut, why
+    )
 }
 
 /// Lưu mẫu response lỗi (parse trượt / call sai schema) vào ~/.ds-harness/samples.jsonl để biến thành test sau này.
@@ -473,6 +532,10 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
         let mut failed: Vec<String> = Vec::new();
         let mut last_err: Option<String> = None;
         let mut finished = false;
+        let tools: &[Value] = ctx.tools.as_deref().unwrap_or(&[]);
+        let tools_on = !tools.is_empty();
+        // lỗi do model (call sai/không parse được/thiếu call bắt buộc): lượt sau gửi kèm lời nhắc sửa, không cần đổi acc
+        let mut repair: Option<String> = None;
 
         for attempt in 0..3usize {
             if attempt > 0 {
@@ -481,7 +544,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                 let dl = Instant::now() + Duration::from_secs(queue_wait_secs().min(60));
                 match acquire(&st, &failed, None, dl).await {
                     Ok(l) => {
-                        if Some(&l.acc_id) == prev.as_ref() {
+                        if Some(&l.acc_id) == prev.as_ref() && repair.is_none() {
                             // pool chỉ còn đúng acc này → chờ DS hồi (rate-limit mềm ~8-10s)
                             tokio::time::sleep(Duration::from_secs(8)).await;
                         }
@@ -499,11 +562,15 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
 
             // lượt đầu + có hội thoại đang nằm trong phiên web → chỉ gửi phần mới nối vào parent
             let stateful_attempt = attempt == 0 && ctx.cont.is_some();
+            let full_prompt: std::borrow::Cow<str> = match repair.take() {
+                Some(r) => format!("{}{}", ctx.prompt, r).into(),
+                None => ctx.prompt.as_str().into(),
+            };
             let (prompt_used, images_used, sid_used, parent_used): (&str, &Vec<Image>, Option<String>, Option<i64>) = match (&ctx.cont, stateful_attempt) {
                 (Some(cp), true) => (cp.delta_prompt.as_str(), &cp.delta_images, Some(cp.sid.clone()), Some(cp.parent_id)),
                 // bắt đầu hội thoại stateful: phiên riêng (None → tạo mới); không dùng phiên chung của acc
-                _ if ctx.reg.is_some() => (ctx.prompt.as_str(), &ctx.images, None, None),
-                _ => (ctx.prompt.as_str(), &ctx.images, l.thread_sid.clone(), None),
+                _ if ctx.reg.is_some() => (&full_prompt, &ctx.images, None, None),
+                _ => (&full_prompt, &ctx.images, l.thread_sid.clone(), None),
             };
             let own_session = stateful_attempt || ctx.reg.is_some();
             // retry sau khi lượt nối tiếp hỏng: bỏ phiên cũ (ngữ cảnh không còn đáng tin)
@@ -565,9 +632,15 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             let mut msg_id: Option<i64> = None;
             let mut real_usage: Option<u64> = None;
             let mut attempt_done = false;
+            // đã gặp marker trong content: giữ hết phần còn lại tới Done, khỏi quét lại buffer mỗi chunk (O(n²) với args lớn)
+            let mut in_block = false;
 
             while let Some(ev) = rx.recv().await {
                 match ev {
+                    StreamEv::Thinking(t) if !tools_on => {
+                        think_est += est_tokens(&t);
+                        if !t.is_empty() { yield Out::Reasoning(t); }
+                    }
                     StreamEv::Thinking(t) => {
                         think_est += est_tokens(&t);
                         // model hay nháp khối tool-call trong lúc nghĩ → không để markup lọt ra client
@@ -588,14 +661,17 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         has_content = true;
                         resp_text.push_str(&t);
                         full_text.push_str(&t);
-                        // chỉ flush phần chắc chắn là prose; giữ đuôi nghi marker / toàn bộ từ marker trở đi
-                        let cut = safe_flush_len(&resp_text);
+                        if in_block { continue; }
+                        // không có tools: không có gì để giữ lại. Có tools: chỉ flush phần chắc chắn là prose,
+                        // giữ đuôi nghi marker / toàn bộ từ marker trở đi
+                        let cut = if tools_on { safe_flush_len(&resp_text) } else { resp_text.len() };
                         if cut > 0 {
                             let head: String = resp_text[..cut].to_string();
                             yielded_len += head.chars().count();
                             resp_text.drain(..cut);
                             yield Out::Content(head);
                         }
+                        in_block = tools_on && has_tool_marker(&resp_text);
                     }
                     StreamEv::MsgId(m) => { msg_id = Some(m); }
                     StreamEv::Usage(u) => { real_usage = Some(u); crate::elog!("[usage] accumulated_token_usage={} (stateful={})", u, stateful_attempt); }
@@ -616,24 +692,40 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         // phần ngữ cảnh đã nằm sẵn trong phiên web (nối tiếp) = cached
                         let cached_tokens = if stateful_attempt { (prior_tokens as i64).min(prompt_tokens) } else { 0 };
 
-                        if let Some((before, mut calls)) = parse_any_tool_calls(&full_text) {
+                        let parsed = if tools_on { extract_tool_calls(&full_text, tools) } else { None };
+                        let last = attempt == 2;
+                        if let Some((before, mut calls)) = parsed {
+                            for c in calls.iter_mut() { infer_tool_name(&ctx.tools, c); fill_required_args(&ctx.tools, c); }
+                            if let ToolChoice::Named(n) = &ctx.choice { calls.retain(|c| &c.name == n); }
+                            if !ctx.parallel { calls.truncate(1); }
+                            // call sai schema / tool lạ: retry trong harness kèm lời nhắc sửa (2-3s) thay vì bắt client trả lỗi rồi model sửa (1 step)
+                            let mut problems: Vec<String> = calls.iter().filter_map(|c| match call_problem(tools, c)? {
+                                CallProblem::UnknownTool => Some(format!("tool \"{}\" does not exist", c.name)),
+                                CallProblem::BadArgs(e) => Some(format!("{}: {}", c.name, e)),
+                            }).collect();
+                            if calls.is_empty() {
+                                if let ToolChoice::Named(n) = &ctx.choice { problems.push(format!("you must call \"{}\"", n)); }
+                            }
+                            if !last && !problems.is_empty() {
+                                let why = problems.join("; ");
+                                save_sample("invalid", &full_text);
+                                crate::elog!("[toolcall-invalid] attempt {} {} — retry kèm lời nhắc; raw={:?}", attempt, why, full_text);
+                                last_err = Some(format!("tool-call không hợp lệ ({})", why));
+                                repair = Some(repair_note(&full_text, &why));
+                            } else {
+                            // lượt cuối: tool lạ thì bỏ (client không chạy được); sai args thì vẫn trả như API thật —
+                            // client báo lỗi về cho model sửa ở step sau
+                            calls.retain(|c| !matches!(call_problem(tools, c), Some(CallProblem::UnknownTool)));
+                            if calls.is_empty() {
+                                last_err = Some(format!("model trả tool-call không dùng được: {}", problems.join("; ")));
+                                break;
+                            }
                             // prose trước khối tool-call mà chưa stream (before đã trim)
                             let before_chars = before.chars().count();
                             if before_chars > yielded_len {
                                 let rem: String = before.chars().skip(yielded_len).collect();
                                 if !rem.is_empty() { yield Out::Content(rem); }
                             }
-                            for c in calls.iter_mut() { infer_tool_name(&ctx.tools, c); fill_required_args(&ctx.tools, c); }
-                            // call sai schema (thiếu tham số bắt buộc/tool lạ): retry trong harness (2-3s) thay vì bắt client trả lỗi rồi model sửa (1 step)
-                            let bad = calls.iter().find(|c| !call_is_valid(&ctx.tools, c)).map(|c| c.name.clone());
-                            if let (Some(n), true) = (bad, attempt < 2) {
-                                save_sample("invalid", &full_text);
-                                crate::elog!("[toolcall-invalid] attempt {} tool={:?} args thiếu/không hợp lệ — retry; raw={:?}", attempt, n, full_text);
-                                last_err = Some(format!("tool-call không hợp lệ ({})", n));
-                                // lỗi do model: không phạt acc, NHƯNG phải loại acc khỏi lượt sau —
-                                // chạy lại đúng acc + đúng prompt gần như chắc chắn ra lại đúng output hỏng
-                                failed.push(acc_id.clone());
-                            } else {
                             ok_acc(&st, &acc_id, &sid, !own_session).await;
                             let ids: Vec<String> = calls.iter().map(|_| new_call_id()).collect();
                             register_conv(&st, &ctx, stateful_attempt, &acc_id, &sid, msg_id, &ids, full_text.chars().count(), real_usage.unwrap_or(0));
@@ -661,15 +753,20 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             last_err = Some("DeepSeek web trả stream rỗng (có thể bị throttle)".into());
                             fail_acc(&st, &acc_id, "empty", true).await;
                             failed.push(acc_id.clone());
-                        } else if has_tool_marker(&full_text) {
-                            // có marker tool-call nhưng parse trượt: log nguyên văn để vá, retry; lỗi do model nên không phạt acc
+                        } else if tools_on && has_strong_tool_marker(&full_text) {
+                            // có marker tool-call nhưng parse trượt: log nguyên văn để vá, retry kèm lời nhắc; lỗi do model nên không phạt acc
                             save_sample("unparsed", &full_text);
                             crate::elog!("[toolcall-unparsed] attempt {}; raw={:?}", attempt, full_text);
                             // lượt cuối vẫn trượt → báo lỗi rõ (không trả completion rỗng làm client 'Stopped' im lặng)
                             last_err = Some("tool-call không parse được sau 3 lần thử".into());
                             fail_acc(&st, &acc_id, "unparsed", false).await;
-                            // đổi acc cho lượt sau: lỗi do model nhưng cùng acc + cùng prompt dễ lặp lại y hệt
-                            failed.push(acc_id.clone());
+                            repair = Some(repair_note(&full_text, "the tool-call block is malformed and could not be parsed"));
+                        } else if tools_on && ctx.choice.must_call() && !last {
+                            // tool_choice bắt buộc mà model trả văn xuôi
+                            crate::elog!("[toolcall-required] attempt {} không có tool-call — retry kèm lời nhắc", attempt);
+                            last_err = Some("tool_choice bắt buộc gọi tool nhưng model không gọi".into());
+                            let why = match &ctx.choice { ToolChoice::Named(n) => format!("you must call the tool \"{}\"", n), _ => "you must call at least one tool".into() };
+                            repair = Some(repair_note(&full_text, &why));
                         } else {
                             if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
                             ok_acc(&st, &acc_id, &sid, !own_session).await;
@@ -784,10 +881,23 @@ pub(crate) async fn api_chat_completions(
         && !is_title_req;
     let search = req.search.unwrap_or(false);
 
+    let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
+    let choice = if has_tools { ToolChoice::from_req(req.tool_choice.as_ref()) } else { ToolChoice::Auto };
+    if let ToolChoice::Named(n) = &choice {
+        let known = req.tools.iter().flatten().any(|t| t.pointer("/function/name").and_then(|x| x.as_str()) == Some(n.as_str()));
+        if !known {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({"error": {
+                "message": format!("tool_choice names unknown tool '{}'", n), "type": "invalid_request_error", "param": "tool_choice"}}))));
+        }
+    }
+    let parallel = req.parallel_tool_calls.unwrap_or(true);
+    let directive = if has_tools { tool_directive(&choice, parallel) } else { String::new() };
+    let active_tools = if has_tools && choice != ToolChoice::None { req.tools.clone() } else { None };
+
     let max_chars: usize = crate::settings::uint("DS_PROMPT_MAX_CHARS") as usize;
     let msgs = fit_messages(&req.messages, max_chars);
     let tools_hdr = render_tools_spec(&req.tools);
-    let prompt = format!("{}\n{}\n", tools_hdr, messages_to_prompt(&msgs));
+    let prompt = format!("{}\n{}\n{}", tools_hdr, messages_to_prompt(&msgs), directive);
     crate::elog!(
         "[req] model={} stream={} tools={} msgs={}→{} prompt_chars={} thinking={}",
         model_name, stream, req.tools.as_ref().map_or(0, |t| t.len()), req.messages.len(), msgs.len(),
@@ -832,6 +942,7 @@ pub(crate) async fn api_chat_completions(
             let usable = acc_creds.is_some() && conv.tools_hash == th && conv.chars <= conv_max_chars();
             let delta = messages_to_prompt_from(&req.messages, k);
             if usable && !delta.trim().is_empty() {
+                let delta = format!("{}\n{}", delta, directive);
                 // cần đúng acc đã giữ phiên; bận quá 4s thì thôi, gửi đủ ở acc khác
                 match acquire(&st, &[], Some(&conv.acc_id), Instant::now() + Duration::from_secs(4)).await {
                     Ok(l) => {
@@ -864,7 +975,7 @@ pub(crate) async fn api_chat_completions(
     let images = collect_images_cached(&msgs, 4, &mut img_cache).await;
     if !images.is_empty() { crate::elog!("[req] {} ảnh đính kèm", images.len()); }
     let reg = if stateful_on { Some(RegPlan { pf_n: pf[n], tools_hash: th }) } else { None };
-    let ctx = ChatCtx { prompt, cont, reg, images, thinking, search, tools: req.tools.clone() };
+    let ctx = ChatCtx { prompt, cont, reg, images, thinking, search, tools: active_tools, choice, parallel };
     let mut outs = Box::pin(run_chat(st, ctx, lease));
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
@@ -971,6 +1082,25 @@ mod tests {
             let e = est_tokens(&t) as f64;
             assert!((e / real - 1.0).abs() < 0.25, "{}: ước {} vs thật {}", name, e, real);
         }
+    }
+
+    #[test]
+    fn tool_choice_parsing_and_directive() {
+        assert_eq!(ToolChoice::from_req(None), ToolChoice::Auto);
+        assert_eq!(ToolChoice::from_req(Some(&json!("none"))), ToolChoice::None);
+        assert_eq!(ToolChoice::from_req(Some(&json!("required"))), ToolChoice::Required);
+        assert_eq!(ToolChoice::from_req(Some(&json!({"type":"function","function":{"name":"bash"}}))), ToolChoice::Named("bash".into()));
+        assert_eq!(ToolChoice::from_req(Some(&json!({"type":"any"}))), ToolChoice::Required);
+        assert_eq!(tool_directive(&ToolChoice::Auto, true), "");
+        assert!(tool_directive(&ToolChoice::Named("bash".into()), false).contains("\"bash\"") );
+        assert!(tool_directive(&ToolChoice::None, false).contains("do NOT call"));
+        assert!(!tool_directive(&ToolChoice::None, false).contains("at most one"));
+    }
+
+    #[test]
+    fn repair_note_quotes_output_and_reason() {
+        let n = repair_note("  <｜｜DSML｜｜ calls>broken ", "bash: missing required \"command\"");
+        assert!(n.starts_with("assistant: <｜｜DSML｜｜ calls>broken\nsystem: ") && n.contains("missing required"));
     }
 
     #[test]
