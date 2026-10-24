@@ -2,11 +2,9 @@
 
 
 use anyhow::Result;
-use futures::StreamExt;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json, Response};
-use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -109,7 +107,7 @@ impl AccStats {
     }
 
     fn burst_active(&self, now: u64) -> bool {
-        now.saturating_sub(self.burst_window_start) < Self::burst_window() as u64
+        now.saturating_sub(self.burst_window_start) < Self::burst_window()
             && self.burst_count >= Self::burst_limit()
     }
 
@@ -139,7 +137,7 @@ impl AccStats {
     }
 
     pub(crate) fn record_call(&mut self, now: u64) {
-        if now.saturating_sub(self.burst_window_start) >= Self::burst_window() as u64 {
+        if now.saturating_sub(self.burst_window_start) >= Self::burst_window() {
             self.burst_window_start = now;
             self.burst_count = 0;
         }
@@ -183,24 +181,84 @@ pub fn load_creds() -> Result<Creds> {
     })
 }
 
+/// Đọc store. File hỏng KHÔNG được nuốt im lặng: đổi tên thành `.corrupt-<ts>` để giữ lại
+/// (có thể cứu token bằng tay) rồi mới trả store rỗng — nếu không, lần ghi kế tiếp sẽ
+/// ghi đè vĩnh viễn file hỏng bằng `{"accounts":[]}`.
 pub(crate) async fn load_store() -> Store {
-    tokio::fs::read_to_string(creds_path())
-        .await
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let path = creds_path();
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Store::default(),
+        Err(e) => {
+            eprintln!("[store] không đọc được {}: {} — dùng store rỗng", path, e);
+            return Store::default();
+        }
+    };
+    match serde_json::from_str::<Store>(&raw) {
+        Ok(s) => s,
+        Err(e) => {
+            let bak = format!("{}.corrupt-{}", path, now());
+            eprintln!("[store] {} hỏng ({}): giữ bản sao tại {} — dùng store rỗng", path, e, bak);
+            if let Err(e2) = tokio::fs::rename(&path, &bak).await {
+                eprintln!("[store] không đổi tên được file hỏng: {}", e2);
+            }
+            Store::default()
+        }
+    }
 }
 
-pub(crate) async fn save_store(store: &Store) -> Result<()> {
-    tokio::fs::create_dir_all(std::path::Path::new(&creds_path()).parent().unwrap()).await?;
-    let json = serde_json::to_string_pretty(store)?;
-    tokio::fs::write(creds_path(), &json).await?;
-    #[cfg(unix)]
+/// Ghi store xuống đĩa NGUYÊN TỬ: ghi file tạm cùng thư mục rồi `rename` (rename trên cùng
+/// filesystem là atomic) → crash/đầy đĩa giữa chừng không bao giờ để lại accounts.json cụt.
+async fn write_store_atomic(store: &Store) -> Result<()> {
+    let path = std::path::PathBuf::from(creds_path());
+    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    tokio::fs::create_dir_all(&dir).await?;
+    let json = serde_json::to_vec_pretty(store)?;
+    let tmp = dir.join(format!(".accounts.json.tmp-{}", std::process::id()));
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(creds_path(), std::fs::Permissions::from_mode(0o600))?;
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // đặt quyền trên file tạm TRƯỚC khi ghi dữ liệu → không có cửa sổ nào file chứa token ở 0644
+            f.set_permissions(std::fs::Permissions::from_mode(0o600)).await?;
+        }
+        use tokio::io::AsyncWriteExt;
+        f.write_all(&json).await?;
+        f.sync_all().await?;
     }
+    tokio::fs::rename(&tmp, &path).await?;
     Ok(())
+}
+
+/// Ghi ngay (dùng cho thao tác quản trị: thêm/xoá acc, login, capture). Chỉ ghi nếu store
+/// đã đổi so với bản ghi gần nhất, và không giữ lock của store trong lúc chờ I/O.
+pub(crate) async fn flush_store(st: &Arc<AppState>) {
+    let _serialize = st.save_lock.lock().await;
+    let ver = st.store_ver.load(std::sync::atomic::Ordering::Acquire);
+    if ver <= st.store_written.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let snap = st.store.read().await.clone();
+    match write_store_atomic(&snap).await {
+        Ok(()) => st.store_written.store(ver, std::sync::atomic::Ordering::Release),
+        Err(e) => eprintln!("[store] ghi accounts.json lỗi: {:#}", e),
+    }
+}
+
+/// Đánh dấu store đã đổi. Đường nóng (mỗi lượt chat) chỉ gọi hàm này: flusher nền gom
+/// nhiều thay đổi trong ~1s rồi ghi một lần, thay vì 2-3 lần ghi file mỗi request.
+pub(crate) fn mark_dirty(st: &Arc<AppState>) {
+    st.store_ver.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    st.store_dirty.notify_one();
+}
+
+async fn store_flusher(st: Arc<AppState>) {
+    loop {
+        st.store_dirty.notified().await;
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        flush_store(&st).await;
+    }
 }
 
 /// Một hội thoại đang nằm trong phiên web: gửi tiếp chỉ cần phần mới + parent_message_id.
@@ -211,14 +269,16 @@ pub(crate) struct Conv {
     pub(crate) parent_id: i64,
     pub(crate) tools_hash: u64,
     pub(crate) chars: usize,
-    pub(crate) last_used: u64,
     pub(crate) tokens: u64,
 }
 
 pub(crate) struct AppState {
     pub(crate) store: RwLock<Store>,
-    // Round-robin pointer chọn account kế tiếp
-    pub(crate) rr: std::sync::atomic::AtomicU64,
+    // Ghi store: serialize các lần ghi, đếm version để bỏ qua lần ghi không có thay đổi
+    pub(crate) save_lock: tokio::sync::Mutex<()>,
+    pub(crate) store_ver: std::sync::atomic::AtomicU64,
+    pub(crate) store_written: std::sync::atomic::AtomicU64,
+    pub(crate) store_dirty: tokio::sync::Notify,
     // acc_id -> đang xử lý 1 call (chống double-use burst khi concurrent)
     pub(crate) in_flight: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
     // đang canh 1 tab login (chặn double-start)
@@ -283,11 +343,13 @@ async fn api_add_account(
         thread_uses: 0,
         thread_parent_message_id: None,
         stats: Default::default(),
-                pool_enabled: true,
+        pool_enabled: true,
     };
     let id = acc.id.clone();
     store.accounts.push(acc);
-    save_store(&store).await.map_err(into_err)?;
+    drop(store);
+    mark_dirty(&st);
+    flush_store(&st).await;
     Ok(Json(json!({"ok": true, "id": id})))
 }
 
@@ -335,18 +397,29 @@ async fn api_toggle_pool(
             )
         })?;
     acc.pool_enabled = enabled;
-    let _ = save_store(&store).await;
+    drop(store);
+    mark_dirty(&st);
+    flush_store(&st).await;
     Ok(Json(json!({"ok": true, "id": id, "pool_enabled": enabled})))
 }
 
 async fn api_delete_account(
     State(st): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Json<Value> {    let mut store = st.store.write().await;
-    let before = store.accounts.len();
-    store.accounts.retain(|a| a.id != id);
-    let removed = before != store.accounts.len();
-    let _ = save_store(&store).await;
+) -> Json<Value> {
+    let removed = {
+        let mut store = st.store.write().await;
+        let before = store.accounts.len();
+        store.accounts.retain(|a| a.id != id);
+        before != store.accounts.len()
+    };
+    if removed {
+        // acc đã xoá: dọn luôn slot in-flight + ảnh cache để không rò rỉ theo id chết
+        st.in_flight.lk().remove(&id);
+        st.file_cache.lk().retain(|(acc_id, _), _| acc_id != &id);
+        mark_dirty(&st);
+        flush_store(&st).await;
+    }
     Json(json!({"ok": removed}))
 }
 
@@ -365,11 +438,13 @@ async fn api_reset_account(
         let old = a.thread_session_id.take();
         a.thread_uses = 0;
         let snap = (a.token.clone(), cookie_string(&a.cookies));
-        let _ = save_store(&store).await;
+        drop(store);
+        mark_dirty(&st);
+        flush_store(&st).await;
         (snap, old)
     };
     let ((token, cookies), old_sid) = acc;
-    st.file_cache.lock().unwrap().retain(|(acc_id, _), _| acc_id != &id);
+    st.file_cache.lk().retain(|(acc_id, _), _| acc_id != &id);
     let alive = match DsClient::new(token, cookies) {
         Ok(c) => {
             if let Some(sid) = old_sid { let _ = c.delete_session(&sid).await; }
@@ -377,12 +452,15 @@ async fn api_reset_account(
         }
         Err(_) => false,
     };
-    let mut store = st.store.write().await;
-    if let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) {
-        a.last_verified = Some(now());
-        a.last_status = Some(if alive { "ok (reset)".into() } else { "invalid token — cần login lại".into() });
+    {
+        let mut store = st.store.write().await;
+        if let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) {
+            a.last_verified = Some(now());
+            a.last_status = Some(if alive { "ok (reset)".into() } else { "invalid token — cần login lại".into() });
+        }
     }
-    let _ = save_store(&store).await;
+    mark_dirty(&st);
+    flush_store(&st).await;
     Json(json!({"ok": true, "token_alive": alive}))
 }
 
@@ -403,12 +481,15 @@ async fn api_verify_account(
     };
     let v = c.users_current().await.unwrap_or_else(|_| json!({"code": -1}));
     let ok = v["code"].as_i64() == Some(0);
-    let mut store = st.store.write().await;
-    if let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) {
-        a.last_verified = Some(now());
-        a.last_status = Some(if ok { "ok".into() } else { format!("invalid: {}", v["msg"]) });
+    {
+        let mut store = st.store.write().await;
+        if let Some(a) = store.accounts.iter_mut().find(|a| a.id == id) {
+            a.last_verified = Some(now());
+            a.last_status = Some(if ok { "ok".into() } else { format!("invalid: {}", v["msg"]) });
+        }
     }
-    let _ = save_store(&store).await;
+    mark_dirty(&st);
+    flush_store(&st).await;
     Json(json!({"ok": ok, "msg": v["msg"]}))
 }
 
@@ -418,7 +499,6 @@ async fn api_verify_account(
 pub(crate) struct DsmlToolCall {
     pub(crate) name: String,
     pub(crate) arguments: String, // JSON object string
-    pub(crate) before: String,    // content trước khối DSML
 }
 
 
@@ -468,8 +548,7 @@ fn parse_xml_tool_call(text: &str) -> Option<(String, DsmlToolCall)> {
                         return Some((before, DsmlToolCall {
                             name: tag.to_string(),
                             arguments: serde_json::Value::Object(args).to_string(),
-                            before: String::new(),
-                        }));
+                                                    }));
                     }
                 }
             }
@@ -537,13 +616,10 @@ fn normalize_dsml(text: &str) -> String {
         }
         // ' tool_calls>' variants → ' calls>'
         let from2 = format!("<｜｜DSML｜｜ {}>", tag);
-        let to2 = if tag == "tool_calls" || tag == "function_calls" {
-            format!("<｜｜DSML｜｜ calls>")
-        } else if tag == "tool_call" || tag == "function_call" {
-            format!("<｜｜DSML｜｜ calls>")
-        } else {
+        if !matches!(tag, "tool_calls" | "function_calls" | "tool_call" | "function_call") {
             continue
-        };
+        }
+        let to2 = "<｜｜DSML｜｜ calls>".to_string();
         while out.contains(&from2) {
             out = out.replace(&from2, &to2);
         }
@@ -563,14 +639,26 @@ fn normalize_dsml(text: &str) -> String {
 /// - đã thấy marker tool-call (DSML 1/2 gạch, <invoke, <bash...) → flush tới '<' mở marker, giữ phần sau
 /// - không marker nhưng đuôi có '<' chưa có '>' (tag stream dở, hoặc "｜" rời) → giữ từ '<' đó
 /// - còn lại → flush hết
-const TOOL_MARKERS: [&str; 7] = ["DSML", "<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function"];
+const TOOL_MARKERS: [&str; 6] = ["<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function"];
+
+/// Vị trí đầu tiên của marker tool-call. "DSML" trần chỉ tính khi đứng ngay sau '<' (kèm tối đa vài thanh '｜'/'|'),
+/// để văn xuôi nhắc tới "DSML" (vd bản tóm tắt compaction) không bị coi là tool-call hỏng.
+fn find_tool_marker(buf: &str) -> Option<usize> {
+    let plain = TOOL_MARKERS.iter().filter_map(|k| buf.find(k)).min();
+    let mut dsml = None;
+    for (i, _) in buf.match_indices("DSML") {
+        let head = buf[..i].trim_end_matches(|c| c == '｜' || c == '|');
+        if head.ends_with('<') { dsml = Some(head.len() - 1); break; }
+    }
+    match (plain, dsml) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) }
+}
 
 pub(crate) fn has_tool_marker(buf: &str) -> bool {
-    TOOL_MARKERS.iter().any(|k| buf.contains(k))
+    find_tool_marker(buf).is_some()
 }
 
 pub(crate) fn safe_flush_len(buf: &str) -> usize {
-    if let Some(m) = TOOL_MARKERS.iter().filter_map(|k| buf.find(k)).min() {
+    if let Some(m) = find_tool_marker(buf) {
         return buf[..m].rfind('<').unwrap_or(m);
     }
     match buf.rfind('<') {
@@ -635,9 +723,9 @@ pub(crate) fn infer_tool_name(tools: &Option<Vec<Value>>, call: &mut DsmlToolCal
         let Some(props) = props else { continue };
         if !args.keys().all(|k| props.contains_key(k)) { continue; }
         let req_ok = f.pointer("/parameters/required").and_then(|r| r.as_array())
-            .map_or(true, |r| r.iter().filter_map(|x| x.as_str()).all(|k| args.contains_key(k) || k == "description"));
+            .is_none_or(|r| r.iter().filter_map(|x| x.as_str()).all(|k| args.contains_key(k) || k == "description"));
         let score = args.len() * 2 + usize::from(req_ok) * 100;
-        if best.as_ref().map_or(true, |(b, _)| score > *b) { best = Some((score, name.to_string())); }
+        if best.as_ref().is_none_or(|(b, _)| score > *b) { best = Some((score, name.to_string())); }
     }
     if let Some((_, n)) = best { call.name = n; }
 }
@@ -648,7 +736,7 @@ pub(crate) fn call_is_valid(tools: &Option<Vec<Value>>, call: &DsmlToolCall) -> 
     let Some(f) = tools.iter().filter_map(|t| t.get("function")).find(|f| f.get("name").and_then(|n| n.as_str()) == Some(call.name.as_str())) else { return false };
     let Ok(Value::Object(args)) = serde_json::from_str::<Value>(&call.arguments) else { return false };
     f.pointer("/parameters/required").and_then(|r| r.as_array())
-        .map_or(true, |r| r.iter().filter_map(|x| x.as_str()).all(|k| args.contains_key(k)))
+        .is_none_or(|r| r.iter().filter_map(|x| x.as_str()).all(|k| args.contains_key(k)))
 }
 
 /// Điền các property string bắt buộc mà model bỏ sót (vd bash.description) theo schema tools của client,
@@ -704,7 +792,7 @@ fn space_dsml_tags(text: &str) -> String {
         let end = p + "｜｜DSML｜｜".len();
         out.push_str(&rest[..end]);
         rest = &rest[end..];
-        let trimmed = rest.trim_start_matches(|c| c == ':' || c == '_');
+        let trimmed = rest.trim_start_matches([':', '_']);
         if trimmed.starts_with(|c: char| c.is_ascii_alphabetic()) {
             out.push(' ');
             rest = trimmed;
@@ -798,7 +886,7 @@ pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolC
     // model bỏ thẻ mở invoke (calls → parameter… → /invoke): chèn invoke không tên, tên suy ra từ schema sau
     if let Some(pp) = norm.find("<｜｜DSML｜｜ parameter") {
         let inv = norm.find("<｜｜DSML｜｜ invoke");
-        if inv.map_or(true, |i| pp < i) && norm.contains("</｜｜DSML｜｜ invoke>") {
+        if inv.is_none_or(|i| pp < i) && norm.contains("</｜｜DSML｜｜ invoke>") {
             norm.insert_str(pp, "<｜｜DSML｜｜ invoke name=\"\">");
         }
     }
@@ -840,8 +928,7 @@ pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolC
         // các parameter: name="..." string="true"
         let mut args = serde_json::Map::new();
         let mut cursor = after_name;
-        loop {
-            let Some(pp) = cursor.find("<｜｜DSML｜｜ parameter name=\"") else { break };
+        while let Some(pp) = cursor.find("<｜｜DSML｜｜ parameter name=\"") {
             let after_p = &cursor[pp + "<｜｜DSML｜｜ parameter name=\"".len()..];
             let Some(pend) = after_p.find("\"") else { break };
             let pname = after_p[..pend].to_string();
@@ -880,8 +967,7 @@ pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolC
         calls.push(DsmlToolCall {
             name,
             arguments: serde_json::Value::Object(args).to_string(),
-            before: String::new(),
-        });
+                    });
         // tới hết invoke này
         if let Some(inv_end) = inv_end {
             rest = &after_name_full[inv_end + "</｜｜DSML｜｜ invoke>".len()..];
@@ -946,17 +1032,15 @@ fn parse_dsml_json_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)>
                     Some(DsmlToolCall {
                         name: "bash".to_string(),
                         arguments: serde_json::Value::Object(args).to_string(),
-                        before: String::new(),
-                    })
+                                            })
                 }
                 None => None,
             }
         };
         if let Some(c) = attr_call {
             calls.push(c);
-            // advance: tới '/>' hoặc '>'
-            let adv = if after[gt + 1..].starts_with("</") { gt + 1 } else { gt + 1 };
-            rest = &after[adv..];
+            // advance qua '>' của tag mở; thẻ đóng (nếu có) do vòng lặp sau xử lý
+            rest = &after[gt + 1..];
             continue;
         }
         // JSON body sau tag mở — có thể là JSON trần HOẶC bọc trong <...arguments>{...}</...>
@@ -974,11 +1058,10 @@ fn parse_dsml_json_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)>
         // vùng body có NHIỀU JSON object nối tiếp (mỗi dòng 1 call) hoặc 1 object — scan hết:
         let mut scan = body_area;
         let mut any = false;
-        loop {
-            let Some(br) = scan.find('{') else { break };
+        while let Some(br) = scan.find('{') {
             // match braces BỎ QUA nội dung JSON string (escape-aware) — command có thể chứa '{}'
             let json_str = {
-                let b = scan[br..].as_bytes();
+                let b = &scan.as_bytes()[br..];
                 let mut depth = 0i32;
                 let mut in_str = false;
                 let mut esc = false;
@@ -1033,8 +1116,7 @@ fn parse_dsml_json_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)>
                         calls.push(DsmlToolCall {
                             name,
                             arguments: args.to_string(),
-                            before: String::new(),
-                        });
+                                                    });
                         any = true;
                     }
                     continue;
@@ -1055,8 +1137,7 @@ fn parse_dsml_json_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)>
                     calls.push(DsmlToolCall {
                         name,
                         arguments: args.to_string(),
-                        before: String::new(),
-                    });
+                                            });
                     any = true;
                 }
             }
@@ -1111,7 +1192,7 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
         }
 
         // CASE B: attr command= ngay trong tag (bash/ bất kỳ) — self-closing hoặc có body
-        if let Some(cmd_part) = lower.split("command=\"").nth(1) {
+        if let Some(_cmd_part) = lower.split("command=\"").nth(1) {
             // value trong ORIGINAL tag (lowercase chỉ để detect) — dùng text gốc
             let orig_cmd = tag_full.split("command=\"").nth(1)
                 .and_then(|x| x.split('"').next()).unwrap_or("").to_string();
@@ -1120,7 +1201,7 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
                     .and_then(|x| x.split('"').next()).unwrap_or("").to_string();
                 let name = if lower.starts_with("bash") { "bash" } else {
                     // tên tag trước space/:
-                    tag_inner.split(|c| c == ' ' || c == ':' || c == '-').next().unwrap_or("bash")
+                    tag_inner.split([' ', ':', '-']).next().unwrap_or("bash")
                 };
                 let mut m = serde_json::Map::new();
                 m.insert("command".into(), serde_json::Value::String(orig_cmd));
@@ -1131,8 +1212,7 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
                 calls.push(DsmlToolCall {
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(m).to_string(),
-                    before: String::new(),
-                });
+                                    });
                 cursor += gt + 1;
                 continue;
             }
@@ -1140,7 +1220,7 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
 
         // CASE A/C: tag invoke/tool-name với name="TOOL" hoặc <tool_name>X</tool_name>
         let mut tool_name: Option<String> = None;
-        if let Some(np) = lower.find("name=\"") {
+        if let Some(_np) = lower.find("name=\"") {
             // phải là tag invoke/tool (không phải parameter name=...)
             if lower.contains("invoke") || lower.contains("tool") && !lower.contains("parameter") {
                 // value trong tag gốc
@@ -1175,8 +1255,7 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
                     calls.push(DsmlToolCall {
                         name: tool_name.unwrap(),
                         arguments: serde_json::Value::Object(m).to_string(),
-                        before: String::new(),
-                    });
+                                            });
                     cursor += gt + 1 + cl + "</tool_name>".len();
                     continue;
                 }
@@ -1188,10 +1267,10 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
             || (lower.starts_with("dsml") && !lower.contains("calls") && !lower.contains("tool_call"));
         if tool_name.is_none() && looks_tool {
             let after_tag = &rest[gt + 1..];
-            let base: String = tag_inner.split(|c: char| c == ' ' || c == ':').next().unwrap_or("").to_string();
+            let base: String = tag_inner.split([' ', ':']).next().unwrap_or("").to_string();
             let close_marker = format!("</{}", base);
             let body_len = after_tag.find(&close_marker).unwrap_or(after_tag.len());
-            let body = &after_tag[..body_len];
+            let _body = &after_tag[..body_len];
             let mut m = serde_json::Map::new();
             // value nằm GIỮA '>' và '<' close — close nằm NGOÀI body_len (body cắt trước close!)
             // → value area = after_tag (toàn bộ phần sau tag mở)
@@ -1219,8 +1298,7 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
                 calls.push(DsmlToolCall {
                     name: "bash".to_string(),
                     arguments: serde_json::Value::Object(m).to_string(),
-                    before: String::new(),
-                });
+                                    });
                 cursor += gt + 1 + body_len;
                 continue;
             }
@@ -1230,7 +1308,7 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
             let after_tag = &rest[gt + 1..];
             // body hết khi gặp tag đóng khớp (chứa '/' + cùng tên base)
             let base: String = tag_inner
-                .split(|c: char| c == ' ' || c == ':')
+                .split([' ', ':'])
                 .next().unwrap_or("").to_string();
             let close_marker = format!("</{}", base);
             let body_len = after_tag.find(&close_marker).unwrap_or(after_tag.len());
@@ -1270,8 +1348,7 @@ fn parse_dsml_nested_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>
                 calls.push(DsmlToolCall {
                     name: tn,
                     arguments: serde_json::Value::Object(m).to_string(),
-                    before: String::new(),
-                });
+                                    });
                 cursor += gt + 1 + body_len;
                 continue;
             }
@@ -1292,7 +1369,7 @@ pub(crate) struct ChatRequest {
     pub(crate) messages: Vec<Value>,
     pub(crate) stream: Option<bool>,
     // true = tạo conversation mới; false/mặc định = chat tiếp thread hiện có
-    new_thread: Option<bool>,
+    pub(crate) new_thread: Option<bool>,
     // Bật DeepThink (thinking) / Tìm kiếm thông minh (websearch). Mặc định cả hai OFF.
     pub(crate) thinking: Option<bool>,
     pub(crate) search: Option<bool>,
@@ -1438,9 +1515,8 @@ pub(crate) fn messages_to_prompt(messages: &[Value]) -> String {
     messages_to_prompt_from(messages, 0)
 }
 
-/// Render từ message thứ `start` (nhãn tool_result vẫn tra tên tool trên toàn bộ lịch sử).
-pub(crate) fn messages_to_prompt_from(messages: &[Value], start: usize) -> String {
-    // id → tên tool, lấy từ các tool_calls của assistant, để gắn nhãn tool_result
+/// id tool-call → tên tool, dùng để gắn nhãn tool_result.
+pub(crate) fn call_name_map(messages: &[Value]) -> std::collections::HashMap<String, String> {
     let mut call_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for m in messages {
         if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
@@ -1451,50 +1527,57 @@ pub(crate) fn messages_to_prompt_from(messages: &[Value], start: usize) -> Strin
             }
         }
     }
+    call_names
+}
+
+/// Render MỘT message thành đoạn prompt (None = bỏ qua). Tách riêng để `fit_messages`
+/// tính kích thước từng message một lần thay vì render lại cả danh sách sau mỗi lần cắt.
+pub(crate) fn render_msg(m: &Value, call_names: &std::collections::HashMap<String, String>) -> Option<String> {
+    let role = m["role"].as_str().unwrap_or("user");
+    match role {
+        // assistant: content + (nếu có) DSML tool calls của chính nó
+        "assistant" => {
+            let text = render_content(m);
+            let tcs = render_tool_calls(m);
+            if text.is_empty() && tcs.is_empty() {
+                None
+            } else {
+                Some(format!("assistant: {}{}", text, tcs))
+            }
+        }
+        // tool result message
+        "tool" => {
+            let text = render_content(m);
+            if text.is_empty() {
+                None
+            } else {
+                // kèm tên tool + id để model khớp result ↔ call (tránh lặp call)
+                let tcid = m["tool_call_id"].as_str().unwrap_or("");
+                match call_names.get(tcid) {
+                    Some(n) => Some(format!("tool_result ({}) [{}]: {}", n, tcid, text)),
+                    None if tcid.is_empty() => Some(format!("tool_result: {}", text)),
+                    None => Some(format!("tool_result [{}]: {}", tcid, text)),
+                }
+            }
+        }
+        _ => {
+            let text = render_content(m);
+            if text.is_empty() {
+                None
+            } else {
+                Some(format!("{}: {}", role, text))
+            }
+        }
+    }
+}
+
+/// Render từ message thứ `start` (nhãn tool_result vẫn tra tên tool trên toàn bộ lịch sử).
+pub(crate) fn messages_to_prompt_from(messages: &[Value], start: usize) -> String {
+    let call_names = call_name_map(messages);
     messages
         .iter()
         .skip(start)
-        .filter_map(|m| {
-            let role = m["role"].as_str().unwrap_or("user");
-            Some(match role {
-                // assistant: content + (nếu có) DSML tool calls của chính nó
-                "assistant" => {
-                    let text = render_content(m);
-                    let tcs = render_tool_calls(m);
-                    if text.is_empty() && tcs.is_empty() {
-                        None
-                    } else {
-                        Some(format!("assistant: {}{}", text, tcs))
-                    }
-                }
-                // tool result message
-                "tool" => {
-                    let text = render_content(m);
-                    if text.is_empty() {
-                        None
-                    } else {
-                        // kèm tên tool + id để model khớp result ↔ call (tránh lặp call)
-                        let tcid = m["tool_call_id"].as_str().unwrap_or("");
-                        match call_names.get(tcid) {
-                            Some(n) => Some(format!("tool_result ({}) [{}]: {}", n, tcid, text)),
-                            None if tcid.is_empty() => Some(format!("tool_result: {}", text)),
-                            None => Some(format!("tool_result [{}]: {}", tcid, text)),
-                        }
-                    }
-                }
-                _ => {
-                    let text = render_content(m);
-                    if text.is_empty() {
-                        None
-                    } else {
-                        Some(format!("{}: {}", role, text))
-                    }
-                }
-            })
-        })
-        .collect::<Vec<Option<String>>>()
-        .into_iter()
-        .flatten()
+        .filter_map(|m| render_msg(m, &call_names))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1502,7 +1585,7 @@ pub(crate) fn messages_to_prompt_from(messages: &[Value], start: usize) -> Strin
 async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
     let now = now();
     let store = st.store.read().await;
-    let in_flight: std::collections::HashMap<String, u32> = st.in_flight.lock().unwrap().iter()
+    let in_flight: std::collections::HashMap<String, u32> = st.in_flight.lk().iter()
         .map(|(k, v)| (k.clone(), v.load(std::sync::atomic::Ordering::Acquire))).collect();
     let accounts: Vec<Value> = store
         .accounts
@@ -1537,8 +1620,8 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
             "stateful": {
                 "hits": st.stat_conv_hit.load(std::sync::atomic::Ordering::Relaxed),
                 "misses": st.stat_conv_miss.load(std::sync::atomic::Ordering::Relaxed),
-                "active_conversations": st.convs.lock().unwrap().len(),
-                "open_sessions": st.sessions.lock().unwrap().len(),
+                "active_conversations": st.convs.lk().len(),
+                "open_sessions": st.sessions.lk().len(),
             },
         },
         "accounts": accounts,
@@ -1571,37 +1654,41 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
             "error": "không tìm thấy tab chat.deepseek.com đã login — bấm 'Sinh link OAuth2', chọn account Google, rồi bấm lại"
         })),
         Ok(sessions) => {
-            let mut store = st.store.write().await;
-            let mut added = 0usize;
-            let mut refreshed = 0usize;
-            let mut emails: Vec<String> = Vec::new();
-            for s in sessions {
-                if let Some(a) = store.accounts.iter_mut().find(|a| a.token == s.token) {
-                    a.cookies = s.cookies.clone();
-                    a.last_verified = Some(now());
-                    a.last_status = Some("ok (refreshed)".into());
-                    refreshed += 1;
-                } else {
-                    let acc = Account {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        label: s.email.clone().unwrap_or_else(|| "chrome-captured".into()),
-                        token: s.token.clone(),
-                        cookies: s.cookies.clone(),
-                        added_at: now(),
-                        last_verified: Some(now()),
-                        last_status: Some("ok".into()),
-                        thread_session_id: None,
-        thread_uses: 0,
-                        thread_parent_message_id: None,
-                        stats: Default::default(),
-                pool_enabled: true,
-                    };
-                    emails.push(s.email.clone().unwrap_or_else(|| "unknown".into()));
-                    store.accounts.push(acc);
-                    added += 1;
+            let (added, refreshed, emails) = {
+                let mut store = st.store.write().await;
+                let mut added = 0usize;
+                let mut refreshed = 0usize;
+                let mut emails: Vec<String> = Vec::new();
+                for s in sessions {
+                    if let Some(a) = store.accounts.iter_mut().find(|a| a.token == s.token) {
+                        a.cookies = s.cookies.clone();
+                        a.last_verified = Some(now());
+                        a.last_status = Some("ok (refreshed)".into());
+                        refreshed += 1;
+                    } else {
+                        let acc = Account {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            label: s.email.clone().unwrap_or_else(|| "chrome-captured".into()),
+                            token: s.token.clone(),
+                            cookies: s.cookies.clone(),
+                            added_at: now(),
+                            last_verified: Some(now()),
+                            last_status: Some("ok".into()),
+                            thread_session_id: None,
+                            thread_uses: 0,
+                            thread_parent_message_id: None,
+                            stats: Default::default(),
+                            pool_enabled: true,
+                        };
+                        emails.push(s.email.clone().unwrap_or_else(|| "unknown".into()));
+                        store.accounts.push(acc);
+                        added += 1;
+                    }
                 }
-            }
-            let _ = save_store(&store).await;
+                (added, refreshed, emails)
+            };
+            mark_dirty(&st);
+            flush_store(&st).await;
             Json(json!({
                 "ok": true,
                 "action": if added > 0 { "added" } else { "refreshed" },
@@ -1620,7 +1707,7 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
 // Trả về ngay khi bắt đầu — chạy nền, UI hiện "đang build profile"
 async fn api_build_profile(State(st): State<Arc<AppState>>) -> Json<Value> {
     {
-        let mut watching = st.login_watching.lock().unwrap();
+        let mut watching = st.login_watching.lk();
         if *watching {
             return Json(json!({"ok": false, "error": "đang canh login/build — đợi xong rồi thử"}));
         }
@@ -1630,7 +1717,7 @@ async fn api_build_profile(State(st): State<Arc<AppState>>) -> Json<Value> {
     tokio::spawn(async move {
         // 6s/site — đủ để cache + cookies nền
         let res = crate::chrome_capture::build_profile(6).await;
-        let mut watching = st2.login_watching.lock().unwrap();
+        let mut watching = st2.login_watching.lk();
         *watching = false;
         match res {
             Ok(msg) => eprintln!("[build-profile] {}", msg),
@@ -1649,7 +1736,7 @@ async fn api_build_profile(State(st): State<Arc<AppState>>) -> Json<Value> {
 async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
     // chặn double-start
     {
-        let mut watching = st.login_watching.lock().unwrap();
+        let mut watching = st.login_watching.lk();
         if *watching {
             return Json(json!({"ok": false, "error": "đang canh 1 tab login — đợi login xong hoặc 10 phút nữa thử lại"}));
         }
@@ -1659,7 +1746,7 @@ async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
     tokio::spawn(async move {
         let res = login_flow(st2.clone()).await;
         {
-            let mut watching = st2.login_watching.lock().unwrap();
+            let mut watching = st2.login_watching.lk();
             *watching = false;
         }
         if let Err(e) = res {
@@ -1689,30 +1776,33 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
     eprintln!("[login-flow] captured: {:?}", session.email);
 
     // lưu vào store (dedupe theo token — acc cũ chỉ refresh)
-    let mut store = st.store.write().await;
-    if let Some(a) = store.accounts.iter_mut().find(|a| a.token == session.token) {
-        a.cookies = session.cookies.clone();
-        a.last_verified = Some(now());
-        a.last_status = Some("ok (re-login)".into());
-        a.stats.reset();
-    } else {
-        let acc = Account {
-            id: uuid::Uuid::new_v4().to_string(),
-            label: session.email.clone().unwrap_or_else(|| "login-tab".into()),
-            token: session.token.clone(),
-            cookies: session.cookies.clone(),
-            added_at: now(),
-            last_verified: Some(now()),
-            last_status: Some("ok".into()),
-            thread_session_id: None,
-        thread_uses: 0,
-            thread_parent_message_id: None,
-            stats: Default::default(),
+    {
+        let mut store = st.store.write().await;
+        if let Some(a) = store.accounts.iter_mut().find(|a| a.token == session.token) {
+            a.cookies = session.cookies.clone();
+            a.last_verified = Some(now());
+            a.last_status = Some("ok (re-login)".into());
+            a.stats.reset();
+        } else {
+            let acc = Account {
+                id: uuid::Uuid::new_v4().to_string(),
+                label: session.email.clone().unwrap_or_else(|| "login-tab".into()),
+                token: session.token.clone(),
+                cookies: session.cookies.clone(),
+                added_at: now(),
+                last_verified: Some(now()),
+                last_status: Some("ok".into()),
+                thread_session_id: None,
+                thread_uses: 0,
+                thread_parent_message_id: None,
+                stats: Default::default(),
                 pool_enabled: true,
-        };
-        store.accounts.push(acc);
+            };
+            store.accounts.push(acc);
+        }
     }
-    let _ = save_store(&store).await;
+    mark_dirty(&st);
+    flush_store(&st).await;
     eprintln!("[login-flow] tab đã đóng, session đã lưu");
     Ok(())
 }
@@ -1729,31 +1819,34 @@ async fn auto_refresh_loop(st: Arc<AppState>) {
             Ok((c, t)) if !c.is_empty() => (c, t),
             _ => continue, // Chrome tắt / không có tab — bỏ qua lần này
         };
-        let mut store = st.store.write().await;
-        let mut refreshed = 0;
-        for a in store.accounts.iter_mut() {
-            // acc khớp token đang sống trong Chrome → refresh cookies
-            if Some(&a.token) == chrome_token.as_ref() {
-                a.cookies = cookies.clone();
-                a.last_verified = Some(now());
-                a.last_status = Some("ok (refreshed)".into());
-                refreshed += 1;
+        let refreshed = {
+            let mut store = st.store.write().await;
+            let mut refreshed = 0;
+            for a in store.accounts.iter_mut() {
+                // acc khớp token đang sống trong Chrome → refresh cookies
+                if Some(&a.token) == chrome_token.as_ref() {
+                    a.cookies = cookies.clone();
+                    a.last_verified = Some(now());
+                    a.last_status = Some("ok (refreshed)".into());
+                    refreshed += 1;
+                }
             }
-        }
-        // token mới (user re-login acc khác bằng tay) → acc nào cookies cũ khớp Chrome cũ... đơn giản:
-        // nếu token Chrome mới chưa có trong store và cookies khớp 1 acc (cùng cookies cũ) → update token
-        if let Some(new_tok) = &chrome_token {
-            if !store.accounts.iter().any(|a| &a.token == new_tok) {
-                // user vừa re-login 1 acc đã có trong store → tìm acc có last_status "(refreshed)"
-                // gần nhất là không đáng tin; thà bỏ qua còn hơn gán sai
-                eprintln!("[auto-refresh] token mới trong Chrome chưa có trong pool (acc login tay mới?) — bỏ qua");
+            // token mới (user re-login acc khác bằng tay) mà chưa có trong pool: không đoán bừa
+            // acc nào để gán — bỏ qua, chờ user bấm Capture/Login.
+            if refreshed == 0 {
+                if let Some(new_tok) = &chrome_token {
+                    if !store.accounts.iter().any(|a| &a.token == new_tok) {
+                        eprintln!("[auto-refresh] token mới trong Chrome chưa có trong pool — bỏ qua (dùng nút Capture nếu muốn thêm)");
+                    }
+                }
             }
-        }
+            refreshed
+        };
         if refreshed > 0 {
+            mark_dirty(&st);
+            flush_store(&st).await;
             eprintln!("[auto-refresh] cookies updated from chrome ({} acc)", refreshed);
         }
-        let _ = save_store(&store).await;
-        eprintln!("[auto-refresh] cookies updated from chrome");
     }
 }
 
@@ -1765,6 +1858,18 @@ pub(crate) fn cookie_string(cookies: &std::collections::BTreeMap<String, String>
         .map(|(k, v)| format!("{}={}", k, v))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Khoá `std::sync::Mutex` chịu được poison: một panic khi đang giữ lock không được phép làm
+/// mọi request sau panic theo. Dữ liệu được bảo vệ ở đây là map đếm/cache — luôn dùng được.
+pub(crate) trait LockExt<T> {
+    fn lk(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for std::sync::Mutex<T> {
+    fn lk(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 pub(crate) fn now() -> u64 {
@@ -1819,12 +1924,12 @@ async fn conv_sweeper(st: Arc<AppState>) {
         tokio::time::sleep(std::time::Duration::from_secs((ttl / 4).clamp(3, 60))).await;
         let t = now();
         let expired: Vec<(String, String)> = {
-            let mut m = st.sessions.lock().unwrap();
+            let mut m = st.sessions.lk();
             let ids: Vec<String> = m.iter().filter(|(_, (_, last))| t.saturating_sub(*last) > ttl).map(|(k, _)| k.clone()).collect();
             ids.into_iter().filter_map(|k| m.remove(&k).map(|(acc, _)| (k, acc))).collect()
         };
         if expired.is_empty() { continue; }
-        st.convs.lock().unwrap().retain(|_, c| !expired.iter().any(|(sid, _)| *sid == c.sid));
+        st.convs.lk().retain(|_, c| !expired.iter().any(|(sid, _)| *sid == c.sid));
         for (sid, acc_id) in expired {
             let acc = { st.store.read().await.accounts.iter().find(|a| a.id == acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
             if let Some((tok, ck)) = acc {
@@ -1843,7 +1948,10 @@ pub async fn run(port: u16) -> Result<()> {
     let store = load_store().await;
     let st = Arc::new(AppState {
         store: RwLock::new(store),
-        rr: std::sync::atomic::AtomicU64::new(0),
+        save_lock: tokio::sync::Mutex::new(()),
+        store_ver: std::sync::atomic::AtomicU64::new(0),
+        store_written: std::sync::atomic::AtomicU64::new(0),
+        store_dirty: tokio::sync::Notify::new(),
         in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
         login_watching: std::sync::Mutex::new(false),
         file_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1870,8 +1978,9 @@ pub async fn run(port: u16) -> Result<()> {
         .layer(axum::middleware::from_fn(access_guard))
         .with_state(st.clone());
 
-    // Auto-refresh cookies từ Chrome mỗi 5 phút
+    // Background: dọn phiên nhàn rỗi, refresh cookies từ Chrome, ghi store gom lô
     tokio::spawn(conv_sweeper(st.clone()));
+    tokio::spawn(store_flusher(st.clone()));
     tokio::spawn(auto_refresh_loop(st));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -1924,6 +2033,7 @@ mod xml_tests {
     #[test]
     fn safe_flush_holds_only_marker_tail() {
         assert!(has_tool_marker("nháp <｜DSML｜function_calls>") && !has_tool_marker("a < b"));
+        assert!(!has_tool_marker("DSML tool-call parsing: normalize_dsml") && has_tool_marker("x <｜｜DSML｜｜ calls>"));
         assert_eq!(safe_flush_len("hello world"), 11);
         assert_eq!(safe_flush_len("a < b"), 2);
         let s = "I'll dig in.\n\n<｜DSML｜function_calls>";
@@ -1939,7 +2049,7 @@ mod xml_tests {
         let tools = Some(vec![json!({"type":"function","function":{"name":"bash","parameters":{
             "required":["command","description"],
             "properties":{"command":{"type":"string"},"description":{"type":"string"}}}}})]);
-        let mut c = DsmlToolCall { name: "bash".into(), arguments: "{\"command\":\"ls /data\"}".into(), before: String::new() };
+        let mut c = DsmlToolCall { name: "bash".into(), arguments: "{\"command\":\"ls /data\"}".into() };
         fill_required_args(&tools, &mut c);
         let v: Value = serde_json::from_str(&c.arguments).unwrap();
         assert_eq!(v["description"], "ls /data");
@@ -1983,7 +2093,7 @@ mod xml_tests {
         assert_eq!(v["limit"], 50);
         // model quên string="false" → ép theo schema
         let tools = Some(vec![json!({"function":{"name":"read","parameters":{"properties":{"file_path":{"type":"string"},"limit":{"type":"integer"}}}}})]);
-        let mut c = DsmlToolCall { name: "read".into(), arguments: "{\"file_path\":\"/a\",\"limit\":\"50\"}".into(), before: String::new() };
+        let mut c = DsmlToolCall { name: "read".into(), arguments: "{\"file_path\":\"/a\",\"limit\":\"50\"}".into() };
         fill_required_args(&tools, &mut c);
         let v: Value = serde_json::from_str(&c.arguments).unwrap();
         assert_eq!(v["limit"], 50);
@@ -2056,7 +2166,7 @@ mod xml_tests {
             let text = format!("pre\n\n{}\n{{\"name\": \"bash\", \"arguments\": {{\"command\": \"ls\", \"description\": \"d\"}}}}\n</{}>", tag, tag.replace("<", "</"));
             let r = parse_dsml_json_tool_calls(&text);
             assert!(r.is_some(), "phải parse được variant {}", tag);
-            let (before, calls) = r.unwrap();
+            let (_before, calls) = r.unwrap();
             assert_eq!(calls[0].name, "bash");
             assert!(calls[0].arguments.contains("ls"));
         }
@@ -2067,7 +2177,7 @@ mod xml_tests {
         // format thật từ log 11:15: double open-tag + junk param rỗng name="bash"
         let text = "text\n\n<｜｜DSML｜｜ calls><｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke id=\"call_0\" name=\"bash\"><｜｜DSML｜｜ parameter name=\"bash\" string=\"true\"></｜｜DSML｜｜ parameter><｜｜DSML｜｜ parameter name=\"command\" string=\"true\">du -sh /data</｜｜DSML｜｜ parameter><｜｜DSML｜｜ parameter name=\"description\" string=\"true\">Disk usage</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>";
         let r = parse_dsml_tool_calls(text).expect("phải parse double-open + junk param");
-        let (before, calls) = r;
+        let (_before, calls) = r;
         assert_eq!(calls[0].name, "bash");
         let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
         assert!(args.get("command").is_some());

@@ -104,13 +104,66 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:016x}{:016x}{}", h1.finish(), h2.finish(), bytes.len())
 }
 
+/// Kích thước tối đa cho một ảnh tải qua URL (DS_MAX_IMAGE_MB, mặc định 20MB).
+fn max_image_bytes() -> usize {
+    std::env::var("DS_MAX_IMAGE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(20) * 1024 * 1024
+}
+
+/// Chặn SSRF: chỉ cho http/https tới host công khai. Ảnh trong hội thoại là dữ liệu do client
+/// (có thể bị prompt-injection điều khiển) nên không được phép chạm vào loopback/LAN/metadata.
+fn url_is_public(url: &reqwest::Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str() else { return false };
+    let host_l = host.trim_end_matches('.').to_ascii_lowercase();
+    if host_l == "localhost" || host_l.ends_with(".localhost") || host_l.ends_with(".local") || host_l.ends_with(".internal") {
+        return false;
+    }
+    let ip = host_l.parse::<std::net::IpAddr>().ok().or_else(|| {
+        // "[::1]" → "::1"
+        host_l.strip_prefix('[').and_then(|h| h.strip_suffix(']')).and_then(|h| h.parse().ok())
+    });
+    match ip {
+        Some(std::net::IpAddr::V4(v4)) => {
+            !(v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_broadcast()
+                || v4.is_unspecified() || v4.is_documentation() || v4.octets()[0] == 0)
+        }
+        Some(std::net::IpAddr::V6(v6)) => {
+            !(v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local() || v6.is_unicast_link_local())
+                // IPv4-mapped (::ffff:127.0.0.1)
+                && !v6.to_ipv4_mapped().map(|v4| v4.is_private() || v4.is_loopback() || v4.is_link_local()).unwrap_or(false)
+        }
+        // hostname: không phân giải DNS để kiểm tra (tránh TOCTOU); chỉ chặn các tên nội bộ rõ ràng ở trên
+        None => true,
+    }
+}
+
+/// Key nhận dạng một phần ảnh — dùng để không decode/tải lại cùng một ảnh trong một request.
+fn image_key(part: &Value) -> Option<String> {
+    if let Some(src) = part.get("source") {
+        if let Some(d) = src.get("data").and_then(|x| x.as_str()) {
+            return Some(format!("b64:{}:{}", d.len(), &d[..d.len().min(64)]));
+        }
+    }
+    let url = part.pointer("/image_url/url").and_then(|x| x.as_str())
+        .or_else(|| part.get("image_url").and_then(|x| x.as_str()))
+        .or_else(|| part.get("url").and_then(|x| x.as_str()))?;
+    Some(format!("url:{}", url))
+}
+
 /// Giải mã 1 phần nội dung ảnh (OpenAI `image_url`, Anthropic `image`/base64, `input_image`) → bytes + mime.
 async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
+    let cap = max_image_bytes();
     // Anthropic: {type:"image", source:{type:"base64", media_type, data}}
     if let Some(src) = part.get("source") {
         if let (Some(mt), Some(d)) = (src.get("media_type").and_then(|x| x.as_str()), src.get("data").and_then(|x| x.as_str())) {
+            if d.len() / 4 * 3 > cap {
+                eprintln!("[image] base64 vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
+                return None;
+            }
             return b64.decode(d.trim()).ok().map(|b| (b, mt.to_string()));
         }
     }
@@ -119,20 +172,50 @@ async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
         .or_else(|| part.get("url").and_then(|x| x.as_str()))?;
     if let Some(rest) = url.strip_prefix("data:") {
         let (meta, data) = rest.split_once(',')?;
+        if data.len() / 4 * 3 > cap {
+            eprintln!("[image] data URL vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
+            return None;
+        }
         let mime = meta.split(';').next().unwrap_or("image/png").to_string();
         return b64.decode(data.trim()).ok().map(|b| (b, mime));
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        let r = reqwest::get(url).await.ok()?;
-        let mime = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("image/png").split(';').next().unwrap_or("image/png").to_string();
-        let b = r.bytes().await.ok()?;
-        return Some((b.to_vec(), mime));
+        let parsed = reqwest::Url::parse(url).ok()?;
+        if !url_is_public(&parsed) {
+            eprintln!("[image] chặn URL nội bộ/không hợp lệ: {}", &url[..url.len().min(120)]);
+            return None;
+        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build().ok()?;
+        let r = client.get(parsed).send().await.ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let mime = r.headers().get("content-type").and_then(|v| v.to_str().ok())
+            .unwrap_or("image/png").split(';').next().unwrap_or("image/png").to_string();
+        // đọc theo chunk để cắt sớm: không tin Content-Length, không gom cả GB vào RAM
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = r.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.ok()?;
+            if buf.len() + chunk.len() > cap {
+                eprintln!("[image] ảnh vượt giới hạn {}MB — bỏ", cap / 1024 / 1024);
+                return None;
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        return Some((buf, mime));
     }
     None
 }
 
 /// Mọi ảnh trong hội thoại (kể cả trong kết quả tool như read_image), khử trùng, giữ tối đa `max` ảnh mới nhất.
-pub(crate) async fn collect_images(messages: &[Value], max: usize) -> Vec<Image> {
+/// `cache` chia sẻ giữa các lần gọi trong CÙNG request để ảnh URL không bị tải lại 2 lần.
+pub(crate) async fn collect_images_cached(
+    messages: &[Value], max: usize, cache: &mut std::collections::HashMap<String, Option<(Vec<u8>, String)>>,
+) -> Vec<Image> {
     let mut found: Vec<Image> = Vec::new();
     for m in messages {
         let Some(parts) = m.get("content").and_then(|c| c.as_array()) else { continue };
@@ -140,7 +223,17 @@ pub(crate) async fn collect_images(messages: &[Value], max: usize) -> Vec<Image>
         while let Some(p) = stack.pop() {
             match p.get("type").and_then(|t| t.as_str()) {
                 Some("image_url") | Some("image") | Some("input_image") => {
-                    if let Some((bytes, mime)) = decode_image_part(p).await {
+                    let key = image_key(p);
+                    let decoded = match (&key, cache.get(key.as_deref().unwrap_or(""))) {
+                        (Some(_), Some(v)) => v.clone(),
+                        (Some(k), None) => {
+                            let v = decode_image_part(p).await;
+                            cache.insert(k.clone(), v.clone());
+                            v
+                        }
+                        (None, _) => decode_image_part(p).await,
+                    };
+                    if let Some((bytes, mime)) = decoded {
                         let hash = sha256_hex(&bytes);
                         found.retain(|i| i.hash != hash); // ảnh lặp lại → coi như mới nhất
                         found.push(Image { hash, bytes, mime });
@@ -247,10 +340,10 @@ async fn acquire(st: &Arc<AppState>, exclude: &[String], only: Option<&str>, dea
                 return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "no account configured"}))));
             }
             let others_exist = accs.iter().any(|a| a.pool_enabled && !exclude.contains(&a.id));
-            let in_flight = st.in_flight.lock().unwrap();
+            let in_flight = st.in_flight.lk();
             let mut best: Option<((u32, u64), usize)> = None;
             for (i, a) in accs.iter().enumerate() {
-                if !a.pool_enabled || (others_exist && exclude.contains(&a.id)) || only.map_or(false, |o| o != a.id) {
+                if !a.pool_enabled || (others_exist && exclude.contains(&a.id)) || only.is_some_and(|o| o != a.id) {
                     continue;
                 }
                 let conc = in_flight
@@ -275,7 +368,7 @@ async fn acquire(st: &Arc<AppState>, exclude: &[String], only: Option<&str>, dea
 
         if let Some((token, cookies, thread_sid, acc_id)) = picked {
             let counter = {
-                let mut map = st.in_flight.lock().unwrap();
+                let mut map = st.in_flight.lk();
                 map.entry(acc_id.clone())
                     .or_insert_with(|| Arc::new(std::sync::atomic::AtomicU32::new(0)))
                     .clone()
@@ -299,6 +392,8 @@ async fn touch_acc(st: &Arc<AppState>, acc_id: &str) {
     if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
         a.stats.record_call(now());
     }
+    drop(store);
+    mark_dirty(st);
 }
 
 /// Acc hỏng/rỗng/cụt: tăng bộ đếm + cooldown tăng dần. `penalize=false` cho lỗi do model (không phải acc).
@@ -315,7 +410,8 @@ async fn fail_acc(st: &Arc<AppState>, acc_id: &str, why: &str, penalize: bool) {
             a.last_status = Some(if why == "empty" { "throttled".into() } else { "error".into() });
         }
     }
-    let _ = save_store(&store).await;
+    drop(store);
+    mark_dirty(st);
 }
 
 /// Token chết (code 40003): cách ly acc lâu, gắn nhãn cần đăng nhập lại; đăng nhập lại/Reset sẽ gỡ.
@@ -327,7 +423,8 @@ async fn mark_auth_invalid(st: &Arc<AppState>, acc_id: &str) {
         a.stats.cooldown_until = now() + 1800;
         a.last_status = Some("invalid token — cần login lại".into());
     }
-    let _ = save_store(&store).await;
+    drop(store);
+    mark_dirty(st);
 }
 
 async fn ok_acc(st: &Arc<AppState>, acc_id: &str, sid: &str, shared: bool) {
@@ -338,7 +435,8 @@ async fn ok_acc(st: &Arc<AppState>, acc_id: &str, sid: &str, shared: bool) {
         a.stats.mark_ok();
         a.last_status = Some("ok".into());
     }
-    let _ = save_store(&store).await;
+    drop(store);
+    mark_dirty(st);
 }
 
 impl ContPlan {
@@ -346,14 +444,15 @@ impl ContPlan {
 }
 
 /// Ghi lại hội thoại vừa trả lời để request kế (cùng prefix + assistant này) nối tiếp được trong phiên web.
+#[allow(clippy::too_many_arguments)]
 fn register_conv(st: &Arc<AppState>, ctx: &ChatCtx, was_stateful: bool, acc_id: &str, sid: &str, msg_id: Option<i64>, ids: &[String], resp_chars: usize, tokens: u64) {
     let (Some(reg), Some(mid)) = (&ctx.reg, msg_id) else { return };
     let base = if was_stateful { ctx.cont.as_ref().map_or(0, |c| c.base_chars) } else { ctx.prompt.chars().count() };
-    st.sessions.lock().unwrap().insert(sid.to_string(), (acc_id.to_string(), now()));
+    st.sessions.lk().insert(sid.to_string(), (acc_id.to_string(), now()));
     let key = hash_pair(reg.pf_n, &format!("assistant|{}", ids.join(",")));
-    st.convs.lock().unwrap().insert(key, Conv {
+    st.convs.lk().insert(key, Conv {
         acc_id: acc_id.to_string(), sid: sid.to_string(), parent_id: mid,
-        tools_hash: reg.tools_hash, chars: base + resp_chars, last_used: now(), tokens,
+        tools_hash: reg.tools_hash, chars: base + resp_chars, tokens,
     });
 }
 
@@ -401,7 +500,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             if attempt == 1 {
                 if let Some(cp) = &ctx.cont {
                     let acc = { st.store.read().await.accounts.iter().find(|a| a.id == cp.acc_id_hint()).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
-                    st.sessions.lock().unwrap().remove(&cp.sid);
+                    st.sessions.lk().remove(&cp.sid);
                     spawn_delete_session(acc, cp.sid.clone());
                 }
             }
@@ -412,10 +511,10 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                     let mut up_err: Option<anyhow::Error> = None;
                     for img in images_used {
                         let key = (acc_id.clone(), img.hash.clone());
-                        let cached = st.file_cache.lock().unwrap().get(&key).cloned();
+                        let cached = st.file_cache.lk().get(&key).cloned();
                         if let Some(id) = cached { file_ids.push(id); continue; }
                         match c.upload_file(img.bytes.clone(), &format!("image-{}.{}", &img.hash[..8], ext_for(&img.mime)), &img.mime).await {
-                            Ok(id) => { st.file_cache.lock().unwrap().insert(key, id.clone()); file_ids.push(id); }
+                            Ok(id) => { st.file_cache.lk().insert(key, id.clone()); file_ids.push(id); }
                             Err(e) => { up_err = Some(e); break; }
                         }
                     }
@@ -428,7 +527,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             };
             let (sid, mut rx) = match stream_res {
                 Ok(p) => {
-                    if own_session { st.sessions.lock().unwrap().insert(p.0.clone(), (acc_id.clone(), now())); }
+                    if own_session { st.sessions.lk().insert(p.0.clone(), (acc_id.clone(), now())); }
                     p
                 }
                 Err(e) => {
@@ -456,8 +555,6 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             let mut msg_id: Option<i64> = None;
             let mut real_usage: Option<u64> = None;
             let mut attempt_done = false;
-            #[allow(unused_assignments)]
-            let mut continue_attempt = false;
 
             while let Some(ev) = rx.recv().await {
                 match ev {
@@ -493,7 +590,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                     StreamEv::MsgId(m) => { msg_id = Some(m); }
                     StreamEv::Usage(u) => { real_usage = Some(u); eprintln!("[usage] accumulated_token_usage={} (stateful={})", u, stateful_attempt); }
                     StreamEv::Truncated(why) => { truncated = Some(why); }
-                    StreamEv::Done(_) => {
+                    StreamEv::Done => {
                         if !think_dropped && !think_buf.is_empty() {
                             yield Out::Reasoning(std::mem::take(&mut think_buf));
                         }
@@ -520,8 +617,9 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                                 save_sample("invalid", &full_text);
                                 eprintln!("[toolcall-invalid] attempt {} tool={:?} args thiếu/không hợp lệ — retry; raw={:?}", attempt, n, full_text);
                                 last_err = Some(format!("tool-call không hợp lệ ({})", n));
-                                attempt_done = true;
-                                continue_attempt = true;
+                                // lỗi do model: không phạt acc, NHƯNG phải loại acc khỏi lượt sau —
+                                // chạy lại đúng acc + đúng prompt gần như chắc chắn ra lại đúng output hỏng
+                                failed.push(acc_id.clone());
                             } else {
                             ok_acc(&st, &acc_id, &sid, !own_session).await;
                             let ids: Vec<String> = calls.iter().map(|_| new_call_id()).collect();
@@ -553,6 +651,8 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             // lượt cuối vẫn trượt → báo lỗi rõ (không trả completion rỗng làm client 'Stopped' im lặng)
                             last_err = Some("tool-call không parse được sau 3 lần thử".into());
                             fail_acc(&st, &acc_id, "unparsed", false).await;
+                            // đổi acc cho lượt sau: lỗi do model nhưng cùng acc + cùng prompt dễ lặp lại y hệt
+                            failed.push(acc_id.clone());
                         } else {
                             if !resp_text.is_empty() { yield Out::Content(std::mem::take(&mut resp_text)); }
                             ok_acc(&st, &acc_id, &sid, !own_session).await;
@@ -562,7 +662,6 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         }
                         attempt_done = true;
                     }
-                    _ => {}
                 }
                 if attempt_done { break; }
             }
@@ -579,12 +678,22 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
 
 /// Rút gọn lịch sử nếu prompt vượt ngân sách (DS_PROMPT_MAX_CHARS, mặc định 400K ký tự):
 /// 1) cắt giữa các tool_result cũ, 2) bỏ các lượt cũ nhất (giữ system + tin user đầu).
+///
+/// Chi phí O(n) thay vì O(n²): render từng message đúng một lần để lấy kích thước, sau đó
+/// cập nhật tổng bằng phép trừ/cộng. Bản cũ gọi `messages_to_prompt()` lại toàn bộ danh sách
+/// sau mỗi lần cắt (đo được 6.7ms cho prompt 485K ký tự, tăng bình phương theo độ dài).
 pub(crate) fn fit_messages(messages: &[Value], max_chars: usize) -> Vec<Value> {
-    let size = |m: &[Value]| messages_to_prompt(m).chars().count();
+    let call_names = call_name_map(messages);
     let mut msgs = messages.to_vec();
-    if size(&msgs) <= max_chars {
+    // rendered[i] = đoạn prompt của message i (None = message không đóng góp gì)
+    let mut rendered: Vec<Option<String>> = msgs.iter().map(|m| render_msg(m, &call_names)).collect();
+    // +1 cho '\n' nối giữa các đoạn (xấp xỉ; sai lệch ≤ vài chục ký tự không ảnh hưởng ngân sách)
+    let mut total: usize = rendered.iter().flatten().map(|s| s.chars().count() + 1).sum();
+    if total <= max_chars {
         return msgs;
     }
+
+    // bước 1: rút gọn tool_result cũ (giữ nguyên 6 message cuối)
     let keep_from = msgs.len().saturating_sub(6);
     for i in 0..keep_from {
         if msgs[i].get("role").and_then(|r| r.as_str()) == Some("tool") {
@@ -594,18 +703,30 @@ pub(crate) fn fit_messages(messages: &[Value], max_chars: usize) -> Vec<Value> {
                 let head: String = text.chars().take(1500).collect();
                 let tail: String = text.chars().skip(n - 500).collect();
                 msgs[i]["content"] = Value::String(format!("{}\n…[đã rút gọn {} ký tự]…\n{}", head, n - 2000, tail));
+                let old = rendered[i].as_ref().map(|s| s.chars().count() + 1).unwrap_or(0);
+                rendered[i] = render_msg(&msgs[i], &call_names);
+                let new = rendered[i].as_ref().map(|s| s.chars().count() + 1).unwrap_or(0);
+                total = total.saturating_sub(old).saturating_add(new);
             }
         }
-        if size(&msgs) <= max_chars { return msgs; }
+        if total <= max_chars {
+            return msgs;
+        }
     }
+
+    // bước 2: bỏ các lượt cũ nhất (không đụng system + tin user đầu), kèm tool_result mồ côi
     let first_user = msgs.iter().position(|m| m.get("role").and_then(|r| r.as_str()) == Some("user")).unwrap_or(0);
-    while size(&msgs) > max_chars && msgs.len() > 8 {
+    while total > max_chars && msgs.len() > 8 {
         let k = msgs.iter().enumerate()
             .position(|(i, m)| i > first_user && m.get("role").and_then(|r| r.as_str()) != Some("system"));
         let Some(k) = k else { break };
+        total = total.saturating_sub(rendered[k].as_ref().map(|s| s.chars().count() + 1).unwrap_or(0));
         msgs.remove(k);
+        rendered.remove(k);
         while k < msgs.len() && msgs[k].get("role").and_then(|r| r.as_str()) == Some("tool") {
+            total = total.saturating_sub(rendered[k].as_ref().map(|s| s.chars().count() + 1).unwrap_or(0));
             msgs.remove(k); // không để tool_result mồ côi
+            rendered.remove(k);
         }
     }
     msgs
@@ -629,12 +750,12 @@ pub(crate) async fn api_chat_completions(
     let stream = req.stream.unwrap_or(false);
 
     // yêu cầu đặt tên phiên của client: không cần thinking (đỡ 4-5s + slot acc)
-    let is_title_req = req.tools.as_ref().map_or(true, |t| t.is_empty())
+    let is_title_req = req.tools.as_ref().is_none_or(|t| t.is_empty())
         && req.messages.iter().any(|m| render_content(m).contains("Create a concise title"));
     let effort = req.reasoning_effort.clone()
         .or_else(|| req.reasoning.as_ref().and_then(|r| r.get("effort")).and_then(|e| e.as_str()).map(|s| s.to_string()))
         .or_else(|| req.model.as_deref().and_then(|m| m.split_once(':')).map(|(_, e)| e.to_string())); // "deepseek-web:max"
-    let thinking = effort_to_thinking(effort.as_deref(), req.model.as_deref().map_or(false, |m| m.contains("r1")), req.thinking)
+    let thinking = effort_to_thinking(effort.as_deref(), req.model.as_deref().is_some_and(|m| m.contains("r1")), req.thinking)
         && !is_title_req;
     let search = req.search.unwrap_or(false);
 
@@ -650,15 +771,37 @@ pub(crate) async fn api_chat_completions(
 
     // ---- STATEFUL: tìm hội thoại đang nằm trong phiên web khớp prefix của request này
     let n = req.messages.len();
-    let stateful_on = stateful_enabled() && req.tools.as_ref().map_or(false, |t| !t.is_empty()) && !is_title_req;
+    // `new_thread: true` = client muốn bắt đầu hội thoại mới → không nối tiếp phiên cũ,
+    // và dọn luôn phiên khớp prefix (nếu có) để không rò rỉ session trên DS.
+    let force_new = req.new_thread.unwrap_or(false);
+    let stateful_on = stateful_enabled() && req.tools.as_ref().is_some_and(|t| !t.is_empty()) && !is_title_req;
     let pf = prefix_fps(&req.messages);
     let th = tools_hash(&req.tools);
     let mut cont: Option<ContPlan> = None;
     let mut lease: Option<Lease> = None;
-    if stateful_on {
+    // cache ảnh dùng chung cho cả request: ảnh trong prefix không bị tải/giải mã lần thứ hai
+    let mut img_cache: std::collections::HashMap<String, Option<(Vec<u8>, String)>> = std::collections::HashMap::new();
+    if stateful_on && force_new {
+        // dọn mọi hội thoại khớp prefix của request này (best-effort).
+        // Lưu ý: guard của Mutex phải drop TRƯỚC `.await` → gom kết quả vào Vec trước.
+        let stale: Vec<Conv> = {
+            let mut convs = st.convs.lk();
+            (1..n)
+                .filter(|k| req.messages[k - 1].get("role").and_then(|r| r.as_str()) == Some("assistant"))
+                .filter_map(|k| convs.remove(&pf[k]))
+                .collect()
+        };
+        for conv in stale {
+            eprintln!("[conv] new_thread=true — bỏ phiên cũ {}", &conv.sid[..8.min(conv.sid.len())]);
+            st.sessions.lk().remove(&conv.sid);
+            let acc = { st.store.read().await.accounts.iter().find(|a| a.id == conv.acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
+            spawn_delete_session(acc, conv.sid.clone());
+        }
+    }
+    if stateful_on && !force_new {
         let hit = (1..n).rev()
             .filter(|k| req.messages[k - 1].get("role").and_then(|r| r.as_str()) == Some("assistant"))
-            .find_map(|k| st.convs.lock().unwrap().remove(&pf[k]).map(|c| (k, c)));
+            .find_map(|k| st.convs.lk().remove(&pf[k]).map(|c| (k, c)));
         if let Some((k, conv)) = hit {
             let acc_creds = { st.store.read().await.accounts.iter().find(|a| a.id == conv.acc_id).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
             let usable = acc_creds.is_some() && conv.tools_hash == th && conv.chars <= conv_max_chars();
@@ -667,7 +810,7 @@ pub(crate) async fn api_chat_completions(
                 // cần đúng acc đã giữ phiên; bận quá 4s thì thôi, gửi đủ ở acc khác
                 match acquire(&st, &[], Some(&conv.acc_id), Instant::now() + Duration::from_secs(4)).await {
                     Ok(l) => {
-                        let delta_images = collect_images(&req.messages[k..], 4).await;
+                        let delta_images = collect_images_cached(&req.messages[k..], 4, &mut img_cache).await;
                         st.stat_conv_hit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         eprintln!("[conv] nối tiếp phiên {} (+{} msg, delta {} ký tự, phiên đã {} ký tự)", &conv.sid[..8.min(conv.sid.len())], n - k, delta.chars().count(), conv.chars);
                         cont = Some(ContPlan { acc_id: conv.acc_id.clone(), sid: conv.sid.clone(), parent_id: conv.parent_id, delta_prompt: delta, delta_images, base_chars: conv.chars, tokens: conv.tokens });
@@ -675,25 +818,25 @@ pub(crate) async fn api_chat_completions(
                     }
                     Err(_) => {
                         eprintln!("[conv] acc giữ phiên đang bận — gửi đủ ngữ cảnh ở acc khác");
-                        st.convs.lock().unwrap().insert(pf[k], conv);
+                        st.convs.lk().insert(pf[k], conv);
                     }
                 }
             } else {
                 eprintln!("[conv] bỏ phiên (tools đổi / quá dài / acc mất) — gửi đủ ngữ cảnh");
-                st.sessions.lock().unwrap().remove(&conv.sid);
+                st.sessions.lk().remove(&conv.sid);
                 spawn_delete_session(acc_creds, conv.sid.clone());
             }
         }
     }
     if stateful_on && cont.is_none() {
         st.stat_conv_miss.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n > 2 { eprintln!("[conv] miss: {} msg, {} hội thoại đang giữ — gửi đủ ngữ cảnh", n, st.convs.lock().unwrap().len()); }
+        if n > 2 { eprintln!("[conv] miss: {} msg, {} hội thoại đang giữ — gửi đủ ngữ cảnh", n, st.convs.lk().len()); }
     }
     let lease = match lease {
         Some(l) => l,
         None => acquire(&st, &[], None, Instant::now() + Duration::from_secs(queue_wait_secs())).await?,
     };
-    let images = collect_images(&msgs, 4).await;
+    let images = collect_images_cached(&msgs, 4, &mut img_cache).await;
     if !images.is_empty() { eprintln!("[req] {} ảnh đính kèm", images.len()); }
     let reg = if stateful_on { Some(RegPlan { pf_n: pf[n], tools_hash: th }) } else { None };
     let ctx = ChatCtx { prompt, cont, reg, images, thinking, search, tools: req.tools.clone() };
@@ -729,9 +872,9 @@ pub(crate) async fn api_chat_completions(
                     }
                 }
             }
-            yield Event::default().data("[DONE]".to_string());
+            yield Event::default().data("[DONE]");
         };
-        return Ok(Sse::new(body.map(|e| Ok::<_, std::convert::Infallible>(e)))
+        return Ok(Sse::new(body.map(Ok::<_, std::convert::Infallible>))
             .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)).text("keep-alive"))
             .into_response());
     }

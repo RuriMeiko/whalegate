@@ -7,16 +7,32 @@ use crate::pow::solve_pow;
 
 pub const DEEPSEEK_API: &str = "https://chat.deepseek.com/api/v0";
 
+/// Timeout mỗi lần đọc socket (DS_READ_TIMEOUT_SECS, mặc định 120s).
+/// Phải > STALL_SECS của stream để lỗi stall vẫn được báo qua StreamEv::Truncated thay vì transport error.
+fn read_timeout_secs() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("DS_READ_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(120)
+    })
+}
+
+/// Giải PoW trên blocking pool: đây là CPU-bound (có thể vài trăm ms) — chạy thẳng trong
+/// async fn sẽ chặn tokio worker và làm chậm mọi request khác đang cùng runtime.
+async fn solve_pow_async(challenge_hex: String, salt: String, expire_at: u64, difficulty: u64) -> Option<u64> {
+    tokio::task::spawn_blocking(move || solve_pow(&challenge_hex, &salt, expire_at, difficulty))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Event từ stream DS — server push thẳng ra SSE OpenAI
 pub enum StreamEv {
     Thinking(String),
     Response(String),
-    Ready(String),      // chat_session_id
     MsgId(i64),         // response_message_id
     Usage(u64),         // accumulated_token_usage thật từ web (prompt + reasoning + output)
-    RawHasContent(bool),// SSE có fragment nào không (rate-limit detect)
     Truncated(String),  // stream bị cắt giữa chừng (stall/lỗi mạng) — gửi ngay trước Done
-    Done(String),       // full SSE text (để parse tool-calls cuối)
+    Done,               // stream kết thúc (payload SSE đầy đủ không còn ai dùng)
 }
 
 
@@ -30,6 +46,12 @@ impl DsClient {
     pub fn new(token: String, cookies: String) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+            // Chặn treo vô hạn: DS chập chờn mà không có timeout thì request giữ Lease mãi → cạn pool.
+            // KHÔNG dùng `.timeout()` toàn cục: nó tính cả thời gian đọc body, sẽ giết stream chat dài.
+            // `connect_timeout` chặn lúc bắt tay TCP/TLS; `read_timeout` chặn từng lần đọc socket
+            // (gồm cả lúc chờ header) nên stream vẫn sống miễn DS gửi byte đều đặn.
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .read_timeout(std::time::Duration::from_secs(read_timeout_secs()))
             .build()?;
         Ok(Self { http, token, cookies })
     }
@@ -83,16 +105,6 @@ impl DsClient {
         Ok(())
     }
 
-    pub async fn history_messages(&self, session_id: &str) -> Result<Value> {
-        let v: Value = self
-            .req(reqwest::Method::GET, &format!("/chat/history_messages?chat_session_id={}", session_id))
-            .send()
-            .await?
-            .json()
-            .await?;
-        Ok(v)
-    }
-
     /// Lỗi xác thực của DS web: HTTP 200 nhưng `code` 40003 ("invalid token") — phải đăng nhập lại, không retry mù.
     fn check_auth(v: &Value) -> Result<()> {
         if v["code"].as_i64() == Some(40003) {
@@ -126,7 +138,7 @@ impl DsClient {
         let difficulty = ch["difficulty"].as_u64().context("no difficulty")?;
         let signature = ch["signature"].as_str().context("no signature")?.to_string();
         let t0 = std::time::Instant::now();
-        let answer = solve_pow(&challenge_hex, &salt, expire_at, difficulty)
+        let answer = solve_pow_async(challenge_hex.clone(), salt.clone(), expire_at, difficulty).await
             .context("PoW solve failed within difficulty bound")?;
         eprintln!("[pow] difficulty={} answer={} solve_ms={}", difficulty, answer, t0.elapsed().as_millis());
         let payload = json!({
@@ -204,7 +216,7 @@ impl DsClient {
         let signature = ch["signature"].as_str().context("no signature")?.to_string();
 
         let t0 = std::time::Instant::now();
-        let answer = solve_pow(&challenge_hex, &salt, expire_at, difficulty)
+        let answer = solve_pow_async(challenge_hex.clone(), salt.clone(), expire_at, difficulty).await
             .context("PoW solve failed within difficulty bound")?;
         let solve_ms = t0.elapsed().as_millis();
 
@@ -321,11 +333,10 @@ pub async fn chat_stream(
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<StreamEv>();
-    let sid2 = sid.clone();
     tokio::spawn(async move {
         let mut stream = std::pin::pin!(resp.bytes_stream());
         let mut buf = String::new();
-        let mut full = String::new();
+        let mut sse_chars: usize = 0; // chỉ đếm, không giữ toàn bộ SSE trong RAM
         let mut cur_type = String::new();
         let mut has_content = false;
         let mut sent_msg_id = false;
@@ -366,7 +377,7 @@ pub async fn chat_stream(
                 let rest = buf[pos + 1..].to_string();
                 buf = rest;
                 let Some(data) = line.strip_prefix("data: ") else { continue };
-                full.push_str(&line); full.push('\n');
+                sse_chars += line.chars().count() + 1;
                 let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
 
                 // token thật: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":346},...]}
@@ -450,11 +461,12 @@ pub async fn chat_stream(
                 }
             }
         }
-        eprintln!("[ds-timing] first_byte={}ms total={}ms bytes={} sse_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, full.chars().count());
-        let _ = tx.send(StreamEv::RawHasContent(has_content));
+        eprintln!("[ds-timing] first_byte={}ms total={}ms bytes={} sse_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, sse_chars);
+        if !has_content {
+            eprintln!("[ds-stream] stream không có fragment RESPONSE nào (nghi throttle/rỗng)");
+        }
         if let Some(r) = truncated { let _ = tx.send(StreamEv::Truncated(r)); }
-        let _ = tx.send(StreamEv::Done(full));
-        let _ = sid2;
+        let _ = tx.send(StreamEv::Done);
     });
 
     Ok((sid, rx))

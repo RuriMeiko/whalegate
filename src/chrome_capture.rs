@@ -65,11 +65,10 @@ fn find_chrome_binary() -> Result<String> {
     bail!("không tìm thấy Chrome/Chromium trên máy — cài google-chrome hoặc đặt DS_CHROME_BIN")
 }
 
-/// SPAWN Chrome instance RIÊNG cho login:
-/// - port CDP riêng (9777, config DS_LOGIN_CDP_PORT) — không đụng Chrome chính
-/// - profile CỐ ĐỊNH (~/.ds-harness/login-profile) — fingerprint ổn định, tránh
-///   "Current device environment error" của DS risk-engine
-/// - mở thẳng trang sign_in DS
+/// SPAWN Chrome instance RIÊNG cho login: port CDP riêng (9777, config
+/// DS_LOGIN_CDP_PORT) để không đụng Chrome chính; profile CỐ ĐỊNH
+/// (~/.ds-harness/login-profile) để fingerprint ổn định, tránh lỗi
+/// "Current device environment error" của DS risk-engine; mở thẳng trang sign_in DS.
 /// Trả (Child process, đường dẫn profile) — caller kill Chrome khi xong (GIỮ profile).
 pub async fn spawn_login_chrome() -> Result<(std::process::Child, String)> {
     let bin = find_chrome_binary()?;
@@ -110,29 +109,6 @@ pub async fn spawn_login_chrome() -> Result<(std::process::Child, String)> {
     Ok((child, profile))
 }
 
-/// Tìm tab sign_in trong Chrome LOGIN instance (port riêng), trả ws_url.
-pub async fn find_login_tab_ws() -> Result<String> {
-    let body = reqwest::get(format!("{}/json/list", login_cdp_http()))
-        .await?
-        .text()
-        .await?;
-    let pages: Vec<Value> = serde_json::from_str(&body)?;
-    let tab = pages
-        .iter()
-        .find(|p| {
-            p["type"] == "page"
-                && p["url"]
-                    .as_str()
-                    .map(|u| u.contains("chat.deepseek.com"))
-                    .unwrap_or(false)
-        })
-        .context("không thấy tab chat.deepseek.com trong Chrome login")?;
-    Ok(tab["webSocketDebuggerUrl"]
-        .as_str()
-        .context("no ws url")?
-        .to_string())
-}
-
 // ---------- BUILD PROFILE: nuôi profile login giống real user ----------
 
 const WARMUP_SITES: &[&str] = &[
@@ -142,10 +118,9 @@ const WARMUP_SITES: &[&str] = &[
 ];
 
 /// BUILD PROFILE (warm-up): mở Chrome login, dạo vài site phổ biến + vào trang DS
-/// đọc nội dung (như user lướt web), đợi đủ lâu để:
-/// - Chrome cache assets phổ biến (favicon, JS của các CDN)
-/// - Google/DS set device-id cookies quan sát được (smidV2, ds_session_id)
-/// - lịch sử + IndexedDB của DS tạo nền fingerprint "đã dùng máy"
+/// đọc nội dung (như user lướt web), đợi đủ lâu để Chrome cache assets phổ biến
+/// (favicon, JS của các CDN), Google/DS set device-id cookies quan sát được
+/// (smidV2, ds_session_id), và lịch sử + IndexedDB của DS tạo nền fingerprint "đã dùng máy".
 /// Gọi 1 lần trước khi login acc đầu. Lần login sau dùng lại profile này.
 pub async fn build_profile(warmup_secs: u64) -> Result<String> {
     let (mut child, profile) = spawn_login_chrome().await?;
@@ -224,7 +199,7 @@ impl CdpConn {
         let id = self.next_id;
         self.ws
             .send(Message::Text(
-                json!({"id": id, "method": method, "params": params}).to_string().into(),
+                json!({"id": id, "method": method, "params": params}).to_string(),
             ))
             .await?;
         while let Some(msg) = self.ws.next().await {
