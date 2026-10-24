@@ -602,10 +602,13 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         if !think_dropped && !think_buf.is_empty() {
                             yield Out::Reasoning(std::mem::take(&mut think_buf));
                         }
-                        // token: số thật của web (cộng dồn theo phiên) trừ phần output lượt này; không có thì ước lượng
-                        let completion_tokens = (est_tokens(&full_text) + think_est) as i64;
+                        // token: số thật của web (cộng dồn theo phiên) trừ phần output lượt này; không có thì ước lượng.
+                        // Đo thực tế: accumulated_token_usage KHÔNG tính token suy nghĩ (think 2K hay 5K ký tự đều ra ~600),
+                        // nên chỉ trừ output; còn completion_tokens báo ra vẫn gồm cả think (đúng nghĩa OpenAI/DeepSeek API).
+                        let out_est = est_tokens(&full_text) as i64;
+                        let completion_tokens = out_est + think_est as i64;
                         let prompt_tokens = match real_usage {
-                            Some(u) => (u as i64 - completion_tokens).max(1),
+                            Some(u) => (u as i64 - out_est).max(1),
                             None => est_tokens(prompt_used) as i64 + prior_tokens as i64,
                         };
                         // phần ngữ cảnh đã nằm sẵn trong phiên web (nối tiếp) = cached
