@@ -297,3 +297,32 @@ npx wrangler secret put WORKER_TOKEN   # bearer token cho client
 - 429 có header `Retry-After`; SSE có keep-alive 10s; lỗi upstream trả `error` rõ ràng.
 - **Không hỗ trợ** (web không có): `temperature`, `top_p`, `max_tokens`, `stop`, `tool_choice`, `response_format`, `n>1`. Chúng bị bỏ qua.
 - `/api/stats` → `pool.stateful`: `hits`/`misses` (tỉ lệ nối tiếp phiên), số hội thoại và phiên đang mở.
+
+## Cấu hình dsh
+
+dsh đọc danh sách model từ file patch của profile, **không** tự lấy từ `/v1/models`, nên đổi harness xong phải cập nhật file này (nếu không dsh giữ `contextWindow` và model cũ).
+
+Tự động (idempotent, có backup `.bak.<giờ>`):
+
+```bash
+deploy/setup-dsh.sh                       # profile ~/.dsh/profiles/web, harness http://127.0.0.1:8790/v1
+deploy/setup-dsh.sh ~/.dsh/profiles/web http://127.0.0.1:8790/v1
+DS_CONTEXT_TOKENS=300000 deploy/setup-dsh.sh   # đổi cửa sổ ngữ cảnh báo cho dsh
+```
+
+Cần PyYAML. Script thêm provider `ds-harness` (1 model `deepseek-web`, nhận ảnh, ctx 500K, `reasoningEfforts` off→none / còn lại→max, usage trong stream) và đặt làm model mặc định. Mở lại dsh rồi chọn **DeepSeek Web (harness, free)**.
+
+Làm tay: trong `~/.dsh/profiles/web/cordis.patch.yml`, mục `llm-pi-ai` → `providers.ds-harness.models` chỉ giữ:
+
+```yaml
+- id: deepseek-web
+  name: DeepSeek Web (harness, free)
+  contextWindow: 500000
+  maxTokens: 32768
+  input: [text, image]
+  reasoningEfforts: {off: none, low: max, high: max, max: max}
+```
+
+kèm `compat: {supportsDeveloperRole: false, supportsReasoningEffort: true, supportsUsageInStreaming: true}`, và `agent-default-model` → `model: deepseek-web`. Nếu harness đặt `DS_API_KEY`, khai báo biến môi trường `DS_HARNESS_API_KEY` trong `~/.dsh/.env`.
+
+`contextWindow` nên ≤ `DS_CONTEXT_TOKENS` của harness (web nhận ≥500K token, đo thực tế; ~1,1M thì trả stream rỗng). Muốn dsh nén sớm hơn (model dài hay lú) thì hạ xuống 200–300K.
