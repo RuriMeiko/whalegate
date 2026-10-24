@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>ds-harness</title>
+<title>rurimeiko-ds-api/rust</title>
 <style>
   :root {
     --bg: #ebe4d3; --ink: #1d1b17; --mute: #5f5846; --hair: #cfc5ad;
@@ -19,7 +19,8 @@
 
   /* thanh trên */
   header { display: flex; align-items: center; gap: 10px; padding: 18px 0 12px; }
-  h1 { margin: 0; font: 600 15px/1 var(--mono); flex: 1; }
+  h1 { margin: 0; font: 600 15px/1.2 var(--mono); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  h1 .sl { color: var(--mute); font-weight: 400; }
   .live { font: 12px/1 var(--mono); color: var(--mute); display: flex; align-items: center; gap: 7px; margin-right: 6px; }
   .dot { width: 8px; height: 8px; background: var(--ink); display: inline-block; }
   .dot.off { background: transparent; border: 1px solid var(--mute); }
@@ -50,7 +51,7 @@
   .acc { border-bottom: 1px solid var(--hair); }
   .acc:last-child { border-bottom: 0; }
   .acc > .hd { display: flex; align-items: center; gap: 10px; padding: 11px 0; cursor: pointer; min-height: 44px; width: 100%; text-align: left; background: none; border: 0; font: inherit; color: inherit; letter-spacing: 0; }
-  .acc > .hd:hover:not(:disabled) { background: none; color: inherit; }
+  .acc > .hd:hover:not(:disabled) { background: none; }
   .acc .nm { flex: 1; min-width: 0; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acc .st { font: 12px/1 var(--mono); color: var(--mute); white-space: nowrap; }
   .acc .st.bad { color: var(--bad); } .acc .st.warn { color: var(--warn); } .acc .st.run { color: var(--ink); }
@@ -59,13 +60,13 @@
   .acc.open .more { display: flex; }
   .acc .more .sp { flex: 1; min-width: 12px; }
 
-  button { font: 500 12px/1 var(--mono); letter-spacing: .04em; color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 9px 14px; cursor: pointer; transition: background .12s, color .12s; touch-action: manipulation; }
-  button:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
+  button { font: 500 12px/1 var(--mono); letter-spacing: .04em; color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 9px 14px; cursor: pointer; touch-action: manipulation; }
+  button:hover:not(:disabled) { background: var(--hair); }
   button:disabled { opacity: .4; cursor: default; }
-  button.solid { background: var(--ink); color: var(--bg); } button.solid:hover:not(:disabled) { background: transparent; color: var(--ink); }
+  button.solid { background: var(--ink); color: var(--bg); } button.solid:hover:not(:disabled) { background: #3b372f; }
   button.sm { padding: 7px 11px; font-size: 11px; }
-  button.del { border-color: var(--bad); color: var(--bad); } button.del:hover:not(:disabled) { background: var(--bad); color: var(--bg); }
-  button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); } button.danger:hover:not(:disabled) { background: transparent; color: var(--bad); }
+  button.del { border-color: var(--bad); color: var(--bad); } button.del:hover:not(:disabled) { background: #e6c9c2; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); } button.danger:hover:not(:disabled) { background: #8a2918; }
   button.ghost { border-color: transparent; color: var(--mute); padding-left: 4px; padding-right: 4px; } button.ghost:hover:not(:disabled) { background: transparent; color: var(--ink); text-decoration: underline; }
   button.ghost.bad { color: var(--bad); } button.ghost.bad:hover:not(:disabled) { color: var(--bad); }
   .empty { color: var(--mute); font: 12px/1.4 var(--mono); padding: 6px 0; }
@@ -75,8 +76,10 @@
   .modal { position: fixed; inset: 0; z-index: 40; display: none; padding: 24px; align-items: center; justify-content: center; }
   .modal.open { display: flex; animation: pop .18s steps(4) both; }
   #cfmModal { z-index: 42; }
+  @keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-7px); } 40% { transform: translateX(7px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(4px); } }
+  .dlg.shake { animation: shake .36s steps(8); }
   @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-  @media (prefers-reduced-motion: reduce) { .modal.open { animation: none; } button { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .modal.open, .dlg.shake { animation: none; } }
   .dlg { background: var(--bg); border: 1px solid var(--ink); width: min(540px, 100%); max-height: 100%; display: flex; flex-direction: column; box-shadow: 6px 6px 0 var(--ink); }
   .dlg.log { width: min(1280px, 100%); height: 100%; }
   .dlg .top { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--ink); flex-wrap: wrap; }
@@ -96,14 +99,17 @@
   .row:last-child { border-bottom: 0; }
   .row .t { flex: 1; font: 13px/1.35 var(--sans); min-width: 0; }
   .row .t small { display: block; font: 11px/1.3 var(--mono); color: var(--mute); margin-top: 2px; }
-  .row.dirty { border-left: 3px solid var(--warn); padding-left: 8px; }
+  .row.dirty { background: #ddd3b9; margin: 0 -14px; padding-left: 14px; padding-right: 14px; }
+  .row .undo { width: 32px; height: 32px; padding: 0; flex: none; border-color: transparent; visibility: hidden; font-size: 15px; line-height: 1; }
+  .row.dirty .undo { visibility: visible; border-color: var(--ink); }
   .row .u { font: 11px/1 var(--mono); color: var(--mute); }
   .row input[type=number] { width: 112px; text-align: right; } .row select { padding: 7px 8px; }
-  .row .x { border: 0; padding: 6px; color: var(--mute); }
-  .sw { width: 40px; height: 22px; padding: 0; position: relative; flex: none; }
-  .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; background: var(--ink); transition: left .12s; }
-  .sw.on { background: var(--ink); } .sw.on::after { left: 21px; background: var(--bg); }
-  .sw:hover:not(:disabled), .sw.on:hover:not(:disabled) { background: transparent; } .sw.on:hover:not(:disabled) { background: var(--ink); }
+  .seg2 { display: inline-flex; border: 1px solid var(--ink); flex: none; }
+  .seg2 button { border: 0; padding: 8px 14px; font-size: 11px; min-width: 52px; }
+  .seg2 button + button { border-left: 1px solid var(--ink); }
+  .seg2 button.on { background: var(--ink); color: var(--bg); }
+  .seg2 button:not(.on):hover:not(:disabled) { background: var(--hair); }
+  .seg2 button.on:hover:not(:disabled) { background: var(--ink); }
 
   /* log */
   .lbody { flex: 1; overflow: auto; padding: 8px 12px 12px; font: 12px/1.55 var(--mono); position: relative; -webkit-overflow-scrolling: touch; }
@@ -111,7 +117,7 @@
   .ll time { color: var(--mute); flex: none; } .ll span { white-space: pre-wrap; word-break: break-word; min-width: 0; }
   .ll.err span { color: var(--bad); } .ll.warn span { color: var(--warn); } .ll.dim span { color: var(--mute); }
   #logJump { position: absolute; right: 16px; bottom: 12px; display: none; }
-  .fchip.on { background: var(--ink); color: var(--bg); }
+  .fchip.on, .fchip.on:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
   #logQ { width: 160px; }
 
   /* thông báo */
@@ -122,7 +128,7 @@
 
   @media (max-width: 860px) { .k { grid-column: span 6; } .c8, .c4 { grid-column: span 12; } }
   @media (max-width: 560px) {
-    .wrap { padding: 0 12px 32px; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
+    .wrap { padding: 0 12px 32px; } h1 { font-size: 13px; } #liveTxt { display: none; } .live { margin-right: 0; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
     .modal { padding: 0; } .dlg, .dlg.log { width: 100%; height: 100%; max-height: none; box-shadow: none; border: 0; }
     .modal:not(#logModal):not(#setModal) .dlg { height: auto; max-height: 100%; align-self: flex-end; border-top: 1px solid var(--ink); }
     .ll { flex-direction: column; gap: 0; } #logQ { width: 100%; order: 9; }
@@ -134,7 +140,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>ds-harness</h1>
+    <h1>rurimeiko-ds-api<span class="sl">/rust</span></h1>
     <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
     <button class="sm" onclick="openLog()">log</button>
     <button class="sm" onclick="openSettings()">cài đặt</button>
@@ -423,14 +429,20 @@ async function loadStats() {
 
 /* ---- cài đặt: sửa → Lưu → đợi rảnh → khởi động lại ---- */
 let CFG = [], PENDING = {}, BUSY = false;
-const eff = (c) => (c.key in PENDING ? (PENDING[c.key] === null ? c.default : PENDING[c.key]) : c.value);
+const eff = (c) => (c.key in PENDING ? PENDING[c.key] : c.value);
 
 function openSettings() { openModal('setModal'); loadCfg(); }
-function closeSettings() { PENDING = {}; closeModal('setModal'); }
+function closeSettings() {
+  if (Object.keys(PENDING).length && !BUSY) {
+    const d = document.querySelector('#setModal .dlg'); d.classList.remove('shake'); void d.offsetWidth; d.classList.add('shake');
+    say('Chưa lưu thay đổi — bấm Lưu hoặc Huỷ', 'err'); return;
+  }
+  closeModal('setModal');
+}
 
 function stage(key, value) {
   const c = CFG.find((x) => x.key === key); if (!c) return;
-  if (value !== null && String(value) === c.value) delete PENDING[key]; else PENDING[key] = value;
+  if (String(value) === c.value) delete PENDING[key]; else PENDING[key] = String(value);
   renderCfg();
 }
 function cfgRow(c) {
@@ -438,8 +450,12 @@ function cfgRow(c) {
   const t = el('div', 't', c.label); if (c.hint) t.append(el('small', null, c.hint));
   const ctl = el('div'); ctl.style.cssText = 'display:flex;align-items:center;gap:6px';
   if (c.kind === 'bool') {
-    const b = el('button', 'sw' + (v === '1' ? ' on' : '')); b.setAttribute('role', 'switch'); b.setAttribute('aria-checked', v === '1'); b.setAttribute('aria-label', c.label);
-    b.onclick = () => stage(c.key, v === '1' ? '0' : '1'); ctl.append(b);
+    const g = el('div', 'seg2'); g.setAttribute('role', 'radiogroup'); g.setAttribute('aria-label', c.label);
+    for (const [val, txt] of [['1', 'BẬT'], ['0', 'TẮT']]) {
+      const b = el('button', v === val ? 'on' : '', txt); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', v === val);
+      b.onclick = () => stage(c.key, val); g.append(b);
+    }
+    ctl.append(g);
   } else if (c.kind === 'choice') {
     const sel = el('select'); sel.setAttribute('aria-label', c.label);
     for (const o of c.choices) { const op = el('option', null, o); op.value = o; if (o === v) op.selected = true; sel.append(op); }
@@ -449,7 +465,9 @@ function cfgRow(c) {
     inp.onchange = () => stage(c.key, inp.value); inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
     ctl.append(inp); if (c.unit) ctl.append(el('span', 'u', c.unit));
   }
-  if (c.overridden || dirty) { const x = el('button', 'x', '↺'); x.title = 'về mặc định'; x.setAttribute('aria-label', 'Về mặc định'); x.onclick = () => stage(c.key, null); ctl.append(x); }
+  const undo = el('button', 'undo', '↺'); undo.title = 'Hoàn tác'; undo.setAttribute('aria-label', 'Hoàn tác thay đổi này'); undo.tabIndex = dirty ? 0 : -1;
+  undo.onclick = () => { delete PENDING[c.key]; renderCfg(); };
+  ctl.append(undo);
   row.append(t, ctl); return row;
 }
 function renderCfg() {
@@ -461,16 +479,27 @@ function renderCfg() {
 function renderFoot(wait) {
   const f = $('cfgFoot'), n = Object.keys(PENDING).length; f.textContent = '';
   if (wait) { f.append(...wait); return; }
-  const hard = el('button', 'ghost sm bad', 'Hard reset'); hard.onclick = () => restartFlow('now');
-  if (!n) { f.append(el('span', null, 'Mặc định đã tối ưu sẵn.'), el('span', 'sp'), hard); return; }
-  const save = el('button', 'solid', 'Lưu & áp dụng'); save.onclick = () => saveFlow('idle');
-  const cancel = el('button', 'sm', 'Huỷ'); cancel.onclick = () => { PENDING = {}; renderCfg(); };
-  f.append(el('span', null, n + ' thay đổi'), el('span', 'sp'), cancel, save);
+  if (!n) {
+    const def = el('button', 'sm', 'Về mặc định'); def.onclick = resetDefaults;
+    f.append(el('span', null, 'Mặc định đã tối ưu sẵn.'), el('span', 'sp'), def); return;
+  }
+  const idle = el('button', 'sm', 'Lưu · áp dụng khi rảnh'); idle.onclick = () => saveFlow('idle');
+  const now = el('button', 'sm solid', 'Lưu · áp dụng ngay'); now.onclick = () => saveFlow('now');
+  const cancel = el('button', 'ghost sm', 'Huỷ'); cancel.onclick = () => { PENDING = {}; renderCfg(); };
+  f.append(el('span', null, n + ' thay đổi'), el('span', 'sp'), cancel, idle, now);
+}
+async function resetDefaults() {
+  const diff = CFG.filter((c) => c.value !== c.default || c.overridden);
+  if (!diff.length) return say('Đang dùng mặc định rồi', 'ok');
+  if (!(await ask('Về mặc định?', 'Đặt cả 7 cài đặt về giá trị mặc định. Bấm Lưu để áp dụng.', 'Về mặc định'))) return;
+  PENDING = {}; for (const c of diff) PENDING[c.key] = c.default;
+  renderCfg();
 }
 async function loadCfg() { try { CFG = (await (await fetch('/api/settings')).json()).items; renderCfg(); } catch (e) {} }
 
 async function saveFlow(mode) {
   if (BUSY) return;
+  if (mode === 'now' && !(await ask('Áp dụng ngay?', 'Server khởi động lại ngay và cắt các request đang chạy (dsh tự thử lại). Chọn "áp dụng khi rảnh" nếu muốn chờ chúng xong.', 'Áp dụng ngay', true))) return;
   BUSY = true;
   try {
     const d = await post('/api/settings', PENDING);
@@ -478,14 +507,10 @@ async function saveFlow(mode) {
     PENDING = {}; await loadCfg(); await doRestart(mode);
   } catch (e) { say(e.message, 'err'); } finally { BUSY = false; }
 }
-async function restartFlow(mode) {
-  if (!(await ask('Hard reset?', 'Khởi động lại ngay, cắt mọi request đang chạy (dsh tự thử lại). Hội thoại stateful đang giữ sẽ gửi lại đủ ngữ cảnh.', 'Hard reset', true))) return;
-  doRestart(mode);
-}
 async function doRestart(mode) {
   const boot0 = (await (await fetch('/api/restart')).json()).boot;
   await post('/api/restart', {mode});
-  const msg = el('span', null, mode === 'idle' ? 'Đang chờ hết request…' : 'Đang khởi động lại…');
+  const msg = el('span', null, mode === 'idle' ? 'Đã lưu · đang chờ hết request…' : 'Đã lưu · đang khởi động lại…');
   const cancel = el('button', 'sm', 'Huỷ');
   cancel.onclick = async () => { await post('/api/restart', {mode: 'cancel'}); clearInterval(timer); renderFoot(); say('Đã huỷ', 'ok'); };
   renderFoot(mode === 'idle' ? [msg, el('span', 'sp'), cancel] : [msg]);
