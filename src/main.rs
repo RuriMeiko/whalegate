@@ -9,6 +9,7 @@ mod server;
 mod settings;
 mod setup_dsh;
 mod stream_guard;
+mod transfer;
 mod usage;
 
 use anyhow::Result;

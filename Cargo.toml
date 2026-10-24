@@ -1,6 +1,6 @@
 [package]
 name = "whalegate"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 
 [dependencies]
@@ -20,6 +20,11 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 # Chỉ bản release đóng gói (CI) bật: nhúng OpenSSL tĩnh → binary Linux musl chạy được trên mọi distro.
 openssl = { version = "0.10", optional = true, features = ["vendored"] }
+# Tự cập nhật: giải nén bản release tải từ GitHub (tar.gz cho unix, zip cho Windows)
+flate2 = "1"
+tar = "0.4"
+[target.'cfg(windows)'.dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [features]
 vendored-openssl = ["dep:openssl"]

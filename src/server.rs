@@ -389,7 +389,7 @@ async fn restart_when_idle(st: Arc<AppState>) {
 
 /// Ghi mọi thứ xuống đĩa, xoá các phiên web đang giữ (không để mồ côi trên DS) rồi exec lại chính binary này
 /// (cùng PID nên systemd không thấy gì; cũng nạp luôn bản build mới nếu có). Lỗi exec → thoát, systemd khởi động lại.
-async fn do_restart(st: Arc<AppState>) {
+pub(crate) async fn do_restart(st: Arc<AppState>) {
     crate::elog!("[restart] đang khởi động lại…");
     flush_store(&st).await;
     let _ = tokio::task::spawn_blocking(crate::usage::flush_blocking).await;
@@ -2630,6 +2630,8 @@ pub async fn run(port: u16) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/accounts", get(api_list_accounts).post(api_add_account))
+        .route("/api/accounts/export", get(crate::transfer::api_export_accounts))
+        .route("/api/accounts/import", post(crate::transfer::api_import_accounts))
         .route("/api/accounts/{id}", axum::routing::delete(api_delete_account).patch(api_edit_account))
         .route("/api/accounts/{id}/verify", post(api_verify_account))
         .route("/api/accounts/{id}/pool", post(api_toggle_pool))
@@ -2644,6 +2646,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/settings", get(api_settings_get).post(api_settings_set))
         .route("/api/restart", get(api_restart_status).post(api_restart))
         .route("/api/dsh", get(api_dsh_status).post(api_dsh_setup))
+        .route("/api/update", get(crate::transfer::api_update_check).post(crate::transfer::api_update_apply))
         .route("/v1/chat/completions", post(crate::chat::api_chat_completions))
         .route("/v1/models", get(api_models))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB — prompt dài (256K+ token)

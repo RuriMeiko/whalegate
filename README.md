@@ -30,6 +30,8 @@
 - [Stateful conversations](#stateful-conversations)
 - [Account pool & failover](#account-pool--failover)
 - [Dashboard](#dashboard)
+- [Moving accounts between machines](#moving-accounts-between-machines)
+- [Updating](#updating)
 - [Configuration](#configuration)
 - [HTTP endpoints](#http-endpoints)
 - [Using with dsh (PTC mode)](#using-with-dsh-ptc-mode)
@@ -53,6 +55,8 @@
 | 🔐 **Proof-of-work** | Built-in solver for `DeepSeekHashV1`, with optional prefetch for the next request |
 | 🌐 **Session capture** | Log in once in Chrome. The gateway grabs the token and cookies over CDP and refreshes the cookies every 5 minutes |
 | 📦 **One-line install** | Prebuilt static binaries for Linux (x86_64/arm64), macOS and Windows. The installer starts the gateway on login and configures dsh |
+| 🔄 **Self-update** | The dashboard checks GitHub Releases and, on one click, downloads, checksum-verifies, installs and restarts into the new build |
+| 📦 **Portable accounts** | Export the pool as a file or clipboard JSON and import it on another machine; merging is idempotent |
 | 📊 **Dashboard** | Accounts, live logs, token usage with "what this would cost on the API", latency p50/p90, and settings with graceful restart |
 
 ---
@@ -458,8 +462,47 @@ Open `http://127.0.0.1:8790/`. It is loopback-only.
 - **Latency:** p50/p90 over the last hour, plus the error count.
 - **Live logs:** SSE stream with filters and search. Useful tags include `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` and `[ds-fail]`.
 - **Settings:** verified knobs only. Saving waits until no request is in flight, then the process re-execs itself (same PID, picks up a new build) and the page reloads. **Hard reset** restarts immediately.
+- **Export / import:** move the whole account pool to another machine as a JSON file or straight through the clipboard. Import merges by DeepSeek user id, so running it twice is safe; it never deletes accounts you already have.
+- **Updates:** the dashboard checks GitHub Releases on load and every 30 minutes. When a newer tag exists a banner appears; one click downloads the prebuilt binary, verifies its SHA-256, swaps it in place and re-execs, and the page reloads by itself once the new process is up.
 
 ---
+## Moving accounts between machines
+
+The pool lives in `~/.whalegate/accounts.json`, which holds session tokens — the file *is* the credential. Two ways to carry it over, both from the dashboard:
+
+- **Export → Tải file** downloads `whalegate-accounts-<ts>.json`; copy it over and use **Import → chọn file** on the other machine.
+- **Export → Copy clipboard** puts the same JSON on the clipboard (falling back to a hidden textarea when the browser blocks the async clipboard API); paste it into the Import dialog on the target machine.
+
+Import merges instead of replacing. Accounts are matched by DeepSeek user id first, then by token, so importing the same bundle twice adds nothing the second time. Without *overwrite*, accounts that already exist are skipped; with it, their token and cookies are replaced (and their stale web sessions cleared). Nothing is ever deleted.
+
+> [!WARNING]
+> An exported bundle contains every account's token and cookies. Anyone holding it can use those sessions. Move it over a channel you trust, delete the file afterwards, and never commit it — `accounts.json` and `*.session` are already in `.gitignore`.
+
+---
+
+## Updating
+
+`GET /api/update` reads `https://api.github.com/repos/RuriMeiko/whalegate/releases/latest`, compares it with the running `CARGO_PKG_VERSION` and returns `{current, latest, has_update, notes, url}`.
+
+`POST /api/update` then:
+
+1. downloads `whalegate-<target>.tar.gz` (`.zip` on Windows) and `SHA256SUMS.txt` for the newest tag,
+2. verifies the SHA-256 (implemented in-tree, no extra dependency),
+3. extracts the binary, copies it next to the running one and `rename`s it into place — atomic, and safe while the old inode is still executing,
+4. answers the HTTP request, then re-execs so the new binary takes over the same PID.
+
+The dashboard checks on load and every 30 minutes, shows a banner when a newer tag exists, and reloads the page once `/api/restart` reports a new boot id. Requests in flight are cut; agents such as dsh retry them.
+
+Windows cannot replace a running executable: the new binary is staged as `whalegate.exe.new` and the API returns an error explaining that a manual restart will pick it up.
+
+If you installed with `install.sh` / `install.ps1` there is nothing else to do — the binary is replaced in place and the service config is untouched. To update from a shell instead, re-run the installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RuriMeiko/whalegate/main/install.sh | sh
+```
+
+---
+
 
 ## Configuration
 
@@ -509,6 +552,9 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `GET` / `POST` | `/api/settings` | Read or update settings (`null` resets a key) |
 | `GET` / `POST` | `/api/dsh` | dsh status / write the dsh config (`{"preset": "ptc" \| "standard"}`) |
 | `GET` / `POST` | `/api/restart` | Status / `{"mode": "idle" \| "now" \| "cancel"}` |
+| `GET` | `/api/accounts/export` | Download the whole pool as a JSON bundle (contains tokens — treat as a secret) |
+| `POST` | `/api/accounts/import` | Merge a bundle or `{accounts: [...]}`. `dry_run` previews, `overwrite` replaces tokens of known users |
+| `GET` / `POST` | `/api/update` | Check the latest GitHub release / download, verify and install it, then restart |
 
 > [!IMPORTANT]
 > `/` and `/api/*` only answer **loopback**, even when the port is exposed. `/v1/*` answers anyone, so set `DS_API_KEY` before exposing it. A reverse proxy on the same machine makes every request look like loopback, so never proxy the dashboard publicly.

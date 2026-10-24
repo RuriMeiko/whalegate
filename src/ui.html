@@ -144,6 +144,12 @@
   .toast.ok { border-left-color: var(--ok); } .toast.err { border-left-color: var(--bad); } .toast.wait { border-left-color: var(--warn); }
   .toast span { flex: 1; word-break: break-word; } .toast b { cursor: pointer; font-weight: 400; color: var(--mute); padding: 0 4px; }
 
+  /* banner cập nhật */
+  #updBar { display: none; align-items: center; gap: 10px; border: 1px solid var(--ink); background: #ddd3b9; padding: 9px 12px; margin: 0 0 14px; font: 12px/1.4 var(--mono); flex-wrap: wrap; }
+  #updBar.show { display: flex; }
+  #updBar .t { flex: 1; min-width: 180px; }
+  #updBar b { font-weight: 600; }
+
   @media (max-width: 860px) { .k { grid-column: span 6; } .c8, .c4 { grid-column: span 12; } }
   @media (max-width: 560px) {
     .wrap { padding: 0 12px 32px; } h1 { font-size: 13px; } #liveTxt { display: none; } .live { margin-right: 0; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
@@ -166,6 +172,13 @@
     <button class="sm" onclick="openSettings()">cài đặt</button>
   </header>
 
+  <div id="updBar" role="status">
+    <span class="t" id="updTxt">Có bản mới</span>
+    <button class="sm" onclick="openUpdate()">xem</button>
+    <button class="sm solid" id="updGo" onclick="doUpdate()">Cập nhật</button>
+    <button class="sm ghost" onclick="hideUpdateBar()" aria-label="Ẩn">×</button>
+  </div>
+
   <main class="grid">
     <div class="cell k"><div class="lab">Token hôm nay</div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
     <div class="cell k"><div class="lab">Tiết kiệm hôm nay</div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
@@ -184,7 +197,7 @@
     </div>
 
     <div class="cell c12">
-      <div class="lab"><span>Tài khoản</span><span class="bar"><button class="sm" id="btnBulkV" onclick="bulk('verify')">Verify hết</button><button class="sm" id="btnBulkR" onclick="bulk('reset')">Reset hết</button><button class="sm solid" onclick="openAdd()">+ Thêm</button></span></div>
+      <div class="lab"><span>Tài khoản</span><span class="bar"><button class="sm" id="btnBulkV" onclick="bulk('verify')">Verify hết</button><button class="sm" id="btnBulkR" onclick="bulk('reset')">Reset hết</button><button class="sm" onclick="openExport()">Export</button><button class="sm" onclick="openImport()">Import</button><button class="sm solid" onclick="openAdd()">+ Thêm</button></span></div>
       <div id="accList"></div>
       <div id="empty" class="empty" style="display:none">Chưa có tài khoản.</div>
     </div>
@@ -208,6 +221,63 @@
       <button class="ghost sm" id="btnScan" onclick="captureAll()">Quét tab Chrome</button>
       <span class="sp"></span>
       <button class="ghost sm" id="btnBuild" onclick="buildProfile()">Build profile</button>
+    </div>
+  </div>
+</div>
+
+<!-- export danh sách tài khoản -->
+<div id="expModal" class="modal" onclick="if(event.target===this)closeModal('expModal')">
+  <div class="dlg">
+    <div class="top"><h2>Export tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('expModal')">×</button></div>
+    <div class="inner">
+      <p>Gói export chứa <b>token và cookie</b> của mọi tài khoản trong pool — coi như mật khẩu, chỉ chuyển qua kênh tin cậy.</p>
+      <div class="sub" id="expSum">—</div>
+      <p class="sub" style="margin-top:12px">Chọn cách mang đi: tải file <code>.json</code> hoặc copy JSON vào clipboard để dán thẳng vào máy kia.</p>
+    </div>
+    <div class="foot">
+      <button class="ghost sm" onclick="closeModal('expModal')">Huỷ</button>
+      <span class="sp"></span>
+      <button class="sm" id="btnExpClip" onclick="exportClipboard()">Copy clipboard</button>
+      <button class="solid sm" id="btnExpFile" onclick="exportFile()">Tải file</button>
+    </div>
+  </div>
+</div>
+
+<!-- import danh sách tài khoản -->
+<div id="impModal" class="modal" onclick="if(event.target===this)closeModal('impModal')">
+  <div class="dlg">
+    <div class="top"><h2>Import tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('impModal')">×</button></div>
+    <div class="inner">
+      <p>Chọn file gói export, hoặc dán JSON vào ô dưới (dùng khi đã copy clipboard ở máy kia).</p>
+      <input type="file" id="impFile" accept=".json,application/json" onchange="importFilePicked(this)" style="width:100%;margin-bottom:10px">
+      <textarea id="impText" rows="5" spellcheck="false" autocomplete="off" placeholder='{"kind":"whalegate-accounts", ...} hoặc [... ]' oninput="importPreview()"></textarea>
+      <div class="sub" id="impInfo">Chưa có dữ liệu.</div>
+      <label class="fl" style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font:13px/1.4 var(--sans);color:var(--ink)">
+        <input type="checkbox" id="impOver" onchange="importPreview()"> Ghi đè token/cookie của tài khoản đã có
+      </label>
+    </div>
+    <div class="foot">
+      <button class="ghost sm" onclick="closeModal('impModal')">Huỷ</button>
+      <span class="sp"></span>
+      <button class="solid sm" id="btnImp" onclick="importApply()" disabled>Import</button>
+    </div>
+  </div>
+</div>
+
+<!-- cập nhật -->
+<div id="updModal" class="modal" onclick="if(event.target===this)closeModal('updModal')">
+  <div class="dlg">
+    <div class="top"><h2>Cập nhật</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('updModal')">×</button></div>
+    <div class="inner">
+      <table><tbody id="updInfo"></tbody></table>
+      <p class="sub" style="margin-top:10px">Cập nhật tải bản dựng sẵn từ GitHub, kiểm tra SHA-256, thay binary rồi tự khởi động lại. Request đang chạy bị cắt — dsh sẽ tự thử lại.</p>
+      <pre id="updNotes" style="white-space:pre-wrap;font:12px/1.5 var(--mono);color:var(--mute);margin:10px 0 0;max-height:240px;overflow:auto"></pre>
+    </div>
+    <div class="foot">
+      <button class="ghost sm" onclick="closeModal('updModal')">Đóng</button>
+      <span class="sp"></span>
+      <button class="sm" id="btnUpdChk" onclick="loadUpdate(true)">Dò lại</button>
+      <button class="solid sm" id="btnUpdGo" onclick="doUpdate()">Cập nhật &amp; khởi động lại</button>
     </div>
   </div>
 </div>
@@ -673,6 +743,206 @@ async function doRestart(mode) {
   }, 700);
 }
 
+/* ---- export / import danh sách tài khoản ---- */
+let EXP_DATA = null;
+
+async function openExport() {
+  EXP_DATA = null; $('expSum').textContent = '—';
+  $('btnExpFile').disabled = $('btnExpClip').disabled = false;
+  openModal('expModal');
+  try {
+    const r = await fetch('/api/accounts/export', {cache: 'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const txt = await r.text();
+    EXP_DATA = {txt, name: 'whalegate-accounts-' + Math.floor(Date.now() / 1000) + '.json'};
+    let n = 0;
+    try { n = (JSON.parse(txt).accounts || []).length; } catch (e) {}
+    $('expSum').textContent = n + ' tài khoản · ' + (new Blob([txt]).size / 1024).toFixed(1) + ' KB';
+  } catch (e) {
+    $('expSum').textContent = 'Không tạo được gói export: ' + e.message;
+    $('btnExpFile').disabled = $('btnExpClip').disabled = true;
+  }
+}
+
+async function ensureExport() {
+  if (!EXP_DATA) await openExport();
+  if (!EXP_DATA) throw new Error('chưa có dữ liệu export');
+  return EXP_DATA;
+}
+
+async function exportFile() {
+  const b = $('btnExpFile'); b.disabled = true;
+  try {
+    const d = await ensureExport();
+    const url = URL.createObjectURL(new Blob([d.txt], {type: 'application/json'}));
+    const a = el('a'); a.href = url; a.download = d.name;
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    say('Đã tải ' + d.name, 'ok');
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
+
+async function exportClipboard() {
+  const b = $('btnExpClip'); b.disabled = true;
+  try {
+    const d = await ensureExport();
+    try {
+      await navigator.clipboard.writeText(d.txt);
+    } catch (e) {
+      const ta = el('textarea'); ta.value = d.txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.append(ta); ta.select();
+      const ok = document.execCommand('copy'); ta.remove();
+      if (!ok) throw new Error('trình duyệt chặn clipboard — dùng "Tải file"');
+    }
+    say('Đã copy gói export vào clipboard', 'ok');
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
+
+let IMP_RAW = null, IMP_PLAN = null, IMP_T = null;
+function openImport() {
+  IMP_RAW = null; IMP_PLAN = null;
+  $('impFile').value = ''; $('impText').value = ''; $('impOver').checked = false;
+  $('impInfo').textContent = 'Chưa có dữ liệu.'; $('btnImp').disabled = true;
+  openModal('impModal');
+}
+
+function importParse(text) {
+  const t = (text || '').trim();
+  if (!t) return null;
+  let v;
+  try { v = JSON.parse(t); } catch (e) { throw new Error('JSON không hợp lệ: ' + e.message); }
+  if (Array.isArray(v)) return {accounts: v};
+  if (v && typeof v === 'object') return v;
+  throw new Error('gói import phải là object hoặc mảng');
+}
+
+function importFilePicked(inp) {
+  const f = inp.files && inp.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { $('impText').value = String(rd.result || ''); importPreview(); };
+  rd.onerror = () => say('Không đọc được file', 'err');
+  rd.readAsText(f);
+}
+
+function importPreview() {
+  clearTimeout(IMP_T);
+  IMP_PLAN = null; $('btnImp').disabled = true;
+  const raw = $('impText').value;
+  if (!raw.trim()) { $('impInfo').textContent = 'Chưa có dữ liệu.'; return; }
+  IMP_T = setTimeout(async () => {
+    try {
+      const parsed = importParse(raw);
+      IMP_RAW = parsed;
+      const probe = Object.assign({}, parsed, {dry_run: true, overwrite: $('impOver').checked});
+      const r = await fetch('/api/accounts/import', {method: 'POST', headers: J, body: JSON.stringify(probe)});
+      const d = await r.json();
+      if (!r.ok || d.error) { $('impInfo').textContent = d.error || ('lỗi ' + r.status); return; }
+      IMP_PLAN = d;
+      const bits = [d.added + ' mới', d.updated + ' ghi đè', d.skipped + ' bỏ qua (đã có)'];
+      $('impInfo').textContent = 'Sẽ nhập: ' + bits.join(' · ') + ' — pool hiện ' + d.total + ' tài khoản.';
+      $('btnImp').disabled = !(d.added || d.updated);
+    } catch (e) { $('impInfo').textContent = e.message; }
+  }, 220);
+}
+
+async function importApply() {
+  if (!IMP_RAW) return say('Chưa có dữ liệu', 'err');
+  if (!(await ask('Import?', 'Gộp tài khoản từ gói vào pool' + ($('impOver').checked ? ', ghi đè token/cookie của tài khoản đã có' : '') + '. Không xoá tài khoản nào đang có.', 'Import'))) return;
+  const b = $('btnImp'); b.disabled = true;
+  try {
+    const body = Object.assign({}, IMP_RAW, {overwrite: $('impOver').checked});
+    const r = await fetch('/api/accounts/import', {method: 'POST', headers: J, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok || d.error) return say(d.error || ('lỗi ' + r.status), 'err');
+    say('Đã import: +' + d.added + ' mới, ~' + d.updated + ' cập nhật, ' + d.skipped + ' bỏ qua', 'ok');
+    closeModal('impModal'); loadStats();
+  } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
+
+/* ---- cập nhật từ xa ---- */
+const UPD = {info: null, hidden: false, busy: false};
+const VER = (s) => String(s || '').replace(/^v/i, '');
+
+function updBarShow(info) {
+  UPD.info = info;
+  if (info && info.has_update && !UPD.hidden) {
+    const box = $('updTxt'); box.textContent = '';
+    box.append(el('b', null, 'Bản mới ' + info.latest), el('span', null, ' — đang chạy ' + info.current));
+    $('updBar').classList.add('show');
+  } else $('updBar').classList.remove('show');
+}
+function hideUpdateBar() { UPD.hidden = true; $('updBar').classList.remove('show'); }
+
+async function checkUpdate(quiet) {
+  try {
+    const i = await (await fetch('/api/update', {cache: 'no-store'})).json();
+    updBarShow(i);
+    return i;
+  } catch (e) {
+    if (!quiet) say('Không dò được bản mới: ' + e.message, 'err');
+    return null;
+  }
+}
+
+async function openUpdate() {
+  openModal('updModal');
+  await loadUpdate(false);
+}
+
+async function loadUpdate(manual) {
+  const body = $('updInfo'); body.textContent = '';
+  const row = (k, v, cls) => { const tr = el('tr'); tr.append(el('td', null, k), el('td', cls || null, v)); body.append(tr); };
+  row('Đang chạy', VER(UPD.info ? UPD.info.current : '—'));
+  row('Mới nhất', 'đang kiểm tra…');
+  const i = await checkUpdate(!manual);
+  body.textContent = '';
+  if (!i) { row('Đang chạy', '—'); row('Lỗi', 'không gọi được /api/update', 'bad'); $('btnUpdGo').disabled = true; return; }
+  row('Đang chạy', VER(i.current));
+  row('Mới nhất', i.latest ? VER(i.latest) : '—');
+  row('Trạng thái', i.error ? i.error : i.has_update ? 'có bản mới' : 'đã là bản mới nhất', i.error ? 'bad' : i.has_update ? 'warn' : '');
+  $('btnUpdGo').disabled = !i.has_update;
+  $('btnUpdGo').textContent = i.has_update ? 'Cập nhật lên ' + VER(i.latest) : 'Đã mới nhất';
+  const nt = $('updNotes'); nt.textContent = i.notes ? i.notes.trim() : '';
+  if (i.url) nt.title = i.url;
+}
+
+async function doUpdate() {
+  if (UPD.busy) return;
+  let info = UPD.info;
+  if (!info || !info.has_update) info = await checkUpdate(false);
+  if (!info || !info.has_update) return say('Không có bản mới để cập nhật', 'err');
+  if (!(await ask('Cập nhật?', 'Tải ' + info.latest + ', thay binary và khởi động lại gateway. Request đang chạy bị cắt; cấu hình và tài khoản giữ nguyên.', 'Cập nhật', true))) return;
+  UPD.busy = true;
+  $('updGo').disabled = $('btnUpdGo').disabled = true;
+  const t = say('Đang tải bản ' + info.latest + '…', 'wait');
+  let boot0 = 0;
+  try { boot0 = (await (await fetch('/api/restart', {cache: 'no-store'})).json()).boot || 0; } catch (e) {}
+  try {
+    const r = await fetch('/api/update', {method: 'POST'});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) {
+      if (t) t.remove();
+      say(d.error || ('cập nhật lỗi ' + r.status), 'err');
+      UPD.busy = false; $('updGo').disabled = $('btnUpdGo').disabled = false;
+      return;
+    }
+    if (t) { t.className = 'toast wait'; t.firstChild.textContent = 'Đã cài ' + info.latest + ' · đang khởi động lại…'; }
+    const t0 = Date.now();
+    const timer = setInterval(async () => {
+      try {
+        const s = await (await fetch('/api/restart', {cache: 'no-store'})).json();
+        if (boot0 && s.boot && s.boot !== boot0) { clearInterval(timer); location.reload(); return; }
+      } catch (e) { /* server đang xuống, chờ */ }
+      if (Date.now() - t0 > 120000) { clearInterval(timer); say('Đã cài bản mới nhưng chưa thấy server lên lại — tải lại trang sau ít giây', 'err'); }
+    }, 600);
+  } catch (e) {
+    if (t) t.remove();
+    say('Cập nhật lỗi: ' + e.message, 'err');
+    UPD.busy = false; $('updGo').disabled = $('btnUpdGo').disabled = false;
+  }
+}
+
 /* ---- log realtime ---- */
 const LOG = {es: null, lines: [], paused: false, filter: 'all', stick: true, max: 3000};
 const ERR_RE = /ds-fail|ds-error|ds-stall|ds-stream|ds-truncated|toolcall-(invalid|unparsed)|lỗi|error|panic|failed/i;
@@ -720,6 +990,8 @@ document.addEventListener('keydown', (e) => {
 
 loadStats();
 setInterval(loadStats, 5000);
+setTimeout(() => checkUpdate(true), 1500);
+setInterval(() => checkUpdate(true), 30 * 60 * 1000);
 </script>
 </body>
 </html>

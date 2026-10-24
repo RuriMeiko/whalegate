@@ -10,7 +10,7 @@
 #   4. prints the dashboard URL — open it and add a DeepSeek account
 #
 # Options (environment variables):
-#   WHALEGATE_VERSION=v0.4.0   pin a version (default: latest release)
+#   WHALEGATE_VERSION=v0.5.0   pin a version (default: latest release)
 #   WHALEGATE_BIN_DIR=/path    install somewhere else (default: ~/.local/bin)
 #   WHALEGATE_PORT=8790        dashboard / API port
 #   WHALEGATE_NO_SERVICE=1     only install the binary, don't start it
