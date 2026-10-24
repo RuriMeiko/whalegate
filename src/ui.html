@@ -146,6 +146,7 @@ async function loadStats() {
     document.getElementById('poolStats').innerHTML =
       `<span class="poolstat">Accounts: <b>${p.total}</b></span>` +
       `<span class="poolstat">Available: <b>${p.available}</b></span>` +
+      `<span class="poolstat">Đang chạy: <b>${d.accounts.reduce((n, a) => n + (a.in_flight || 0), 0)}/${p.available * p.max_conc_per_acc}</b></span>` +
       `<span class="poolstat">Capacity hint: <b>~${p.capacity_now_rpm_hint} calls/30s</b></span>`;
     const tbody = document.getElementById('accBody');
     tbody.innerHTML = '';
@@ -155,9 +156,12 @@ async function loadStats() {
       const st = a.last_status === 'ok' ? '<span class="status-ok">● ok</span>'
         : (a.last_status || '').includes('refresh') ? '<span class="status-ok">● ok (refreshed)</span>'
         : `<span class="status-bad">● ${a.last_status || '?'}</span>`;
-      const cd = a.cooldown_left_secs > 0
-        ? `<span class="status-warn">cooldown ${a.cooldown_left_secs}s</span>`
-        : 'sẵn sàng';
+      const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
+      const cd = relogin
+        ? `<span class="status-bad">⚠ lỗi ${a.fail_streak} lần liên tiếp — nên đăng nhập lại</span>`
+        : a.cooldown_left_secs > 0
+          ? `<span class="status-warn">cooldown ${a.cooldown_left_secs}s${a.fail_streak ? ' · lỗi liên tiếp ' + a.fail_streak : ''}</span>`
+          : (a.in_flight > 0 ? `<span class="status-ok">đang chạy ${a.in_flight}</span>` : 'sẵn sàng');
       const mini = `<div class="mini">ok ${a.total_ok} · empty ${a.total_empty} · err ${a.total_error}</div>`;
       tr.innerHTML =
         `<td class="name">${a.label}<div class="mini">id ${a.id.slice(0,8)}</div></td>` +

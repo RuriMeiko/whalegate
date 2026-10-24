@@ -48,6 +48,15 @@ struct ChatCtx {
     tools: Option<Vec<Value>>,
 }
 
+/// Lưu mẫu response lỗi (parse trượt / call sai schema) vào ~/.ds-harness/samples.jsonl để biến thành test sau này.
+fn save_sample(kind: &str, raw: &str) {
+    use std::io::Write;
+    let path = std::path::Path::new(&creds_dir()).join("samples.jsonl");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}", json!({"t": now(), "kind": kind, "raw": raw}));
+    }
+}
+
 fn queue_wait_secs() -> u64 {
     std::env::var("DS_QUEUE_WAIT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(120)
 }
@@ -257,6 +266,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             // call sai schema (thiếu tham số bắt buộc/tool lạ): retry trong harness (2-3s) thay vì bắt client trả lỗi rồi model sửa (1 step)
                             let bad = calls.iter().find(|c| !call_is_valid(&ctx.tools, c)).map(|c| c.name.clone());
                             if let (Some(n), true) = (bad, attempt < 2) {
+                                save_sample("invalid", &full_text);
                                 eprintln!("[toolcall-invalid] attempt {} tool={:?} args thiếu/không hợp lệ — retry; raw={:?}", attempt, n, full_text);
                                 last_err = Some(format!("tool-call không hợp lệ ({})", n));
                                 attempt_done = true;
@@ -285,6 +295,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             failed.push(acc_id.clone());
                         } else if has_tool_marker(&full_text) {
                             // có marker tool-call nhưng parse trượt: log nguyên văn để vá, retry; lỗi do model nên không phạt acc
+                            save_sample("unparsed", &full_text);
                             eprintln!("[toolcall-unparsed] attempt {}; raw={:?}", attempt, full_text);
                             // lượt cuối vẫn trượt → báo lỗi rõ (không trả completion rỗng làm client 'Stopped' im lặng)
                             last_err = Some("tool-call không parse được sau 3 lần thử".into());
