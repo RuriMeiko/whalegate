@@ -25,6 +25,37 @@ async fn solve_pow_async(challenge_hex: String, salt: String, expire_at: u64, di
         .flatten()
 }
 
+/// Bộ nhớ PoW tải sẵn theo token: Pending = đang tải (tránh tải trùng), Ready = header dùng được tới hạn.
+enum PowSlot { Pending, Ready(std::time::Instant, String) }
+const POW_MAX_AGE_SECS: u64 = 240; // challenge sống 300s — chừa biên
+
+fn pow_slots() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, PowSlot>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, PowSlot>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn pow_cache_take(token: &str) -> Option<String> {
+    let mut m = pow_slots();
+    match m.remove(token) {
+        Some(PowSlot::Ready(t, h)) if t.elapsed().as_secs() < POW_MAX_AGE_SECS => { eprintln!("[pow] dùng bản tải sẵn"); Some(h) }
+        Some(PowSlot::Pending) => { m.insert(token.to_string(), PowSlot::Pending); None }
+        _ => None,
+    }
+}
+
+/// true nếu được quyền tải (chưa có Pending/Ready còn tươi).
+fn pow_cache_claim(token: &str) -> bool {
+    let mut m = pow_slots();
+    match m.get(token) {
+        Some(PowSlot::Pending) => false,
+        Some(PowSlot::Ready(t, _)) if t.elapsed().as_secs() < POW_MAX_AGE_SECS => false,
+        _ => { m.insert(token.to_string(), PowSlot::Pending); true }
+    }
+}
+
+fn pow_cache_put(token: &str, header: String) { pow_slots().insert(token.to_string(), PowSlot::Ready(std::time::Instant::now(), header)); }
+fn pow_cache_release(token: &str) { let mut m = pow_slots(); if matches!(m.get(token), Some(PowSlot::Pending)) { m.remove(token); } }
+
 /// Event từ stream DS — server push thẳng ra SSE OpenAI
 pub enum StreamEv {
     Thinking(String),
@@ -36,6 +67,7 @@ pub enum StreamEv {
 }
 
 
+#[derive(Clone)]
 pub struct DsClient {
     http: reqwest::Client,
     token: String,
@@ -58,15 +90,28 @@ fn tz_offset_secs() -> String {
 
 impl DsClient {
     pub fn new(token: String, cookies: String) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
-            // Chặn treo vô hạn: DS chập chờn mà không có timeout thì request giữ Lease mãi → cạn pool.
-            // KHÔNG dùng `.timeout()` toàn cục: nó tính cả thời gian đọc body, sẽ giết stream chat dài.
-            // `connect_timeout` chặn lúc bắt tay TCP/TLS; `read_timeout` chặn từng lần đọc socket
-            // (gồm cả lúc chờ header) nên stream vẫn sống miễn DS gửi byte đều đặn.
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .read_timeout(std::time::Duration::from_secs(read_timeout_secs()))
-            .build()?;
+        // Một reqwest::Client (connection pool) cho mỗi acc: tái dùng TCP/TLS/HTTP2 giữa các request thay vì
+        // bắt tay lại mỗi lần, và mỗi acc vẫn có kết nối riêng như một trình duyệt riêng.
+        static POOL: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>>> = std::sync::OnceLock::new();
+        let pool = POOL.get_or_init(Default::default);
+        let cached = pool.lock().unwrap_or_else(|e| e.into_inner()).get(&token).cloned();
+        let http = match cached {
+            Some(c) => c,
+            None => {
+                let c = reqwest::Client::builder()
+                    .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
+                    // Chặn treo vô hạn: DS chập chờn mà không có timeout thì request giữ Lease mãi → cạn pool.
+                    // KHÔNG dùng `.timeout()` toàn cục: nó tính cả thời gian đọc body, sẽ giết stream chat dài.
+                    // `connect_timeout` chặn lúc bắt tay TCP/TLS; `read_timeout` chặn từng lần đọc socket
+                    // (gồm cả lúc chờ header) nên stream vẫn sống miễn DS gửi byte đều đặn.
+                    .connect_timeout(std::time::Duration::from_secs(15))
+                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs()))
+                    .pool_idle_timeout(std::time::Duration::from_secs(60))
+                    .build()?;
+                pool.lock().unwrap_or_else(|e| e.into_inner()).insert(token.clone(), c.clone());
+                c
+            }
+        };
         let device_id = device_id_for(&token);
         Ok(Self { http, token, cookies, device_id })
     }
@@ -158,6 +203,29 @@ impl DsClient {
 
     async fn fetch_pow_challenge(&self) -> Result<Value> {
         self.fetch_pow_challenge_for("/api/v0/chat/completion").await
+    }
+
+    /// PoW cho /chat/completion: dùng bản đã tải sẵn nếu còn tươi (challenge sống 300s), không thì giải mới.
+    async fn completion_pow(&self) -> Result<String> {
+        if let Some(h) = pow_cache_take(&self.token) {
+            return Ok(h);
+        }
+        self.pow_header("/api/v0/chat/completion").await
+    }
+
+    /// Tải + giải sẵn PoW cho request kế tiếp của acc này, chạy nền trong lúc stream hiện tại đang chạy.
+    /// Mỗi challenge chỉ dùng một lần. DS_POW_PREFETCH=0 để tắt.
+    fn prefetch_pow(&self) {
+        if std::env::var("DS_POW_PREFETCH").as_deref() == Ok("0") || !pow_cache_claim(&self.token) {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            match me.pow_header("/api/v0/chat/completion").await {
+                Ok(h) => pow_cache_put(&me.token, h),
+                Err(_) => pow_cache_release(&me.token),
+            }
+        });
     }
 
     /// Lấy challenge cho `target_path`, giải PoW, trả header `x-ds-pow-response` (base64).
@@ -338,7 +406,7 @@ pub async fn chat_stream(
         None => self.create_session().await?,
     };
 
-    let pow_header = self.pow_header("/api/v0/chat/completion").await?;
+    let pow_header = self.completion_pow().await?;
 
     let resp = self
         .req(reqwest::Method::POST, "/chat/completion")
@@ -358,6 +426,9 @@ pub async fn chat_stream(
         .await?;
 
     let status = resp.status();
+    if status.is_success() {
+        self.prefetch_pow(); // chạy nền trong lúc stream, phục vụ request kế tiếp của acc này
+    }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("completion {} -> {}", status, body);
