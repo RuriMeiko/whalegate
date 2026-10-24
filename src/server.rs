@@ -934,7 +934,9 @@ fn normalize_dsml(text: &str) -> String {
 /// - đã thấy marker tool-call (DSML 1/2 gạch, <invoke, <bash...) → flush tới '<' mở marker, giữ phần sau
 /// - không marker nhưng đuôi có '<' chưa có '>' (tag stream dở, hoặc "｜" rời) → giữ từ '<' đó
 /// - còn lại → flush hết
-const TOOL_MARKERS: [&str; 6] = ["<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function"];
+/// "<｜" = token đặc biệt của DeepSeek (thanh dọc toàn độ rộng): DSML, và cả tool-call bản địa của model
+/// (`<｜tool▁call▁begin｜>`, `<｜工具调用｜>`) mà model web đôi khi lỡ nhả thay cho DSML.
+const TOOL_MARKERS: [&str; 7] = ["<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function", "<｜"];
 
 /// Vị trí đầu tiên của marker tool-call. "DSML" trần chỉ tính khi dính markup: đứng sau '<' / thanh '｜' / "DS" (typo
 /// "DSDSML") hoặc ngay trước thanh '｜'. Văn xuôi nhắc "DSML tool-call parsing" (vd bản tóm tắt compaction) thì không tính.
@@ -1017,7 +1019,77 @@ fn tool_names(tools: &[Value]) -> Vec<&str> {
 /// Marker chắc chắn là ý định gọi tool (DSML / <invoke). Marker yếu (<bash, <tool, <function, <parameter)
 /// hay gặp trong văn xuôi/code mẫu: parse trượt thì trả nguyên văn, không retry.
 pub(crate) fn has_strong_tool_marker(buf: &str) -> bool {
-    has_tool_marker(buf) && (buf.contains("DSML") || buf.contains("<dsml") || buf.contains("<invoke"))
+    has_tool_marker(buf) && (buf.contains("DSML") || buf.contains("<dsml") || buf.contains("<invoke") || buf.contains("<｜"))
+}
+
+/// Tool-call BẢN ĐỊA của DeepSeek (định dạng chat template của model, không phải DSML ta dạy):
+///   <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME\n```json\n{ARGS}\n```<｜tool▁call▁end｜>…
+///   <｜tool▁call▁begin｜>NAME<｜tool▁sep｜>{ARGS}<｜tool▁call▁end｜>            (V3.1)
+///   <｜工具调用｜>NAME\n{ARGS}                                                 (biến thể tiếng Trung)
+/// Model web nhả dạng này khi trượt khỏi format (hay gặp ở bước không suy nghĩ ngay sau tool result).
+/// Marker trơn không có tên/args (vòng lặp `<｜工具调用｜>` ×13) → None, để lõi retry kèm lời nhắc.
+fn parse_native_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
+    let t = text.replace('▁', "_");
+    const BEGINS: [&str; 2] = ["<｜tool_call_begin｜>", "<｜工具调用｜>"];
+    let first = BEGINS.iter().filter_map(|b| t.find(b)).min()?;
+    let head = t[..first].replace("<｜tool_calls_begin｜>", "");
+    let mut calls = Vec::new();
+    let mut rest = &t[first..];
+    while let Some((p, b)) = BEGINS.iter().filter_map(|b| rest.find(b).map(|p| (p, *b))).min_by_key(|x| x.0) {
+        let body_all = &rest[p + b.len()..];
+        let end = BEGINS.iter().chain(["<｜tool_call_end｜>"].iter()).filter_map(|m| body_all.find(m)).min().unwrap_or(body_all.len());
+        let body = body_all[..end].trim();
+        rest = &body_all[end..];
+        if body.is_empty() { continue; }
+        // tên: trước <｜tool_sep｜> (bỏ "function"), hoặc ngay sau sep / dòng đầu
+        let (name, after) = match body.split_once("<｜tool_sep｜>") {
+            Some((pre, post)) => {
+                let pre = pre.trim().trim_start_matches("function").trim();
+                if pre.is_empty() {
+                    let line = post.trim_start().lines().next().unwrap_or("").trim();
+                    (line.to_string(), &post[post.find(line).map(|i| i + line.len()).unwrap_or(0)..])
+                } else {
+                    (pre.to_string(), post)
+                }
+            }
+            None => {
+                let line = body.lines().next().unwrap_or("").trim();
+                (line.to_string(), &body[line.len().min(body.len())..])
+            }
+        };
+        let name: String = name.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.').collect();
+        let Some(args) = first_json_object(after) else { continue };
+        if name.is_empty() { continue; }
+        calls.push(DsmlToolCall { name, arguments: args.to_string() });
+    }
+    if calls.is_empty() { None } else { Some((strip_dsml_fragments(head.trim()), calls)) }
+}
+
+/// Object JSON hợp lệ đầu tiên trong chuỗi (bỏ qua ```json fence, ngoặc trong chuỗi JSON).
+fn first_json_object(s: &str) -> Option<Value> {
+    let mut from = 0;
+    while let Some(off) = s[from..].find('{') {
+        let start = from + off;
+        let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+        for (i, ch) in s[start..].char_indices() {
+            if esc { esc = false; continue; }
+            match ch {
+                '\\' if in_str => esc = true,
+                '"' => in_str = !in_str,
+                '{' if !in_str => depth += 1,
+                '}' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(&s[start..start + i + 1]) { return Some(v); }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        from = start + 1;
+    }
+    None
 }
 
 /// Tool-call từ output của model, CHỈ khi request có tools. DSML chuẩn nhận ở bất kỳ đâu; các dạng dự phòng
@@ -1028,6 +1100,7 @@ pub(crate) fn extract_tool_calls(text: &str, tools: &[Value]) -> Option<(String,
     if names.is_empty() { return None; }
     let n = normalize_dsml(text);
     if let Some(r) = parse_dsml_tool_calls(&n) { return Some(r); }
+    if let Some(r) = parse_native_tool_calls(&n) { return Some(r); }
     let at_end = n.trim_end_matches(|c: char| c.is_whitespace() || c == '`').ends_with('>');
     if !at_end { return None; }
     parse_dsml_json_tool_calls(&n)
@@ -2927,5 +3000,43 @@ mod tool_gate_tests {
             json!({"role":"tool","tool_call_id":"c1","content":""}),
         ];
         assert!(messages_to_prompt(&msgs).contains("tool_result (bash) [c1]: (no output)"));
+    }
+}
+
+#[cfg(test)]
+mod native_toolcall_tests {
+    use super::*;
+
+    fn tools() -> Vec<Value> {
+        vec![json!({"type":"function","function":{"name":"run_code","parameters":{"type":"object",
+            "properties":{"code":{"type":"string"},"description":{"type":"string"}},"required":["code","description"]}}})]
+    }
+
+    #[test]
+    fn chinese_marker_loop_is_strong_but_unparsed() {
+        // mẫu thật (dsh session 3615c2c3): model nhả 13 lần marker bản địa, không tên, không args
+        let t = "<｜工具调用｜>\n".repeat(12) + "<｜工具调用｜>";
+        assert!(has_strong_tool_marker(&t), "phải bị giữ lại, không stream ra client");
+        assert!(extract_tool_calls(&t, &tools()).is_none(), "không có gì để gọi → để lõi retry kèm lời nhắc");
+        assert_eq!(safe_flush_len(&t), 0);
+    }
+
+    #[test]
+    fn native_v3_format_parses() {
+        let t = "Reading it.\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>run_code\n```json\n{\"code\": \"console.log(1)\", \"description\": \"print\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
+        let (before, c) = extract_tool_calls(t, &tools()).expect("parse native v3");
+        assert_eq!(before, "Reading it.");
+        assert_eq!(c[0].name, "run_code");
+        assert!(c[0].arguments.contains("console.log(1)"));
+    }
+
+    #[test]
+    fn native_v31_and_chinese_with_args_parse() {
+        let t = "<｜tool▁call▁begin｜>run_code<｜tool▁sep｜>{\"code\":\"a\",\"description\":\"b\"}<｜tool▁call▁end｜>";
+        assert_eq!(extract_tool_calls(t, &tools()).unwrap().1[0].name, "run_code");
+        let t = "<｜工具调用｜>run_code\n{\"code\":\"x({y:1})\",\"description\":\"d\"}";
+        let (_, c) = extract_tool_calls(t, &tools()).unwrap();
+        let v: Value = serde_json::from_str(&c[0].arguments).unwrap();
+        assert_eq!(v["code"], "x({y:1})");
     }
 }
