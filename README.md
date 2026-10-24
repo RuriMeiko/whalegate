@@ -366,3 +366,5 @@ Trên dashboard, mục **Thêm tài khoản thủ công**: mở tab đã đăng 
 - **Verify hết / Reset hết**: cạnh nút `+ Thêm`, chạy 3 tài khoản song song, có hộp xác nhận và báo kết quả ("9 ok · 1 lỗi").
 - **Trùng người dùng**: harness lưu id người dùng DeepSeek (từ `users/current`, hiện 6 ký tự đầu cạnh nhãn). Thêm một token thuộc người đã có trong pool thì báo trùng (dùng `sửa` để thay token). Đăng nhập lại qua Chrome / quét tab với cùng người dùng thì thay token vào tài khoản cũ thay vì thêm bản thứ hai. Tài khoản cũ được bổ sung id lúc khởi động; hai dòng trùng id hiện nhãn đỏ "trùng người dùng".
 
+- **Bật/tắt tài khoản**: mở dòng tài khoản → công tắc TẮT/BẬT. Tài khoản tắt không được pool dùng (dòng mờ, "đã tắt"); dành cho acc bạn muốn dùng tay. Request đang chạy trên nó vẫn chạy nốt; hội thoại stateful gắn với nó chuyển sang gửi đủ ngữ cảnh ở tài khoản khác. API: `POST /api/accounts/{id}/pool` với `{"pool_enabled": false}`.
+

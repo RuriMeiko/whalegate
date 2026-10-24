@@ -54,6 +54,9 @@
   .acc > .hd:hover:not(:disabled) { background: none; }
   .acc .nm { flex: 1; min-width: 0; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acc .st { font: 12px/1 var(--mono); color: var(--mute); white-space: nowrap; }
+  .acc.off .nm, .acc.off .sq { opacity: .5; } .acc .st.off { color: var(--mute); text-decoration: line-through; }
+  .sq.off { background: transparent; border: 1px solid var(--mute); }
+  .seg2.mini button { height: 30px; min-width: 46px; flex: none; padding: 0 10px; }
   .acc .st.bad { color: var(--bad); } .acc .st.warn { color: var(--warn); } .acc .st.run { color: var(--ink); }
   .sq { width: 8px; height: 8px; background: var(--ok); flex: none; } .sq.bad { background: var(--bad); } .sq.warn { background: var(--warn); }
   .acc .more { display: none; padding: 0 0 12px 18px; gap: 8px; align-items: center; flex-wrap: wrap; font: 12px/1.3 var(--mono); color: var(--mute); }
@@ -382,6 +385,14 @@ async function buildProfile() {
   try { const d = await post('/api/build_profile'); say(d.ok ? 'Đang build ~40 giây' : d.error, d.ok ? 'ok' : 'err'); }
   catch (e) { say(e.message, 'err'); } finally { setTimeout(() => { b.disabled = false; }, 45000); }
 }
+async function togglePool(a, enabled) {
+  try {
+    const r = await fetch('/api/accounts/' + a.id + '/pool', {method: 'POST', headers: J, body: JSON.stringify({pool_enabled: enabled})});
+    const d = await r.json();
+    if (!r.ok || d.error) return say(d.error || 'Không đổi được', 'err');
+    say((enabled ? 'Đã bật ' : 'Đã tắt ') + a.label, 'ok'); loadStats();
+  } catch (e) { say(e.message, 'err'); }
+}
 async function verify(id, label) {
   if (!(await ask('Verify?', `Kiểm tra token của ${label} với DeepSeek.`, 'Verify'))) return;
   await post('/api/accounts/' + id + '/verify'); loadStats(); say('Đã verify ' + label, 'ok');
@@ -448,15 +459,21 @@ function accItem(a, perAcc) {
   else if (a.cooldown_left_secs > 0) { kind = 'warn'; text = `nghỉ ${a.cooldown_left_secs}s`; }
   else if (!/ok/.test(a.last_status || '')) { kind = 'bad'; text = a.last_status || 'lỗi'; }
   else if (a.in_flight > 0) { kind = 'run'; text = `đang chạy ${a.in_flight}/${perAcc}`; }
-  const box = el('div', 'acc' + (OPEN_ACC === a.id ? ' open' : ''));
+  if (a.pool_enabled === false) { kind = 'off'; text = 'đã tắt'; }
+  const box = el('div', 'acc' + (OPEN_ACC === a.id ? ' open' : '') + (a.pool_enabled === false ? ' off' : ''));
   const hd = el('button', 'hd'); hd.setAttribute('aria-expanded', OPEN_ACC === a.id);
   const nm = el('span', 'nm', a.label); if (a.uid) nm.append(el('small', null, a.uid.slice(0, 6)));
-  hd.append(el('i', 'sq ' + (kind === 'bad' || kind === 'warn' || a.dup ? (a.dup ? 'bad' : kind) : '')), nm);
+  hd.append(el('i', 'sq ' + (kind === 'off' ? 'off' : kind === 'bad' || kind === 'warn' || a.dup ? (a.dup ? 'bad' : kind) : '')), nm);
   if (a.dup) hd.append(el('span', 'dupe', 'trùng người dùng'));
   hd.append(el('span', 'st ' + kind, text));
   hd.onclick = () => { OPEN_ACC = OPEN_ACC === a.id ? null : a.id; document.querySelectorAll('.acc').forEach((n) => n.classList.remove('open')); if (OPEN_ACC) box.classList.add('open'); hd.setAttribute('aria-expanded', !!OPEN_ACC); };
   const more = el('div', 'more');
-  more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}`), el('span', 'sp'));
+  const sw = el('div', 'seg2 mini'); sw.setAttribute('role', 'radiogroup'); sw.setAttribute('aria-label', 'Dùng trong pool');
+  for (const [val, txt] of [[false, 'TẮT'], [true, 'BẬT']]) {
+    const on = (a.pool_enabled !== false) === val, b = el('button', on ? 'on' : '', txt); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', on);
+    b.onclick = (e) => { e.stopPropagation(); if (!on) togglePool(a, val); }; sw.append(b);
+  }
+  more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}`), el('span', 'sp'), sw);
   const mk = (t, cls, fn) => { const b = el('button', 'sm ' + cls, t); b.onclick = fn; return b; };
   more.append(mk('sửa', '', () => openEdit(a)), mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label)), mk('xoá', 'del', () => del(a.id, a.label)));
   box.append(hd, more);
