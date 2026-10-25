@@ -951,7 +951,56 @@ fn parse_xml_tool_call(text: &str) -> Option<(String, DsmlToolCall)> {
 
 /// CHUẨN HÓA TOÀN BỘ DSML về 1 format: '<｜｜DSML｜｜ X>' — model trộn prefix trong cùng 1 block
 /// (<dsml invoke ...> nhưng close-tag '</｜｜DSML｜｜ parameter>') — normalize mọi prefix về một.
+/// DSML "dịch sang tiếng Trung" mà model web đôi khi nhả (hay gặp sau lượt có ảnh):
+///   <｜调用工具>\n<｜调用工具名称>NAME</｜调用工具名称>\n<｜调用工具参数名称>K</｜调用工具参数名称>\n
+///   <｜调用工具参数值>V</｜调用工具参数值 | 调用工具参数>\n</｜调用工具>\n</｜调用工具>
+/// → DSML chuẩn (giá trị luôn string="true"), bọc trong một khối calls. Thanh '｜' hay '|' đều nhận.
+fn translate_cn_tool_tags(text: &str) -> String {
+    const OPEN: &str = "<｜调用工具>";
+    let t = text.replace("<|调用工具", "<｜调用工具").replace("</|调用工具", "</｜调用工具").replace("调用工具｜>", "调用工具>");
+    let Some(first) = t.find(OPEN) else { return text.to_string() };
+    let (head, mut rest) = t.split_at(first);
+    let mut out = format!("{}<｜｜DSML｜｜ calls>\n", head);
+    let tail;
+    loop {
+        let r = rest.trim_start();
+        if let Some(r2) = r.strip_prefix(OPEN) {
+            // <｜调用工具> <｜调用工具名称>NAME</｜调用工具名称>
+            let r2 = r2.trim_start();
+            let Some(after) = r2.strip_prefix("<｜调用工具名称>") else { rest = r2; continue };
+            let Some(end) = after.find("</｜调用工具名称>") else { return text.to_string() };
+            out.push_str(&format!("<｜｜DSML｜｜ invoke name=\"{}\">\n", after[..end].trim()));
+            rest = &after[end + "</｜调用工具名称>".len()..];
+        } else if let Some(after) = r.strip_prefix("<｜调用工具参数名称>") {
+            let Some(end) = after.find("</｜调用工具参数名称>") else { return text.to_string() };
+            let key = after[..end].trim();
+            let v = after[end + "</｜调用工具参数名称>".len()..].trim_start();
+            let Some(v) = v.strip_prefix("<｜调用工具参数值>") else { return text.to_string() };
+            // giá trị kết thúc ở thẻ đóng gần nhất (model dùng lẫn 参数值 / 参数), hoặc thẻ mở/đóng kế tiếp
+            let stops = ["</｜调用工具参数值>", "</｜调用工具参数>", "<｜调用工具参数名称>", "</｜调用工具>", OPEN];
+            let (vend, stop) = stops.iter().filter_map(|s| v.find(s).map(|p| (p, *s))).min_by_key(|x| x.0).unwrap_or((v.len(), ""));
+            out.push_str(&format!("<｜｜DSML｜｜ parameter name=\"{}\" string=\"true\">{}</｜｜DSML｜｜ parameter>\n", key, &v[..vend]));
+            let consumed = if stop.starts_with("</｜调用工具参数") { stop.len() } else { 0 };
+            rest = &v[vend + consumed..];
+        } else if let Some(after) = r.strip_prefix("</｜调用工具>") {
+            out.push_str("</｜｜DSML｜｜ invoke>\n");
+            // thẻ đóng lặp (</调用工具> ×2) chỉ tính một lần
+            let mut a = after.trim_start();
+            while let Some(x) = a.strip_prefix("</｜调用工具>") { a = x.trim_start(); }
+            rest = a;
+        } else {
+            tail = r;
+            break;
+        }
+    }
+    out.push_str("</｜｜DSML｜｜ calls>");
+    if !tail.is_empty() { out.push('\n'); out.push_str(tail); }
+    out
+}
+
 fn normalize_dsml(text: &str) -> String {
+    let translated;
+    let text = if text.contains("调用工具") { translated = translate_cn_tool_tags(text); translated.as_str() } else { text };
     let mut out = String::with_capacity(text.len() + 64);
     let b = text.as_bytes();
     let mut i = 0;
@@ -1032,8 +1081,8 @@ fn normalize_dsml(text: &str) -> String {
 /// Token đặc biệt MANG Ý ĐỊNH gọi tool theo chat template bản địa của DeepSeek (`<｜tool▁call▁begin｜>`,
 /// `<｜tool_calls_begin｜>`, `<｜工具调用｜>`) — model web đôi khi lỡ nhả thay cho DSML. Các `<｜…｜>` khác
 /// (`<｜end▁of▁sentence｜>`…) chỉ là văn bản, vd khi model đang giải thích về token.
-const NATIVE_TOOL_MARKERS: [&str; 2] = ["<｜tool", "<｜工具"];
-const TOOL_MARKERS: [&str; 8] = ["<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function", NATIVE_TOOL_MARKERS[0], NATIVE_TOOL_MARKERS[1]];
+const NATIVE_TOOL_MARKERS: [&str; 3] = ["<｜tool", "<｜工具", "<｜调用工具"];
+const TOOL_MARKERS: [&str; 9] = ["<dsml", "<invoke", "<parameter", "<bash", "<tool", "<function", NATIVE_TOOL_MARKERS[0], NATIVE_TOOL_MARKERS[1], NATIVE_TOOL_MARKERS[2]];
 
 /// Vị trí đầu tiên của marker tool-call. "DSML" trần chỉ tính khi dính markup: đứng sau '<' / thanh '｜' / "DS" (typo
 /// "DSDSML") hoặc ngay trước thanh '｜'. Văn xuôi nhắc "DSML tool-call parsing" (vd bản tóm tắt compaction) thì không tính.
@@ -1105,7 +1154,8 @@ pub(crate) fn safe_flush_len(buf: &str) -> usize {
         // lùi qua '</' hoặc '<' dính ngay trước marker (find_tool_marker có thể dừng ở '/' của thẻ đóng)
         let head = &buf[..m];
         let head = head.strip_suffix('/').unwrap_or(head);
-        return head.strip_suffix('<').map_or(m, |h| h.len());
+        let cut = head.strip_suffix('<').map_or(m, |h| h.len());
+        return cut - dangling_bar_tag(&buf[..cut]).len();
     }
     // đuôi có thể là ĐẦU một marker chưa đủ ký tự để nhận ra (kể cả khi chunk cắt ngang marker):
     // '<…' / thanh '｜…' / '|…' chưa gặp '>' trong MAX_PENDING_TAG byte cuối, hoặc "D"/"DS"/"DSM" ở cuối.
@@ -1553,7 +1603,18 @@ fn strip_dsml_fragments(text: &str) -> String {
         let end = t[p..].find('>').map(|e| p + e + 1).unwrap_or(t.len());
         t.replace_range(start..end, "");
     }
-    t.trim().to_string()
+    let t = t.trim_end();
+    t[..t.len() - dangling_bar_tag(t).len()].trim().to_string()
+}
+
+/// Mẩu thẻ token đặc biệt bỏ dở ở cuối (`<｜我`, `<｜`): model mở rồi đổi ý, viết luôn khối tool-call.
+/// Chỉ tính khi sau '<｜' không có '>' và không có khoảng trắng — văn xuôi kiểu "a <｜ b" giữ nguyên.
+fn dangling_bar_tag(s: &str) -> &str {
+    let t = s.trim_end();
+    let Some(p) = t.rfind("<｜").or_else(|| t.rfind("<|")) else { return "" };
+    let frag = &t[p..];
+    if frag.contains('>') || frag[1..].chars().any(char::is_whitespace) || frag.chars().count() > 12 { return ""; }
+    &s[p..]
 }
 
 pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
@@ -3247,6 +3308,36 @@ mod native_toolcall_tests {
         let (_, c) = extract_tool_calls(t, &tools()).unwrap();
         let v: Value = serde_json::from_str(&c[0].arguments).unwrap();
         assert_eq!(v["code"], "x({y:1})");
+    }
+
+    #[test]
+    fn chinese_xml_tags_parse() {
+        // mẫu thật (dsh session 20a53b8f, turn 3): thẻ đóng giá trị dùng lẫn 参数值/参数, </调用工具> lặp
+        let t = "Danh sách lỗi đã rõ.\n\n<｜调用工具>\n<｜调用工具名称>run_code</｜调用工具名称>\n<｜调用工具参数名称>description</｜调用工具参数名称>\n<｜调用工具参数值>Fix footer</｜调用工具参数值>\n<｜调用工具参数名称>code</｜调用工具参数名称>\n<｜调用工具参数值>const old = `a {\n  b: c;\n}`;\nawait tools.edit({ old_string: old });\nconsole.log(\"x<y\");</｜调用工具参数>\n</｜调用工具>\n</｜调用工具>\n\n<｜调用工具>\n<｜调用工具名称>run_code</｜调用工具名称>\n<｜调用工具参数名称>description</｜调用工具参数名称>\n<｜调用工具参数值>Second</｜调用工具参数值>\n<｜调用工具参数名称>code</｜调用工具参数名称>\n<｜调用工具参数值>console.log(2);</｜调用工具参数>\n</｜调用工具>\n</｜调用工具>";
+        assert!(has_strong_tool_marker(t));
+        assert_eq!(&t[..safe_flush_len(t)], "Danh sách lỗi đã rõ.\n\n");
+        let (before, c) = extract_tool_calls(t, &tools()).expect("parse chinese xml");
+        assert_eq!(before, "Danh sách lỗi đã rõ.");
+        assert_eq!(c.len(), 2);
+        let v: Value = serde_json::from_str(&c[0].arguments).unwrap();
+        assert_eq!(v["description"], "Fix footer");
+        assert_eq!(v["code"], "const old = `a {\n  b: c;\n}`;\nawait tools.edit({ old_string: old });\nconsole.log(\"x<y\");");
+        let v: Value = serde_json::from_str(&c[1].arguments).unwrap();
+        assert_eq!(v["code"], "console.log(2);");
+    }
+
+    #[test]
+    fn dangling_bar_tag_before_dsml_is_dropped() {
+        // mẫu thật (dsh session 20a53b8f): "<｜我" lọt ra trước khối DSML hợp lệ
+        let t = "<｜我<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"run_code\">\n<｜｜DSML｜｜ parameter name=\"code\" string=\"true\">x</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">d</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        assert_eq!(safe_flush_len(t), 0);
+        let (before, c) = extract_tool_calls(t, &tools()).unwrap();
+        assert_eq!(before, "");
+        assert_eq!(c[0].name, "run_code");
+        let t2 = "Done. <｜我\n<｜｜DSML｜｜ calls>";
+        assert_eq!(&t2[..safe_flush_len(t2)], "Done. ");
+        // văn xuôi có khoảng trắng sau '<｜' thì giữ
+        assert_eq!(dangling_bar_tag("a <｜ b"), "");
     }
 }
 

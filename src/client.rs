@@ -439,6 +439,9 @@ pub async fn chat_stream(
         let mut stream = std::pin::pin!(resp.bytes_stream());
         let mut buf = String::new();
         let mut sse_chars: usize = 0; // chỉ đếm, không giữ toàn bộ SSE trong RAM
+        // giữ phần đầu SSE thô: stream không có RESPONSE thì ghi ra samples.jsonl để biết DS thật sự trả gì
+        const RAW_KEEP: usize = 256 * 1024;
+        let mut raw_head = String::new();
         let mut cur_type = String::new();
         let mut has_content = false;
         let mut sent_msg_id = false;
@@ -480,13 +483,41 @@ pub async fn chat_stream(
                 buf = rest;
                 let Some(data) = line.strip_prefix("data: ") else { continue };
                 sse_chars += line.chars().count() + 1;
+                if raw_head.len() < RAW_KEEP { raw_head.push_str(&line); raw_head.push('\n'); }
                 let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
 
+                // mở fragment mới: báo nội dung ban đầu và đổi fragment active
+                let open_frags = |arr: &Vec<Value>, cur_type: &mut String, has_content: &mut bool| {
+                    for f in arr {
+                        *cur_type = f["type"].as_str().unwrap_or("").to_string();
+                        if *cur_type == "RESPONSE" {
+                            *has_content = true;
+                            if let Some(c) = f["content"].as_str() {
+                                let _ = tx.send(StreamEv::Response(c.to_string()));
+                            }
+                        } else if *cur_type == "THINK" {
+                            if let Some(c) = f["content"].as_str() {
+                                let _ = tx.send(StreamEv::Thinking(c.to_string()));
+                            }
+                        }
+                    }
+                };
+
                 // token thật: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":346},...]}
+                // BATCH cũng có thể mở fragment: khi có ảnh, web trả READ_LINK trước rồi mới
+                // {"p":"response","o":"BATCH","v":[{"p":"fragments","v":[{"type":"RESPONSE",...}]}]}
                 if let Some(arr) = v.get("v").and_then(|x| x.as_array()) {
                     for it in arr {
-                        if it.get("p").and_then(|p| p.as_str()) == Some("accumulated_token_usage") {
-                            if let Some(n) = it.get("v").and_then(|x| x.as_u64()) { let _ = tx.send(StreamEv::Usage(n)); }
+                        match it.get("p").and_then(|p| p.as_str()) {
+                            Some("accumulated_token_usage") => {
+                                if let Some(n) = it.get("v").and_then(|x| x.as_u64()) { let _ = tx.send(StreamEv::Usage(n)); }
+                            }
+                            Some("fragments") => {
+                                if let Some(frags) = it.get("v").and_then(|x| x.as_array()) {
+                                    open_frags(frags, &mut cur_type, &mut has_content);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -519,19 +550,7 @@ pub async fn chat_stream(
                 if v.get("p").and_then(|p| p.as_str()) == Some("response/fragments") {
                     if v.get("o").and_then(|o| o.as_str()) == Some("APPEND") {
                         if let Some(arr) = v.get("v").and_then(|x| x.as_array()) {
-                            for f in arr {
-                                cur_type = f["type"].as_str().unwrap_or("").to_string();
-                                if cur_type == "RESPONSE" {
-                                    has_content = true;
-                                    if let Some(c) = f["content"].as_str() {
-                                        let _ = tx.send(StreamEv::Response(c.to_string()));
-                                    }
-                                } else if cur_type == "THINK" {
-                                    if let Some(c) = f["content"].as_str() {
-                                        let _ = tx.send(StreamEv::Thinking(c.to_string()));
-                                    }
-                                }
-                            }
+                            open_frags(arr, &mut cur_type, &mut has_content);
                         }
                     }
                     continue;
@@ -566,6 +585,12 @@ pub async fn chat_stream(
         crate::elog!("[ds-timing] first_byte={}ms total={}ms bytes={} sse_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, sse_chars);
         if !has_content {
             crate::elog!("[ds-stream] stream không có fragment RESPONSE nào (nghi throttle/rỗng)");
+            use std::io::Write;
+            let path = std::path::Path::new(&crate::server::creds_dir()).join("samples.jsonl");
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let _ = writeln!(f, "{}", json!({"t": t, "kind": "no-response", "raw": raw_head}));
+            }
         }
         if let Some(r) = truncated { let _ = tx.send(StreamEv::Truncated(r)); }
         let _ = tx.send(StreamEv::Done);
@@ -652,10 +677,14 @@ pub(crate) fn sse_has_response(sse: &str) -> bool {
             }
             continue;
         }
-        // APPEND fragments
+        // APPEND fragments, hoặc BATCH có mục {"p":"fragments","v":[...]}
         if let Some(arr) = v.get("v").and_then(|x| x.as_array()) {
             for f in arr {
                 if f["type"].as_str() == Some("RESPONSE") { return true; }
+                if f["p"].as_str() == Some("fragments") {
+                    let nested = f["v"].as_array().map(|a| a.iter().any(|g| g["type"].as_str() == Some("RESPONSE")));
+                    if nested == Some(true) { return true; }
+                }
             }
             continue;
         }
@@ -709,6 +738,17 @@ mod probe_tests {
             "data: {\"p\":\"response/fragments/-1/content\",\"v\":\" thêm\"}\n"
         );
         assert!(sse_has_response(with_resp));
+    }
+
+    /// Có ảnh đính kèm: web mở READ_LINK trước, rồi RESPONSE nằm trong một BATCH.
+    #[test]
+    fn response_fragment_in_batch() {
+        let sse = concat!(
+            "data: {\"v\":{\"response\":{\"fragments\":[{\"id\":2,\"type\":\"READ_LINK\",\"status\":\"WIP\"}]}}}\n",
+            "data: {\"p\":\"response\",\"o\":\"BATCH\",\"v\":[{\"p\":\"fragments\",\"v\":[{\"id\":3,\"type\":\"RESPONSE\",\"content\":\"<\"}]},{\"p\":\"has_pending_fragment\",\"v\":false}]}\n",
+            "data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"x\"}\n"
+        );
+        assert!(sse_has_response(sse));
     }
 
     /// Dòng rác / JSON hỏng không được làm panic hay báo nhầm.
