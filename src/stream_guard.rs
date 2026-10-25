@@ -1,6 +1,6 @@
 // Bộ lọc stream content/reasoning khi request có tools: chỉ phát phần chắc chắn là văn xuôi, giữ lại markup
 // tool-call. Tách khỏi run_chat để test được với đúng code chạy thật (fuzz chia chunk ngẫu nhiên, benchmark).
-use crate::server::{has_strong_tool_marker, has_tool_marker, safe_flush_len};
+use crate::server::{glued_lead_bar, has_strong_tool_marker, has_tool_marker, safe_flush_len};
 
 /// Content: phát văn xuôi ngay, giữ từ marker tool-call trở đi tới khi stream xong.
 pub(crate) struct ContentGuard {
@@ -19,6 +19,15 @@ impl ContentGuard {
     pub(crate) fn push(&mut self, t: &str) -> Option<String> {
         self.pending.push_str(t);
         if self.in_block { return None; }
+        // mở đầu câu trả lời bằng mẩu token đặc biệt dính chữ (`<｜我是…`): bỏ '<｜', giữ chữ.
+        // Marker thật (`<｜工具调用｜>`, `<｜调用工具>`) có '｜'/'>' ngay sau vài ký tự → không đụng.
+        if self.hold && self.streamed.is_empty() {
+            match glued_lead_bar(&self.pending) {
+                None => return None, // chưa đủ chữ để phân biệt: chờ chunk kế
+                Some(0) => {}
+                Some(n) => { self.pending.drain(..n); }
+            }
+        }
         let cut = if self.hold { safe_flush_len(&self.pending) } else { self.pending.len() };
         let out = (cut > 0).then(|| {
             let head: String = self.pending.drain(..cut).collect();
@@ -145,6 +154,11 @@ mod tests {
             "Lệnh mẫu: <bash command=\"rm -rf build\"/> trong tài liệu, đừng chạy.".into(),
             "Partial marker at the very end <｜｜DS".into(),
             "Unclosed < tag then a long tail ".to_string() + &"x".repeat(300),
+            // mẫu thật (dsh session 20a53b8f): '<｜' dính đầu câu trả lời, có/không kèm tool-call
+            "<｜我是一名刚学 HTML/CSS/JS 的学生，我会用最简单的方式来做。".into(),
+            format!("<｜我是一名刚学 HTML/CSS/JS 的学生。先看一遍。\n\n{}", dsml("bash", &[("command", "ls"), ("description", "list")])),
+            // mẫu thật: tham số cuối đóng bằng '</｜｜DSML｜｜>', rồi 'calls' mở lại thay cho thẻ đóng — hai khối
+            "Kiểm tra.\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"run_code\">\n<｜｜DSML｜｜ parameter name=\"code\" string=\"true\">a()</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">A</｜｜DSML｜｜>\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"run_code\">\n<｜｜DSML｜｜ parameter name=\"code\" string=\"true\">b(`python3 - <<'PY'\nprint(1)\nPY`)</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">B</｜｜DSML｜｜>\n\n<｜｜DSML｜｜ calls>".into(),
         ];
         // mẫu lỗi thật đã lưu (nếu có trên máy này)
         let p = std::path::PathBuf::from(crate::server::home_dir()).join(".whalegate/samples.jsonl");
@@ -197,7 +211,8 @@ mod tests {
                 assert_eq!(got, base, "kết quả phụ thuộc cách chia chunk {:?}\nraw={:?}", chunks, full);
             }
             match outcome {
-                Outcome::Text => assert_eq!(base, *full, "văn bản thường phải ra nguyên vẹn"),
+                // văn bản thường ra nguyên vẹn (trừ mẩu '<｜' dính ở đầu, xem glued_lead_bar)
+                Outcome::Text => assert_eq!(base, full[crate::server::glued_lead_bar(full).unwrap_or(0)..], "văn bản thường phải ra nguyên vẹn"),
                 Outcome::Calls(_) | Outcome::Retry => {
                     for l in LEAKS { assert!(!base.contains(l), "lộ {:?} ra client: {:?}\nraw={:?}", l, base, full); }
                     if let Outcome::Calls(_) = outcome {

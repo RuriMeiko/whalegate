@@ -1558,6 +1558,49 @@ fn fix_bare_closers(text: &str) -> String {
 }
 
 /// '<｜｜DSML｜｜ file_path" string="true">' (mất 'parameter name="') → dạng chuẩn.
+/// Model hay kết khối bằng `</｜｜DSML｜｜>` rồi `<｜｜DSML｜｜ calls>` (thiếu '/') thay cho `</invoke></calls>`,
+/// có khi viết thêm khối thứ hai y như vậy. Invoke đang mở (không còn parameter dở) mà gặp `calls` mở lại hoặc
+/// một `invoke` mới → đóng invoke ở đó; `calls` mở lại thì bỏ. Chạy sau fix_bare_closers.
+fn close_reopened_invokes(text: &str) -> String {
+    const CALLS: &str = "<｜｜DSML｜｜ calls>";
+    const INV: &str = "<｜｜DSML｜｜ invoke";
+    const INV_CLOSE: &str = "</｜｜DSML｜｜ invoke>";
+    const P_OPEN: &str = "<｜｜DSML｜｜ parameter";
+    const P_CLOSE: &str = "</｜｜DSML｜｜ parameter";
+    if text.matches(INV).count() <= text.matches(INV_CLOSE).count() && text.matches(CALLS).count() <= 1 {
+        return text.to_string();
+    }
+    let (mut inv_open, mut param_open, mut seen_calls) = (false, false, false);
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        if rest.starts_with(CALLS) {
+            if inv_open && !param_open {
+                out.push_str(INV_CLOSE);
+                inv_open = false;
+                i += CALLS.len();
+                continue;
+            }
+            if seen_calls && !param_open { i += CALLS.len(); continue; }
+            seen_calls = true;
+        } else if rest.starts_with(INV) {
+            if inv_open && !param_open { out.push_str(INV_CLOSE); out.push('\n'); }
+            inv_open = true;
+        } else if rest.starts_with(INV_CLOSE) {
+            inv_open = false;
+        } else if rest.starts_with(P_OPEN) {
+            param_open = true;
+        } else if rest.starts_with(P_CLOSE) {
+            param_open = false;
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
 fn fix_mangled_param_tags(text: &str) -> String {
     const OPEN: &str = "<｜｜DSML｜｜ ";
     let mut out = String::with_capacity(text.len() + 16);
@@ -1604,7 +1647,24 @@ fn strip_dsml_fragments(text: &str) -> String {
         t.replace_range(start..end, "");
     }
     let t = t.trim_end();
-    t[..t.len() - dangling_bar_tag(t).len()].trim().to_string()
+    let t = t[..t.len() - dangling_bar_tag(t).len()].trim();
+    t[glued_lead_bar(t).unwrap_or(0)..].trim().to_string()
+}
+
+/// Câu trả lời mở đầu bằng '<｜' dính chữ (`<｜我是…`): số byte cần bỏ (khoảng trắng đầu + '<｜'), 0 nếu không phải,
+/// None nếu chưa đủ chữ để biết. Marker thật (`<｜工具调用｜>`, `<｜调用工具>`, `<｜end▁of▁sentence｜>`) có
+/// '>'/'｜' trong vài ký tự đầu hoặc mở bằng chữ ASCII → không đụng.
+pub(crate) fn glued_lead_bar(s: &str) -> Option<usize> {
+    let lead = s.trim_start();
+    let Some(after) = lead.strip_prefix("<｜") else {
+        // mới có '<' hoặc chưa có gì: chưa biết
+        return if lead.is_empty() || lead == "<" { None } else { Some(0) };
+    };
+    let head: String = after.chars().take(12).collect();
+    if !after.chars().next().map_or(true, |c| !c.is_ascii()) { return Some(0); }
+    if head.contains(['>', '｜', '|']) { return Some(0); }
+    if head.chars().count() < 12 && !head.contains(char::is_whitespace) { return None; }
+    Some(s.len() - after.len())
 }
 
 /// Mẩu thẻ token đặc biệt bỏ dở ở cuối (`<｜我`, `<｜`): model mở rồi đổi ý, viết luôn khối tool-call.
@@ -1623,7 +1683,7 @@ pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolC
     // DS web đổi format theo phiên bản: '<｜｜DSML｜｜ calls>' / '<｜｜DSML｜｜tool_calls>' /
     // '<｜｜DSML｜｜ calls>' có space — normalize mọi biến thể về '<｜｜DSML｜｜ calls>' trước parse
     let mut norm: String = {
-        let mut out = fix_mangled_param_tags(&fix_bare_closers(&space_dsml_tags(&fix_dsml_bars(text))))
+        let mut out = fix_mangled_param_tags(&close_reopened_invokes(&fix_bare_closers(&space_dsml_tags(&fix_dsml_bars(text)))))
             .replace("<｜｜DSML｜｜tool_calls>", "<｜｜DSML｜｜ calls>")
             .replace("</｜｜DSML｜｜tool_calls>", "</｜｜DSML｜｜ calls>")
             .replace("<｜｜DSML｜｜invoke name=", "<｜｜DSML｜｜ invoke name=")
@@ -3338,6 +3398,35 @@ mod native_toolcall_tests {
         assert_eq!(&t2[..safe_flush_len(t2)], "Done. ");
         // văn xuôi có khoảng trắng sau '<｜' thì giữ
         assert_eq!(dangling_bar_tag("a <｜ b"), "");
+    }
+
+    #[test]
+    fn bare_closer_then_reopened_calls_parses_both_blocks() {
+        // mẫu thật (dsh session 20a53b8f, 21:27): tham số cuối đóng bằng '</｜｜DSML｜｜>' rồi 'calls' mở lại thay cho
+        // '</invoke></calls>', hai khối liền. Trước đây khối 1 lộ ra thành chữ, khối 2 bị cắt ở '<<' của heredoc.
+        let block = |code: &str, d: &str| format!("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"run_code\">\n<｜｜DSML｜｜ parameter name=\"code\" string=\"true\">{}</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"description\" string=\"true\">{}</｜｜DSML｜｜>\n\n", code, d);
+        let code2 = "const r = await tools.bash({ command: `cd /x && python3 - <<'PY'\nimport re\nprint(1)\nPY` });";
+        let t = format!("Vẫn 1010px. Kiểm tra trực tiếp.\n\n{}{}<｜｜DSML｜｜ calls>", block("grep -n viewport index.html", "Check viewport"), block(code2, "Find wide elements"));
+        let (before, c) = extract_tool_calls(&t, &tools()).expect("parse cả hai khối");
+        assert_eq!(before, "Vẫn 1010px. Kiểm tra trực tiếp.");
+        assert_eq!(c.len(), 2);
+        let a: Value = serde_json::from_str(&c[0].arguments).unwrap();
+        let b: Value = serde_json::from_str(&c[1].arguments).unwrap();
+        assert_eq!(a["code"], "grep -n viewport index.html");
+        assert_eq!(a["description"], "Check viewport");
+        assert_eq!(b["code"], code2);
+        assert_eq!(b["description"], "Find wide elements");
+    }
+
+    #[test]
+    fn glued_lead_bar_rules() {
+        assert_eq!(glued_lead_bar("<｜我是一名刚学 HTML/CSS/JS 的学生"), Some("<｜".len()));
+        assert_eq!(glued_lead_bar("<｜我是"), None, "chưa đủ chữ: chờ");
+        assert_eq!(glued_lead_bar("<｜工具调用｜>run_code"), Some(0));
+        assert_eq!(glued_lead_bar("<｜调用工具>\n<｜调用工具名称>"), Some(0));
+        assert_eq!(glued_lead_bar("<｜｜DSML｜｜ calls>"), Some(0));
+        assert_eq!(glued_lead_bar("<｜end▁of▁sentence｜>"), Some(0));
+        assert_eq!(glued_lead_bar("Xin chào"), Some(0));
     }
 }
 
