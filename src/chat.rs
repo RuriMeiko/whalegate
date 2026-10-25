@@ -1014,9 +1014,133 @@ pub(crate) async fn api_chat_completions(
     })).into_response())
 }
 
+/// Tổng thời gian một lượt search được phép: dưới mốc 60s mà dsh đặt cho tool search, để dsh luôn nhận được
+/// câu trả lời (kết quả hoặc lỗi rõ ràng) thay vì tự cắt — hay tệ hơn, chờ mãi.
+const SEARCH_BUDGET: Duration = Duration::from_secs(45);
+
+fn search_err(status: StatusCode, kind: &str, msg: &str) -> Response {
+    (status, Json(json!({"type": "error", "error": {"type": kind, "message": msg}}))).into_response()
+}
+
+/// Câu cần search từ request Messages của plugin web-search-deepseek: tin user cuối, bỏ câu dẫn
+/// "Perform a web search for the query: ".
+fn search_query(req: &Value) -> String {
+    let last = req["messages"].as_array().and_then(|m| m.iter().rev().find(|x| x["role"] == "user"));
+    let text = match last.map(|m| &m["content"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    };
+    let t = text.trim();
+    t.strip_prefix("Perform a web search for the query:").unwrap_or(t).trim().to_string()
+}
+
+/// Kết quả search của DeepSeek web → response Anthropic Messages với `web_search_tool_result`, đúng dạng plugin
+/// đọc: url/title/page_age trong khối kết quả, đoạn trích (snippet) trong `citations` của một khối text.
+fn search_response(model: &str, query: &str, results: &[Value]) -> Value {
+    let tool_id = format!("srvtoolu_{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+    let items: Vec<Value> = results.iter().map(|r| {
+        let mut it = json!({"type": "web_search_result", "url": r["url"], "title": r["title"].as_str().unwrap_or(""), "encrypted_content": ""});
+        if let Some(p) = r["published_at"].as_f64() {
+            let (y, m, d) = crate::usage::civil((p as i64).div_euclid(86400));
+            it["page_age"] = json!(format!("{:04}-{:02}-{:02}", y, m, d));
+        } else if let Some(p) = r["published_at"].as_str().filter(|p| !p.is_empty()) {
+            it["page_age"] = json!(p);
+        }
+        it
+    }).collect();
+    let citations: Vec<Value> = results.iter().filter_map(|r| {
+        let snip = r["snippet"].as_str().filter(|s| !s.is_empty())?;
+        Some(json!({"type": "web_search_result_location", "url": r["url"], "title": r["title"].as_str().unwrap_or(""), "cited_text": snip, "encrypted_index": ""}))
+    }).collect();
+    let mut content = vec![
+        json!({"type": "server_tool_use", "id": tool_id, "name": "web_search", "input": {"query": query}}),
+        json!({"type": "web_search_tool_result", "tool_use_id": tool_id, "content": items}),
+    ];
+    if !citations.is_empty() {
+        content.push(json!({"type": "text", "text": format!("{} results.", results.len()), "citations": citations}));
+    }
+    json!({
+        "id": format!("msg_{}", uuid::Uuid::new_v4().simple()), "type": "message", "role": "assistant", "model": model,
+        "content": content, "stop_reason": "end_turn", "stop_sequence": null,
+        "usage": {"input_tokens": 0, "output_tokens": 0, "server_tool_use": {"web_search_requests": 1}}
+    })
+}
+
+/// POST /v1/search/messages — web search cho dsh qua acc DeepSeek web (không cần API key chính thức).
+/// Luôn trả lời trong SEARCH_BUDGET: hết giờ thì 504 kèm lời giải thích, không để client chờ.
+pub(crate) async fn api_search_messages(State(st): State<Arc<AppState>>, Json(req): Json<Value>) -> Response {
+    let query = search_query(&req);
+    if query.is_empty() {
+        return search_err(StatusCode::BAD_REQUEST, "invalid_request_error", "no search query in the last user message");
+    }
+    let model = req["model"].as_str().unwrap_or("deepseek-web").to_string();
+    let started = Instant::now();
+    let deadline = started + SEARCH_BUDGET;
+    crate::elog!("[search] {:?}", query.chars().take(120).collect::<String>());
+    let mut failed: Vec<String> = Vec::new();
+    let mut last_err = String::from("no account available");
+    for attempt in 0..2 {
+        let lease = match acquire(&st, &failed, None, (Instant::now() + Duration::from_secs(10)).min(deadline)).await {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        let c = match DsClient::new(lease.token.clone(), cookie_string(&lease.cookies)) {
+            Ok(c) => c,
+            Err(e) => { last_err = e.to_string(); failed.push(lease.acc_id.clone()); continue; }
+        };
+        touch_acc(&st, &lease.acc_id).await;
+        let left = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(left, c.chat(&query, None, None, false, true)).await {
+            Ok(Ok((sid, sse, _))) => {
+                spawn_delete_session(Some((lease.token.clone(), cookie_string(&lease.cookies))), sid);
+                let results = crate::client::sse_search_results(&sse);
+                crate::elog!("[search] {} kết quả sau {}ms (attempt {})", results.len(), started.elapsed().as_millis(), attempt);
+                return Json(search_response(&model, &query, &results)).into_response();
+            }
+            Ok(Err(e)) => {
+                crate::elog!("[search] attempt {} acc {} lỗi: {}", attempt, lease.acc_id, e);
+                last_err = e.to_string();
+                fail_acc(&st, &lease.acc_id, "error", true).await;
+                failed.push(lease.acc_id.clone());
+            }
+            Err(_) => { last_err = format!("timed out after {}s", SEARCH_BUDGET.as_secs()); break; }
+        }
+        if Instant::now() >= deadline { break; }
+    }
+    crate::elog!("[search] thất bại sau {}ms: {}", started.elapsed().as_millis(), last_err);
+    search_err(StatusCode::GATEWAY_TIMEOUT, "api_error", &format!("whalegate web search failed: {}", last_err))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Response search phải đúng dạng plugin web-search-deepseek của dsh đọc: có web_search_tool_result,
+    /// url/title/page_age trong kết quả, snippet trong citations của khối text.
+    #[test]
+    fn search_response_shape() {
+        let req = json!({"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": [{"type": "text", "text": "Perform a web search for the query: unsplash jersey"}]}]});
+        assert_eq!(search_query(&req), "unsplash jersey");
+        let results = vec![
+            json!({"url": "https://a", "title": "A", "snippet": "sa", "published_at": 1700000000}),
+            json!({"url": "https://b", "title": "B", "snippet": "", "published_at": null}),
+        ];
+        let v = search_response("m", "unsplash jersey", &results);
+        let c = v["content"].as_array().unwrap();
+        let block = c.iter().find(|b| b["type"] == "web_search_tool_result").unwrap();
+        let items = block["content"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "web_search_result");
+        assert_eq!(items[0]["page_age"], "2023-11-14");
+        assert!(items[1].get("page_age").is_none());
+        let text = c.iter().find(|b| b["type"] == "text").unwrap();
+        assert_eq!(text["citations"].as_array().unwrap().len(), 1, "snippet rỗng không thành citation");
+        assert_eq!(text["citations"][0]["cited_text"], "sa");
+        // không có kết quả: vẫn có khối kết quả (rỗng) để plugin không coi là lỗi
+        let empty = search_response("m", "q", &[]);
+        assert!(empty["content"].as_array().unwrap().iter().any(|b| b["type"] == "web_search_tool_result"));
+    }
 
 
     #[test]

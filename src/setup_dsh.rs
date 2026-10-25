@@ -179,6 +179,12 @@ pub(crate) fn apply(src: &str, o: &Opts) -> Result<String> {
     providers.remove(LEGACY_PROVIDER);
     providers.insert(key(PROVIDER), provider(&o.base, o.ctx, &o.api_key));
 
+    // web search của dsh mặc định gọi API chính thức (cần DEEPSEEK_API_KEY trả phí; key hỏng/hết tiền thì search lỗi
+    // hoặc treo cả lượt) → trỏ về /v1/search của gateway, search bằng acc DeepSeek web. Key literal vì plugin đòi có key.
+    let s = entry_config(&mut doc, "web-search-deepseek", "@deepseek-ai/dsh-web-search-deepseek");
+    s.insert(key("baseURL"), key(&format!("{}/search", o.base.trim_end_matches('/'))));
+    s.insert(key("apiKey"), key(&o.api_key));
+
     let m = entry_config(&mut doc, "agent-default-model", "@deepseek-ai/dsh-agent-default-model");
     m.insert(key("provider"), key(PROVIDER));
     m.insert(key("model"), key("deepseek-web"));
@@ -345,6 +351,9 @@ mod tests {
         assert_eq!(prov["whalegate"]["baseURL"], "http://h/v1");
         assert_eq!(prov["whalegate"]["headers"]["Authorization"], "Bearer k");
         assert_eq!(prov["whalegate"]["models"][0]["contextWindow"], 300000);
+        let search = v.iter().find(|e| e["id"] == "web-search-deepseek").expect("search entry");
+        assert_eq!(search["config"]["baseURL"], "http://h/v1/search");
+        assert_eq!(search["config"]["apiKey"], "k");
         assert_eq!(v[1]["config"]["theme"], "dark");
         assert_eq!(v[2]["config"]["default"], "minimal");
         assert_eq!(v[2]["config"]["selectedDefault"], "standard");

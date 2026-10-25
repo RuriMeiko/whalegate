@@ -663,6 +663,34 @@ impl DsClient {
     }
 }
 
+/// Kết quả web search trong SSE của /chat/completion (search_enabled): fragment SEARCH nhận
+/// `{"p":"response/fragments/-1/results","v":[{url,title,snippet,published_at,...}]}` (có khi nằm sẵn trong khối init).
+/// Bỏ trùng theo url, giữ thứ tự xuất hiện.
+pub(crate) fn sse_search_results(sse: &str) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let push = |arr: &Vec<Value>, out: &mut Vec<Value>| {
+        for r in arr {
+            let Some(url) = r["url"].as_str().filter(|u| !u.is_empty()) else { continue };
+            if out.iter().any(|o| o["url"].as_str() == Some(url)) { continue; }
+            out.push(r.clone());
+        }
+    };
+    for line in sse.lines() {
+        let Some(data) = line.strip_prefix("data: ") else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+        if v["p"].as_str().is_some_and(|p| p.ends_with("/results")) {
+            if let Some(arr) = v["v"].as_array() { push(arr, &mut out); }
+            continue;
+        }
+        if let Some(frags) = v["v"]["response"]["fragments"].as_array() {
+            for f in frags {
+                if let Some(arr) = f["results"].as_array() { push(arr, &mut out); }
+            }
+        }
+    }
+    out
+}
+
 /// SSE của /chat/completion có fragment RESPONSE nào chưa? Dùng chung logic với chat_stream:
 /// khối fragments mang type, các delta sau đó chỉ mang p/v.
 pub(crate) fn sse_has_response(sse: &str) -> bool {
@@ -738,6 +766,21 @@ mod probe_tests {
             "data: {\"p\":\"response/fragments/-1/content\",\"v\":\" thêm\"}\n"
         );
         assert!(sse_has_response(with_resp));
+    }
+
+    /// Mẫu thật (search_enabled): kết quả nằm ở response/fragments/-1/results, có thể lặp url.
+    #[test]
+    fn search_results_from_sse() {
+        let sse = concat!(
+            "data: {\"v\":{\"response\":{\"fragments\":[{\"id\":2,\"type\":\"SEARCH\",\"status\":\"WIP\",\"content\":null,\"queries\":[{\"query\":\"q\"}],\"results\":[]}]}}}\n",
+            "data: {\"p\":\"response/fragments/-1/results\",\"v\":[{\"url\":\"https://a\",\"title\":\"A\",\"snippet\":\"sa\",\"cite_index\":1,\"published_at\":1700000000},{\"url\":\"https://b\",\"title\":\"B\",\"snippet\":\"sb\",\"cite_index\":2,\"published_at\":null}]}\n",
+            "data: {\"p\":\"response/fragments/-1/results\",\"v\":[{\"url\":\"https://a\",\"title\":\"A again\"}]}\n",
+            "data: {\"p\":\"response\",\"o\":\"BATCH\",\"v\":[{\"p\":\"fragments\",\"o\":\"APPEND\",\"v\":[{\"id\":3,\"type\":\"RESPONSE\",\"content\":\"x\"}]}]}\n"
+        );
+        let r = sse_search_results(sse);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0]["title"], "A");
+        assert_eq!(r[1]["url"], "https://b");
     }
 
     /// Có ảnh đính kèm: web mở READ_LINK trước, rồi RESPONSE nằm trong một BATCH.

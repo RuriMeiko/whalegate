@@ -196,7 +196,7 @@ fn parse_pricing(html: &str, now: u64) -> Option<Pricing> {
 // ---------- giờ cao điểm ----------
 
 /// (năm, tháng, ngày) từ số ngày kể từ 1970-01-01.
-fn civil(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719468;
     let era = z.div_euclid(146097);
     let doe = z.rem_euclid(146097);

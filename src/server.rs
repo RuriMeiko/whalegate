@@ -2864,6 +2864,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/dsh", get(api_dsh_status).post(api_dsh_setup))
         .route("/api/update", get(crate::transfer::api_update_check).post(crate::transfer::api_update_apply))
         .route("/v1/chat/completions", post(crate::chat::api_chat_completions))
+        .route("/v1/search/messages", post(crate::chat::api_search_messages))
         .route("/v1/models", get(api_models))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB — prompt dài (256K+ token)
         .layer(axum::middleware::from_fn(access_guard))
