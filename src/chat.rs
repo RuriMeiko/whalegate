@@ -537,7 +537,12 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
         // lỗi do model (call sai/không parse được/thiếu call bắt buộc): lượt sau gửi kèm lời nhắc sửa, không cần đổi acc
         let mut repair: Option<String> = None;
 
-        for attempt in 0..3usize {
+        // token bị từ chối (acc đã bị đăng xuất) không tính vào 3 lượt thử: đổi acc khác ngay, nới thêm lượt —
+        // trước đây 3 acc chết liền nhau làm hỏng request dù pool còn acc tốt
+        let (mut max_attempts, mut auth_skips, mut next_attempt) = (3usize, 0usize, 0usize);
+        while next_attempt < max_attempts {
+            let attempt = next_attempt;
+            next_attempt += 1;
             if attempt > 0 {
                 // failover: nhả acc hỏng rồi lấy acc khác (mềm)
                 let prev = lease.take().map(|l| l.acc_id);
@@ -612,6 +617,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                     last_err = Some(format!("{:#}", e));
                     if format!("{:#}", e).contains("AUTH_INVALID") {
                         mark_auth_invalid(&st, &acc_id).await;
+                        if auth_skips < 8 { auth_skips += 1; max_attempts += 1; }
                     } else {
                         fail_acc(&st, &acc_id, "error", true).await;
                     }
@@ -663,7 +669,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         let cached_tokens = if stateful_attempt { (prior_tokens as i64).min(prompt_tokens) } else { 0 };
 
                         let parsed = if tools_on { extract_tool_calls(&full_text, tools) } else { None };
-                        let last = attempt == 2;
+                        let last = attempt + 1 == max_attempts;
                         if let Some((before, mut calls)) = parsed {
                             for c in calls.iter_mut() { infer_tool_name(&ctx.tools, c); fill_required_args(&ctx.tools, c); }
                             if let ToolChoice::Named(n) = &ctx.choice { calls.retain(|c| &c.name == n); }
@@ -705,7 +711,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         } else if let Some(why) = truncated.clone() {
                             crate::elog!("[ds-truncated] attempt {}: {}", attempt, why);
                             last_err = Some(why);
-                            if attempt == 2 && has_content && !has_tool_marker(&full_text) {
+                            if attempt + 1 == max_attempts && has_content && !has_tool_marker(&full_text) {
                                 // lượt cuối: trả phần đã có, báo 'length' để client biết bị cắt
                                 let rest = content.take_rest();
                                 if !rest.is_empty() { yield Out::Content(rest); }
