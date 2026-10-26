@@ -388,6 +388,29 @@ fn spawn_delete_session(acc: Option<(String, String)>, sid: String) {
     }
 }
 
+/// Một dòng ~/.whalegate/trace.jsonl cho mỗi lượt gửi lên DeepSeek: acc nào, phiên nào, gửi gì (cỡ, ảnh, search,
+/// 200 ký tự cuối của nội dung), kết quả gửi. Để khi acc bị khoá còn truy được nó đã xử lý gì ngay trước đó.
+/// File quá 20 MB thì đổi tên thành trace.jsonl.1 (giữ một bản cũ).
+#[allow(clippy::too_many_arguments)]
+async fn trace_dispatch(st: &Arc<AppState>, kind: &str, acc_id: &str, attempt: usize, mode: &str, sid: Option<&str>,
+    images: usize, prompt: &str, thinking: bool, search: bool, err: Option<&str>) {
+    let label = st.store.read().await.accounts.iter().find(|a| a.id == acc_id).map(|a| a.label.clone()).unwrap_or_default();
+    let tail: String = { let v: Vec<char> = prompt.chars().rev().take(200).collect(); v.into_iter().rev().collect() };
+    crate::elog!("[route] {} acc {} ({}) attempt {} {} sid={} ảnh={} chars={}{}{}", kind, &acc_id[..8.min(acc_id.len())], label, attempt, mode,
+        sid.map_or("-", |s| &s[..8.min(s.len())]), images, prompt.chars().count(), if search { " search" } else { "" },
+        err.map(|e| format!(" LỖI {}", e)).unwrap_or_default());
+    let line = json!({"t": now(), "kind": kind, "acc": acc_id, "label": label, "attempt": attempt, "mode": mode, "sid": sid,
+        "images": images, "chars": prompt.chars().count(), "thinking": thinking, "search": search, "err": err, "tail": tail});
+    let path = std::path::Path::new(&creds_dir()).join("trace.jsonl");
+    if std::fs::metadata(&path).map(|m| m.len() > 20 * 1024 * 1024).unwrap_or(false) {
+        let _ = std::fs::rename(&path, path.with_extension("jsonl.1"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", line);
+    }
+}
+
 fn too_many(msg: &str) -> ApiErr {
     (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": {"message": msg, "type": "rate_limit_error", "code": "pool_exhausted"}, "retry_after_secs": 5})))
 }
@@ -607,6 +630,10 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                 }
                 Err(e) => Err(e),
             };
+            let mode = if stateful_attempt { "cont" } else if own_session { "new" } else { "shared" };
+            let trace_err = stream_res.as_ref().err().map(|e| format!("{:#}", e));
+            trace_dispatch(&st, "chat", &acc_id, attempt, mode, stream_res.as_ref().ok().map(|p| p.0.as_str()),
+                images_used.len(), prompt_used, ctx.thinking, ctx.search, trace_err.as_deref()).await;
             let (sid, mut rx) = match stream_res {
                 Ok(p) => {
                     if own_session { st.sessions.lk().insert(p.0.clone(), (acc_id.clone(), now())); }
@@ -947,7 +974,10 @@ pub(crate) async fn api_chat_completions(
         Some(l) => l,
         None => acquire(&st, &[], None, Instant::now() + Duration::from_secs(queue_wait_secs())).await?,
     };
-    let images = collect_images_cached(&msgs, 4, &mut img_cache).await;
+    // hội thoại mới trên web (miss/thử lại/đổi acc): chỉ gửi ảnh của lượt hiện tại (sau câu trả lời cuối của model).
+    // Kéo theo 4 ảnh cũ mỗi lần mở lại từng đẩy hàng trăm lượt ảnh lên các acc — ảnh chụp cũ trong vòng agent cũng đã lỗi thời.
+    let turn_start = msgs.iter().rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant")).map_or(0, |i| i + 1);
+    let images = collect_images_cached(&msgs[turn_start..], 4, &mut img_cache).await;
     if !images.is_empty() { crate::elog!("[req] {} ảnh đính kèm", images.len()); }
     let reg = if stateful_on { Some(RegPlan { pf_n: pf[n], tools_hash: th }) } else { None };
     let ctx = ChatCtx { prompt, cont, reg, images, thinking, search, tools: active_tools, choice, parallel };
@@ -1097,7 +1127,14 @@ pub(crate) async fn api_search_messages(State(st): State<Arc<AppState>>, Json(re
         };
         touch_acc(&st, &lease.acc_id).await;
         let left = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(left, c.chat(&query, None, None, false, true)).await {
+        let res = tokio::time::timeout(left, c.chat(&query, None, None, false, true)).await;
+        let (tsid, terr) = match &res {
+            Ok(Ok((sid, _, _))) => (Some(sid.as_str()), None),
+            Ok(Err(e)) => (None, Some(format!("{:#}", e))),
+            Err(_) => (None, Some("timeout".to_string())),
+        };
+        trace_dispatch(&st, "search", &lease.acc_id, attempt, "new", tsid, 0, &query, false, true, terr.as_deref()).await;
+        match res {
             Ok(Ok((sid, sse, _))) => {
                 spawn_delete_session(Some((lease.token.clone(), cookie_string(&lease.cookies))), sid);
                 let results = crate::client::sse_search_results(&sse);

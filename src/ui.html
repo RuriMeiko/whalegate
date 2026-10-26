@@ -671,6 +671,124 @@ let CFG = [], PENDING = {}, BUSY = false;
 const eff = (c) => (c.key in PENDING ? PENDING[c.key] : c.value);
 
 function openSettings() { openModal('setModal'); loadCfg(); }
+function closeSettings() { closeModal('setModal'); }
+
+function cfgDirty() { return Object.keys(PENDING).length > 0; }
+
+function cfgSet(key, val) {
+  const c = CFG.find((x) => x.key === key);
+  if (!c) return;
+  if (val === c.value) delete PENDING[key]; else PENDING[key] = val;
+  cfgRow(c);
+  cfgFoot();
+}
+
+async function loadCfg() {
+  const box = $('cfg');
+  box.textContent = '';
+  PENDING = {};
+  box.append(el('div', 'empty', 'Đang tải…'));
+  $('cfgFoot').textContent = '';
+  try {
+    const d = await (await fetch('/api/settings', {cache: 'no-store'})).json();
+    CFG = d.items || [];
+  } catch (e) {
+    CFG = [];
+    box.textContent = '';
+    box.append(el('div', 'empty', 'Không tải được cài đặt: ' + e.message));
+    return;
+  }
+  box.textContent = '';
+  if (!CFG.length) { box.append(el('div', 'empty', 'Không có mục nào.')); return; }
+  const groups = [];
+  for (const c of CFG) { let g = groups.find((x) => x.name === c.group); if (!g) groups.push(g = {name: c.group, items: []}); g.items.push(c); }
+  for (const g of groups) {
+    const lab = el('div', 'lab', g.name); lab.style.marginTop = box.children.length ? '18px' : '0';
+    box.append(lab);
+    for (const c of g.items) box.append(cfgRow(c));
+  }
+  cfgFoot();
+}
+
+function cfgRow(c) {
+  const row = el('div', 'row');
+  row.dataset.key = c.key;
+  const t = el('div', 't');
+  t.append(el('span', null, c.label || c.key));
+  const notes = [];
+  if (c.hint) notes.push(c.hint);
+  if (c.env) notes.push('đang đặt bằng biến môi trường');
+  if (!c.live) notes.push('cần khởi động lại');
+  if (notes.length) t.append(el('small', null, notes.join(' · ')));
+  row.append(t);
+
+  const ctl = el('div', 'ctl');
+  const v = eff(c);
+  if (c.kind === 'bool') {
+    const seg = el('div', 'seg2');
+    for (const [val, txt] of [['0', 'tắt'], ['1', 'bật']]) {
+      const b = el('button', v === val ? 'on' : null, txt);
+      b.type = 'button';
+      b.onclick = () => cfgSet(c.key, val);
+      seg.append(b);
+    }
+    ctl.append(seg);
+  } else if (c.kind === 'choice') {
+    const sel = el('select');
+    for (const ch of c.choices || []) { const o = el('option', null, ch); o.value = ch; sel.append(o); }
+    sel.value = v;
+    sel.onchange = () => cfgSet(c.key, sel.value);
+    ctl.append(sel);
+  } else {
+    const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.step = 1;
+    inp.value = v; inp.setAttribute('aria-label', c.label || c.key);
+    inp.oninput = () => { const s = inp.value.trim(); if (s === '') return; cfgSet(c.key, s); };
+    inp.onblur = () => { inp.value = eff(c); };
+    ctl.append(inp);
+    ctl.append(el('span', 'u', c.unit || ''));
+  }
+  const undo = el('button', 'undo', '↺');
+  undo.type = 'button'; undo.title = 'Bỏ thay đổi chưa lưu';
+  undo.setAttribute('aria-label', 'Bỏ thay đổi ' + (c.label || c.key));
+  undo.onclick = () => { delete PENDING[c.key]; cfgRow(c); cfgFoot(); };
+  ctl.append(undo);
+  row.append(ctl);
+  row.classList.toggle('dirty', c.key in PENDING);
+  return row;
+}
+
+function cfgFoot() {
+  const f = $('cfgFoot');
+  f.textContent = '';
+  const n = Object.keys(PENDING).length;
+  const msg = el('span', 'sub', n ? n + ' thay đổi chưa lưu' : 'mọi thay đổi có hiệu lực ngay');
+  msg.style.marginTop = '0';
+  const sp = el('span', 'sp');
+  const cancel = el('button', 'ghost sm', 'Huỷ');
+  cancel.onclick = closeSettings;
+  const save = el('button', 'solid sm', 'Lưu');
+  save.disabled = BUSY || !n;
+  save.onclick = saveCfg;
+  f.append(msg, sp, cancel, save);
+}
+
+async function saveCfg() {
+  if (BUSY || !cfgDirty()) return;
+  BUSY = true; cfgFoot();
+  try {
+    const d = await post('/api/settings', PENDING);
+    if (!d.ok) throw new Error(d.error || 'không lưu được');
+    PENDING = {};
+    say('Đã lưu cài đặt', 'ok');
+    await loadCfg();
+    const needRestart = CFG.some((c) => !c.live);
+    if (needRestart) {
+      const ok = await ask('Khởi động lại?', 'Có mục chỉ áp dụng sau khi khởi động lại. Khởi động lại ngay khi rảnh?', 'Khởi động lại');
+      if (ok) await post('/api/restart', {mode: 'idle'});
+    }
+  } catch (e) { say(e.message, 'err'); }
+  finally { BUSY = false; cfgFoot(); }
+}
 
 function openDsh() { openModal('dshModal'); dshLoad(); }
 async function dshLoad() {

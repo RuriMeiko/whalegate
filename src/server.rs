@@ -110,6 +110,11 @@ pub struct AccStats {
     // số lần hỏng/rỗng liên tiếp — cooldown tăng dần để acc xấu tự rời pool rồi tự quay lại
     #[serde(default)]
     pub fail_streak: u32,
+    // số lượt trong giờ hiện tại (cửa sổ 3600s) — chạm DS_HOURLY_LIMIT thì acc nghỉ tới hết giờ
+    #[serde(default)]
+    pub hour_window_start: u64,
+    #[serde(default)]
+    pub hour_count: u32,
 }
 
 impl AccStats {
@@ -126,8 +131,16 @@ impl AccStats {
             && self.burst_count >= Self::burst_limit()
     }
 
+    // Trần lượt/giờ mỗi acc (DS_HOURLY_LIMIT, 0 = không giới hạn): dùng dồn dập liên tục là kiểu dễ bị khoá acc
+    pub fn hourly_limit() -> u32 { crate::settings::uint("DS_HOURLY_LIMIT") as u32 }
+
+    fn hourly_capped(&self, now: u64) -> bool {
+        let lim = Self::hourly_limit();
+        lim > 0 && now.saturating_sub(self.hour_window_start) < 3600 && self.hour_count >= lim
+    }
+
     pub(crate) fn available(&self, now: u64) -> bool {
-        now >= self.cooldown_until && !self.burst_active(now)
+        now >= self.cooldown_until && !self.burst_active(now) && !self.hourly_capped(now)
     }
 
     /// Xoá sạch trạng thái lỗi/cooldown/burst (nút Reset trên UI, hoặc sau khi đăng nhập lại).
@@ -157,6 +170,11 @@ impl AccStats {
             self.burst_count = 0;
         }
         self.burst_count += 1;
+        if now.saturating_sub(self.hour_window_start) >= 3600 {
+            self.hour_window_start = now;
+            self.hour_count = 0;
+        }
+        self.hour_count += 1;
         self.last_used_at = now;
         if self.burst_count >= Self::burst_limit() {
             self.cooldown_until = now + Self::cooldown();
@@ -3468,5 +3486,25 @@ mod dsml_leak_tests {
         assert_eq!(safe_flush_len(t), 0, "không lộ ra stream");
         // văn xuôi có ống '|' bình thường không bị đụng
         assert_eq!(fix_dsml_bars("a | b || c"), "a | b || c");
+    }
+}
+
+#[cfg(test)]
+mod hourly_limit_tests {
+    use super::AccStats;
+
+    #[test]
+    fn hourly_cap_rests_account_until_window_ends() {
+        let lim = AccStats::hourly_limit();
+        assert!(lim > 0, "mặc định phải bật giới hạn");
+        let mut s = AccStats::default();
+        let t0 = 1_000_000u64;
+        // rải đều (né burst): mỗi lượt cách 40s, chưa tới trần thì vẫn rảnh
+        for i in 0..lim as u64 - 1 { s.record_call(t0 + i * 40); assert!(s.available(t0 + i * 40 + 30)); }
+        s.record_call(t0 + 3000);
+        assert!(!s.available(t0 + 3010), "chạm trần: nghỉ");
+        assert!(s.available(t0 + 3600), "hết giờ: rảnh lại");
+        s.record_call(t0 + 3600);
+        assert_eq!(s.hour_count, 1, "sang giờ mới thì đếm lại");
     }
 }
