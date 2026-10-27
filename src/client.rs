@@ -89,6 +89,39 @@ fn tz_offset_secs() -> String {
     crate::settings::get("DS_TZ_OFFSET")
 }
 
+/// DS từ chối chính FILE (không phải acc): ảnh quá lớn, định dạng lạ, nội dung bị đánh dấu unsafe,
+/// hoặc server trả 50404. Loại lỗi này lặp lại y hệt trên mọi acc, nên đổi acc là vô ích.
+#[derive(Debug)]
+pub struct FileRejected {
+    pub status: String,
+    pub code: String,
+}
+
+impl std::fmt::Display for FileRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DS từ chối file: status={} err={}", self.status, self.code)
+    }
+}
+
+impl std::error::Error for FileRejected {}
+
+/// Nhãn nhận dạng lỗi file-bị-từ-chối khi nó đã bị bọc trong chuỗi `anyhow` (mất kiểu cụ thể).
+/// Dùng chung một chuỗi với `Display` ở trên để hai bên không lệch nhau.
+pub const FILE_REJECTED_TAG: &str = "DS từ chối file:";
+
+/// Lỗi của một lần upload: đã bị DS từ chối vì bản thân file (không phải vì acc).
+pub fn is_file_rejected(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<FileRejected>().is_some())
+        || format!("{:#}", e).contains(FILE_REJECTED_TAG)
+}
+
+/// Mã lỗi mà DS trả về khi từ chối chính file. 50404 là mã thực tế gặp trên /file/upload_file
+/// (ảnh chụp màn hình 720x1600, PNG bình thường vẫn bị trả về mã này — DS chặn theo nội dung/kích thước
+/// chứ không theo mime). Danh sách để mở rộng khi gặp thêm mã; mã lạ vẫn rơi về nhánh "lỗi acc".
+pub fn is_file_upload_rejection(code: &str) -> bool {
+    matches!(code, "50404" | "50403" | "50405" | "40011" | "40012" | "UNSAFE" | "CONTENT_EMPTY")
+}
+
 impl DsClient {
     pub fn new(token: String, cookies: String) -> Result<Self> {
         // Một reqwest::Client (connection pool) cho mỗi acc: tái dùng TCP/TLS/HTTP2 giữa các request thay vì
@@ -253,6 +286,10 @@ impl DsClient {
     }
 
     /// Upload ảnh/file lên DS web (multipart + PoW riêng cho upload_file), chờ xử lý xong, trả file id.
+    ///
+    /// Lỗi upload được gắn nhãn `FileRejected` để tầng chat phân biệt được "DS không nhận file này"
+    /// với "acc hỏng": file bị từ chối (50404, UNSAFE, CONTENT_EMPTY…) là thuộc tính của FILE,
+    /// không phải của acc — thử acc khác chỉ tốn thời gian và đốt hạn mức.
     pub async fn upload_file(&self, bytes: Vec<u8>, filename: &str, mime: &str) -> Result<String> {
         let pow = self.pow_header("/api/v0/file/upload_file").await?;
         let size = bytes.len();
@@ -271,8 +308,16 @@ impl DsClient {
             .json()
             .await?;
         Self::check_auth(&v)?;
-        let id = v["data"]["biz_data"]["id"].as_str()
-            .with_context(|| format!("upload_file thất bại: {}", v))?.to_string();
+        let Some(id) = v["data"]["biz_data"]["id"].as_str().map(|s| s.to_string()) else {
+            // Không có id: DS trả lỗi ngay ở bước upload. 50404 và họ hàng là lỗi của FILE
+            // (ảnh quá lớn/định dạng lạ/nội dung bị chặn) — cùng một file sẽ hỏng y hệt ở acc khác.
+            let mut code = v["data"]["biz_data"]["error_code"].to_string().trim_matches('"').to_string();
+            if code == "null" { code = v["code"].to_string().trim_matches('"').to_string(); }
+            if is_file_upload_rejection(&code) {
+                return Err(anyhow::Error::new(FileRejected { status: "FAILED".into(), code }));
+            }
+            anyhow::bail!("upload_file thất bại: {}", v)
+        };
         // PENDING → SUCCESS (~2s với ảnh nhỏ)
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -283,7 +328,11 @@ impl DsClient {
             match st {
                 "SUCCESS" => return Ok(id),
                 "FAILED" | "ERROR" | "CONTENT_EMPTY" | "UNSAFE" => {
-                    anyhow::bail!("DS từ chối file: status={} err={}", st, f["data"]["biz_data"]["files"][0]["error_code"])
+                    let file = &f["data"]["biz_data"]["files"][0];
+                    return Err(anyhow::Error::new(FileRejected {
+                        status: st.to_string(),
+                        code: file["error_code"].to_string().trim_matches('"').to_string(),
+                    }));
                 }
                 _ => {}
             }

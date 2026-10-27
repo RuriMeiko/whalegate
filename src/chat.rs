@@ -505,6 +505,28 @@ async fn fail_acc(st: &Arc<AppState>, acc_id: &str, why: &str, penalize: bool) {
     mark_dirty(st);
 }
 
+/// Lỗi mạng cục bộ (DNS, connect refused/timeout) trước khi DS kịp trả lời — lặp lại với mọi acc, không phải lỗi acc.
+fn is_network_error(e: &anyhow::Error) -> bool {
+    let m = format!("{:#}", e);
+    m.contains("dns error") || m.contains("client error (Connect)") || m.contains("error trying to connect")
+}
+
+/// Hết lượt retry mà DS vẫn từ chối file (50404/UNSAFE…) trên mọi acc đã thử: coi các acc đó như dead —
+/// cách ly 30 phút, tắt pool, gắn nhãn rõ nguyên nhân. Reset / đăng nhập lại / bật lại pool sẽ gỡ.
+async fn file_rejected_acc(st: &Arc<AppState>, acc_id: &str, err: &str) {
+    crate::elog!("[ds-file-dead] acc {} coi như chết sau khi DS từ chối file ở mọi lượt thử: {}", &acc_id[..8.min(acc_id.len())], err);
+    let mut store = st.store.write().await;
+    if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
+        a.stats.total_error += 1;
+        a.stats.fail_streak = a.stats.fail_streak.max(5);
+        a.stats.cooldown_until = now() + 1800;
+        a.pool_enabled = false;
+        a.last_status = Some("DS từ chối file đính kèm (50404) ở mọi lượt thử — đã tắt khỏi pool, cần kiểm tra/đăng nhập lại".into());
+    }
+    drop(store);
+    mark_dirty(st);
+}
+
 /// Token chết (code 40003): cách ly acc lâu, gắn nhãn cần đăng nhập lại; đăng nhập lại/Reset sẽ gỡ.
 async fn mark_auth_invalid(st: &Arc<AppState>, acc_id: &str) {
     let mut store = st.store.write().await;
@@ -554,6 +576,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
         let mut lease = Some(lease0);
         let mut failed: Vec<String> = Vec::new();
         let mut last_err: Option<String> = None;
+        let mut file_rej: Vec<String> = Vec::new();
         let mut finished = false;
         let tools: &[Value] = ctx.tools.as_deref().unwrap_or(&[]);
         let tools_on = !tools.is_empty();
@@ -563,6 +586,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
         // token bị từ chối (acc đã bị đăng xuất) không tính vào 3 lượt thử: đổi acc khác ngay, nới thêm lượt —
         // trước đây 3 acc chết liền nhau làm hỏng request dù pool còn acc tốt
         let (mut max_attempts, mut auth_skips, mut next_attempt) = (3usize, 0usize, 0usize);
+        let mut net_skips = 0usize;
         while next_attempt < max_attempts {
             let attempt = next_attempt;
             next_attempt += 1;
@@ -618,7 +642,21 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         let key = (acc_id.clone(), img.hash.clone());
                         let cached = st.file_cache.lk().get(&key).cloned();
                         if let Some(id) = cached { file_ids.push(id); continue; }
-                        match c.upload_file(img.bytes.clone(), &format!("image-{}.{}", &img.hash[..8], ext_for(&img.mime)), &img.mime).await {
+                        // DS đôi khi trả 50404 tạm thời ở khâu audit dù web upload cùng ảnh vẫn pass: thử lại
+                        // ngay trên chính acc này (upload mới, file-id mới) trước khi tính là lỗi
+                        let fname = format!("image-{}.{}", &img.hash[..8], ext_for(&img.mime));
+                        let mut res = c.upload_file(img.bytes.clone(), &fname, &img.mime).await;
+                        for retry in 1..=2 {
+                            match &res {
+                                Err(e) if crate::client::is_file_rejected(e) => {
+                                    crate::elog!("[ds-upload] acc {} bị từ chối file ({:#}) — thử lại cùng acc lần {}", &acc_id[..8.min(acc_id.len())], e, retry);
+                                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                                    res = c.upload_file(img.bytes.clone(), &fname, &img.mime).await;
+                                }
+                                _ => break,
+                            }
+                        }
+                        match res {
                             Ok(id) => { st.file_cache.lk().insert(key, id.clone()); file_ids.push(id); }
                             Err(e) => { up_err = Some(e); break; }
                         }
@@ -642,9 +680,20 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                 Err(e) => {
                     crate::elog!("[ds-error] attempt {} acc {}: {:#}", attempt, &acc_id[..8.min(acc_id.len())], e);
                     last_err = Some(format!("{:#}", e));
+                    // DS từ chối file (50404…) thường là lỗi tạm của khâu audit phía DS (retryable=true; cùng ảnh
+                    // upload lại vẫn pass): chưa phạt acc, thử acc khác. Chỉ khi hết lượt mà vẫn bị từ chối mới coi dead.
+                    if crate::client::is_file_rejected(&e) {
+                        file_rej.push(acc_id.clone());
+                        failed.push(acc_id);
+                        continue;
+                    }
                     if format!("{:#}", e).contains("AUTH_INVALID") {
                         mark_auth_invalid(&st, &acc_id).await;
                         if auth_skips < 8 { auth_skips += 1; max_attempts += 1; }
+                    } else if is_network_error(&e) {
+                        // DNS/kết nối từ máy mình tới DS (không tới được server) không phải lỗi của acc: không phạt,
+                        // và nới thêm lượt như token chết để một cơn chớp mạng không làm hỏng request
+                        if net_skips < 3 { net_skips += 1; max_attempts += 1; }
                     } else {
                         fail_acc(&st, &acc_id, "error", true).await;
                     }
@@ -787,6 +836,10 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
         }
 
         if !finished {
+            if !file_rej.is_empty() && last_err.as_deref().is_some_and(|m| m.contains(crate::client::FILE_REJECTED_TAG)) {
+                let why = last_err.clone().unwrap_or_default();
+                for id in &file_rej { file_rejected_acc(&st, id, &why).await; }
+            }
             let msg = last_err.unwrap_or_else(|| "DeepSeek web không trả dữ liệu".into());
             crate::elog!("[ds-fail] {}", msg);
             crate::usage::record_request(t_req.elapsed().as_millis() as u64, false);
@@ -1161,6 +1214,13 @@ mod tests {
 
     /// Response search phải đúng dạng plugin web-search-deepseek của dsh đọc: có web_search_tool_result,
     /// url/title/page_age trong kết quả, snippet trong citations của khối text.
+    #[test]
+    fn network_errors_are_not_account_errors() {
+        let dns = anyhow::anyhow!("error sending request for url (https://chat.deepseek.com/api/v0/chat_session/create): client error (Connect): dns error: failed to lookup address information: Try again");
+        assert!(is_network_error(&dns));
+        assert!(!is_network_error(&anyhow::anyhow!("AUTH_INVALID: Authorization Failed")));
+    }
+
     #[test]
     fn search_response_shape() {
         let req = json!({"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": [{"type": "text", "text": "Perform a web search for the query: unsplash jersey"}]}]});
