@@ -94,7 +94,7 @@ pub(crate) fn default_base_url() -> String {
 /// Cửa sổ ngữ cảnh báo cho dsh. dsh tự nén khi lịch sử chạm 80% cửa sổ (đếm token theo cách của nó); việc đó phải
 /// xảy ra TRƯỚC khi prompt chạm DS_PROMPT_MAX_CHARS của gateway — vượt ngưỡng đó gateway cắt lịch sử thô (mất ngữ cảnh
 /// không có tóm tắt). Tính theo trường hợp xấu nhất ~4 ký tự/token (văn bản tiếng Anh) và chừa 10% cho spec tools/DSML:
-/// mặc định 1,2M ký tự → 337K token. Không vượt DS_CONTEXT_TOKENS (giới hạn đo được của web).
+/// mặc định 1,822M ký tự → 512K token. Không vượt DS_CONTEXT_TOKENS (giới hạn đo được của web).
 pub(crate) fn safe_context_window() -> u64 {
     let max_chars = crate::settings::uint("DS_PROMPT_MAX_CHARS");
     let by_chars = max_chars * 9 / 10 / 4 * 10 / 8;

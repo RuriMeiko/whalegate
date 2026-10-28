@@ -848,7 +848,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
     }
 }
 
-/// Rút gọn lịch sử nếu prompt vượt ngân sách (DS_PROMPT_MAX_CHARS, mặc định 1,2M ký tự):
+/// Rút gọn lịch sử nếu prompt vượt ngân sách (DS_PROMPT_MAX_CHARS, mặc định 1,822M ký tự):
 /// 1) cắt giữa các tool_result cũ, 2) bỏ các lượt cũ nhất (giữ system + tin user đầu).
 ///
 /// Chi phí O(n) thay vì O(n²): render từng message đúng một lần để lấy kích thước, sau đó

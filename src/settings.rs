@@ -43,8 +43,8 @@ pub static DEFS: &[Def] = &[
     // nhanh
     shown(b("DS_POW_PREFETCH", "Tốc độ", "1", "Dự đoán PoW: tải + giải sẵn cho request kế tiếp"), "Dự đoán PoW", "Tải và giải sẵn cho request kế tiếp"),
     Def { key: "DS_DEFAULT_EFFORT", group: "Tốc độ", kind: Kind::Choice, default: "none", min: 0, max: 0, choices: &["none", "auto", "max"], unit: "", label: "Mức suy nghĩ mặc định", hint: "Khi client không chỉ định. none nhanh · auto nghĩ lượt người dùng · max luôn nghĩ", show: true, live: true },
-    shown(n("DS_CONTEXT_TOKENS", "Tốc độ", "500000", 8000, 1000000, "token", "Cửa sổ ngữ cảnh báo cho client (/v1/models)"), "Cửa sổ ngữ cảnh", "Số báo cho client; web nhận ≥500K token"),
-    shown(n("DS_PROMPT_MAX_CHARS", "Tốc độ", "1200000", 10000, 5000000, "ký tự", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"), "Trần prompt", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"),
+    shown(n("DS_CONTEXT_TOKENS", "Tốc độ", "512000", 8000, 1000000, "token", "Cửa sổ ngữ cảnh báo cho client (/v1/models)"), "Cửa sổ ngữ cảnh", "Số báo cho client; web nhận ≥512K token"),
+    shown(n("DS_PROMPT_MAX_CHARS", "Tốc độ", "1822000", 10000, 5000000, "ký tự", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"), "Trần prompt", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"),
     n("DS_MAX_IMAGE_MB", "Tốc độ", "20", 1, 100, "MB", "Ảnh tối đa mỗi tấm"),
     // pool
     shown(n("DS_MAX_CONC_PER_ACC", "Pool", "2", 1, 6, "request", "Đồng thời tối đa trên một tài khoản"), "Đồng thời mỗi tài khoản", "Cao hơn 2 dễ bị DeepSeek giới hạn"),
