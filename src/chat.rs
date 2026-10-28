@@ -121,10 +121,33 @@ pub(crate) fn tool_directive(choice: &ToolChoice, parallel: bool) -> String {
     if d.is_empty() { d } else { format!("system: {}\n", d) }
 }
 
+/// Có khối tool-call mở mà không thấy thẻ đóng ở đuôi: output bị cắt giữa chừng, không phải sai cú pháp.
+fn cut_off_tool_block(raw: &str) -> bool {
+    if !crate::server::has_strong_tool_marker(raw) { return false; }
+    let n = raw.chars().count();
+    let tail: String = raw.chars().skip(n.saturating_sub(200)).collect();
+    let closed = ["/invoke", "invoke>", "calls>", "tool▁calls▁end", "tool_calls_end", "tool▁call▁end", "tool_call_end"]
+        .iter().any(|m| tail.contains(m));
+    !closed && n > 8000
+}
+
 /// Lời nhắc sửa lỗi cho lượt retry: đưa lại output hỏng + lý do, model sửa đúng chỗ thay vì đoán lại từ đầu
 /// (retry mù với cùng prompt hay ra lại y hệt).
 fn repair_note(raw: &str, why: &str) -> String {
     let raw = raw.trim();
+    if cut_off_tool_block(raw) {
+        // Output bị web cắt giữa khối tool-call (mẫu thật: ~19K ký tự rồi dừng, không có thẻ đóng). Gửi lại y nguyên thì
+        // lần nào cũng bị cắt đúng chỗ đó → bắt model chia nhỏ, và chỉ trích đuôi để nó biết đã viết tới đâu.
+        let n = raw.chars().count();
+        let tail: String = raw.chars().skip(n.saturating_sub(300)).collect();
+        return format!(
+            "assistant: …[cut]{}\nsystem: Your previous reply was CUT OFF after ~{} characters in the middle of a tool-call block, so \
+             nothing ran (reason: {}). Output that long never completes. Do NOT resend it whole: split the work into several \
+             tool calls of at most ~6000 characters each (e.g. write the file in parts, appending each part with a shell \
+             heredoc `cat >> file <<'EOF'`), one call per reply, with every block properly closed.\n",
+            tail, n, why
+        );
+    }
     let shown = head_chars(raw, 6000);
     let cut = if shown.len() < raw.len() { "\n…[cut]" } else { "" };
     format!(
@@ -1301,6 +1324,19 @@ mod tests {
     fn repair_note_quotes_output_and_reason() {
         let n = repair_note("  <｜｜DSML｜｜ calls>broken ", "bash: missing required \"command\"");
         assert!(n.starts_with("assistant: <｜｜DSML｜｜ calls>broken\nsystem: ") && n.contains("missing required"));
+    }
+
+    #[test]
+    fn repair_note_for_cut_off_block_asks_to_split() {
+        // mẫu thật (dsh session 1a6065d5): khối run_code ~19K ký tự bị cắt giữa chừng, không có thẻ đóng
+        let raw = format!("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"run_code\">\n<｜｜DSML｜｜ parameter name=\"code\" string=\"true\">{}", "tiếng Việt ".repeat(1700));
+        assert!(cut_off_tool_block(&raw));
+        let n = repair_note(&raw, "the tool-call block is malformed");
+        assert!(n.contains("CUT OFF") && n.contains("split") && n.len() < 2000, "không dội lại cả output");
+        // khối đóng đủ hoặc ngắn thì vẫn là lỗi cú pháp thường
+        let closed = format!("{}\n</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>", raw);
+        assert!(!cut_off_tool_block(&closed));
+        assert!(!cut_off_tool_block("<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"x\">"));
     }
 
     #[test]
