@@ -1170,9 +1170,13 @@ pub(crate) async fn api_search_messages(State(st): State<Arc<AppState>>, Json(re
     let mut failed: Vec<String> = Vec::new();
     let mut last_err = String::from("no account available");
     for attempt in 0..2 {
-        let lease = match acquire(&st, &failed, None, (Instant::now() + Duration::from_secs(10)).min(deadline)).await {
+        // chờ tới hết ngân sách: pool hay bị chat chiếm/cooldown, 10s là quá ngắn
+        let lease = match acquire(&st, &failed, None, deadline).await {
             Ok(l) => l,
-            Err(_) => break,
+            Err((_, body)) => {
+                last_err = body.0["error"]["message"].as_str().or(body.0["error"].as_str()).unwrap_or("no account available").to_string();
+                break;
+            }
         };
         let c = match DsClient::new(lease.token.clone(), cookie_string(&lease.cookies)) {
             Ok(c) => c,
