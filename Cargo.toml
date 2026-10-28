@@ -1,6 +1,6 @@
 [package]
 name = "whalegate"
-version = "0.5.11"
+version = "0.5.12"
 edition = "2021"
 
 [dependencies]

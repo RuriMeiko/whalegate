@@ -48,7 +48,7 @@ pub static DEFS: &[Def] = &[
     n("DS_MAX_IMAGE_MB", "Tốc độ", "20", 1, 100, "MB", "Ảnh tối đa mỗi tấm"),
     // pool
     shown(n("DS_MAX_CONC_PER_ACC", "Pool", "2", 1, 6, "request", "Đồng thời tối đa trên một tài khoản"), "Đồng thời mỗi tài khoản", "Cao hơn 2 dễ bị DeepSeek giới hạn"),
-    shown(n("DS_HOURLY_LIMIT", "Pool", "60", 0, 1000, "lượt", "Lượt tối đa mỗi giờ trên một tài khoản (0 = không giới hạn)"), "Lượt/giờ mỗi tài khoản", "Chạm trần thì tài khoản nghỉ tới hết giờ · 0 = tắt"),
+    shown(n("DS_HOURLY_LIMIT", "Pool", "0", 0, 1000, "lượt", "Lượt tối đa mỗi giờ trên một tài khoản (0 = không giới hạn)"), "Lượt/giờ mỗi tài khoản", "Chạm trần thì tài khoản nghỉ tới hết giờ · 0 = tắt"),
     n("DS_QUEUE_WAIT_SECS", "Pool", "120", 1, 1800, "giây", "Chờ tài khoản rảnh tối đa"),
     n("DS_FAIL_COOLDOWN_MAX", "Pool", "600", 15, 7200, "giây", "Nghỉ tối đa khi tài khoản lỗi liên tiếp"),
     n("DS_BURST_LIMIT", "Pool", "6", 1, 100, "lượt", "Giới hạn burst mỗi tài khoản"),

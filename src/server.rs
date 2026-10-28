@@ -3495,8 +3495,10 @@ mod hourly_limit_tests {
 
     #[test]
     fn hourly_cap_rests_account_until_window_ends() {
+        assert_eq!(AccStats::hourly_limit(), 0, "mặc định tắt giới hạn");
+        std::env::set_var("DS_HOURLY_LIMIT", "60");
         let lim = AccStats::hourly_limit();
-        assert!(lim > 0, "mặc định phải bật giới hạn");
+        assert_eq!(lim, 60);
         let mut s = AccStats::default();
         let t0 = 1_000_000u64;
         // rải đều (né burst): mỗi lượt cách 40s, chưa tới trần thì vẫn rảnh
@@ -3506,5 +3508,6 @@ mod hourly_limit_tests {
         assert!(s.available(t0 + 3600), "hết giờ: rảnh lại");
         s.record_call(t0 + 3600);
         assert_eq!(s.hour_count, 1, "sang giờ mới thì đếm lại");
+        std::env::remove_var("DS_HOURLY_LIMIT");
     }
 }
