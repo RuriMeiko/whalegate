@@ -1,4 +1,4 @@
-# Build prebuilt binaries for every platform and attach them to a draft GitHub release.
+# Build prebuilt binaries for every platform and publish them as a GitHub release.
 # Trigger: push a tag like v0.4.0 (release notes come from docs/releases/<tag>.md).
 name: release
 
@@ -98,7 +98,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          draft: false
           name: whalegate ${{ github.ref_name }}
           body_path: ${{ steps.notes.outputs.path }}
           files: dist/*
