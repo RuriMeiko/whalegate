@@ -1016,7 +1016,14 @@ fn translate_cn_tool_tags(text: &str) -> String {
     out
 }
 
+/// Model đôi khi nhả thanh thành "__DSML__": `<｜__DSML__｜__DSML__｜ parameter` (mở) và `</｜｜DSML｜｜｜__DSML__｜>` (đóng).
+fn fix_underscore_dsml(text: &str) -> String {
+    if !text.contains("__DSML__") && !text.contains('∣') { return text.to_string(); }
+    text.replace('∣', "｜").replace("｜__DSML__｜__DSML__｜", "｜｜DSML｜｜").replace("｜__DSML__｜>", ">").replace("__DSML__", "DSML")
+}
+
 fn normalize_dsml(text: &str) -> String {
+    let text = &fix_underscore_dsml(text);
     let translated;
     let text = if text.contains("调用工具") { translated = translate_cn_tool_tags(text); translated.as_str() } else { text };
     let mut out = String::with_capacity(text.len() + 64);
@@ -1140,15 +1147,15 @@ fn find_tool_marker(buf: &str) -> Option<usize> {
         if in_inline_code(buf, i) { continue; }
         let before = &buf[..i];
         let after = &buf[i + 4..];
-        let glued_after = after.starts_with('｜') || after.starts_with('|');
-        let glued_before = before.ends_with('<') || before.ends_with('｜') || before.ends_with('|') || before.ends_with("DS");
+        let glued_after = after.starts_with(['｜', '|', '∣']) || after.starts_with("__");
+        let glued_before = before.ends_with(['<', '｜', '|', '∣']) || before.ends_with("DS") || before.ends_with("__");
         if glued_before || glued_after {
             // lùi về đầu cụm: bỏ "DS" typo, các thanh và '<' đứng trước
-            let head = before.trim_end_matches("DS").trim_end_matches(|c| c == '｜' || c == '|');
+            let head = before.trim_end_matches("DS").trim_end_matches(['｜', '|', '∣', '_']);
             // phải có dạng THẺ: mở bằng '<'/'</', hoặc theo sau là tên thẻ. Văn xuôi nhắc "`｜｜DSML｜｜` fragments"
             // (vd bản tóm tắt compaction) không phải ý định gọi tool.
             let tagged = head.ends_with('<') || head.ends_with("</") || {
-                let a = after.trim_start_matches(['｜', '|']).trim_start_matches([' ', ':', '_', '-']);
+                let a = after.trim_start_matches(['｜', '|', '∣']).trim_start_matches([' ', ':', '_', '-']);
                 [">", "calls", "call", "invoke", "parameter", "tool_call", "function_call"].iter().any(|w| a.starts_with(w))
             };
             if !tagged { continue; }
@@ -1524,7 +1531,7 @@ fn space_dsml_tags(text: &str) -> String {
 /// Chuẩn hoá số thanh dọc quanh 'DSML': model hay nhả '<｜DSML｜｜ calls>' / '</｜DSML｜｜ invoke>' (1-3 gạch),
 /// kể cả thanh ASCII hoặc trộn ('<｜||DSML||_call>', '</||DSML|| invoke>') → luôn 2 gạch toàn độ rộng mỗi bên.
 fn fix_dsml_bars(text: &str) -> String {
-    let is_bar = |c: &char| *c == '｜' || *c == '|';
+    let is_bar = |c: &char| matches!(*c, '｜' | '|' | '∣');
     let mut out = String::with_capacity(text.len() + 8);
     let mut rest = text;
     while let Some(p) = rest.find("DSML") {
@@ -1696,7 +1703,7 @@ fn dangling_bar_tag(s: &str) -> &str {
 }
 
 pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolCall>)> {
-    let fixed = text.replace("DSDSML", "DSML"); // typo lặp "DS" của model
+    let fixed = fix_underscore_dsml(text).replace("DSDSML", "DSML"); // typo lặp "DS" của model
     let text = fixed.as_str();
     // DS web đổi format theo phiên bản: '<｜｜DSML｜｜ calls>' / '<｜｜DSML｜｜tool_calls>' /
     // '<｜｜DSML｜｜ calls>' có space — normalize mọi biến thể về '<｜｜DSML｜｜ calls>' trước parse
@@ -2927,6 +2934,21 @@ mod dsml_tests {
         assert!(calls[0].arguments.contains("pwd && ls -la"));
         assert!(before.contains("ngó qua repo"));
         assert!(!before.contains("DSML"));
+    }
+
+    #[test]
+    fn parse_underscore_dsml_bars() {
+        // mẫu thật (dsh session 1a6065d5): thanh bị nhả thành "__DSML__", thiếu invoke, đóng bằng `｜__DSML__｜>`
+        let text = "Giờ tôi dựng trang.\n\n<｜｜DSML｜｜ calls>\n<｜__DSML__｜__DSML__｜ parameter name=\"code\" string=\"true\">const files: Record<string, string> = {};</｜｜DSML｜｜ parameter>\n<｜__DSML__｜__DSML__｜ parameter name=\"description\" string=\"true\">Read</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜｜__DSML__｜>";
+        assert!(has_strong_tool_marker(text));
+        let tools = vec![json!({"type":"function","function":{"name":"run_code","parameters":{"type":"object",
+            "properties":{"code":{"type":"string"},"description":{"type":"string"}},"required":["code","description"]}}})];
+        let (before, calls) = extract_tool_calls(text, &tools).expect("phải parse được");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].arguments.contains("Record<string, string>") && calls[0].arguments.contains("Read"), "{}", calls[0].arguments);
+        assert!(!before.contains("DSML"));
+        // không có thẻ mở calls, chỉ mở bằng parameter __DSML__ (step cuối của session)
+        assert!(has_tool_marker("Xong.\n\n<｜__DSML__｜__DSML__｜ parameter name=\"code\">x"));
     }
 }
 
