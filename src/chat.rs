@@ -626,7 +626,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         lease = Some(l);
                     }
                     Err((_, Json(e))) => {
-                        last_err = Some(e.get("error").and_then(|x| x.as_str()).unwrap_or("hết acc khả dụng").to_string());
+                        last_err = Some(e.pointer("/error/message").and_then(|x| x.as_str()).unwrap_or("hết acc khả dụng").to_string());
                         break;
                     }
                 }

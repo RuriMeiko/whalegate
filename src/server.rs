@@ -2950,6 +2950,18 @@ mod dsml_tests {
         // không có thẻ mở calls, chỉ mở bằng parameter __DSML__ (step cuối của session)
         assert!(has_tool_marker("Xong.\n\n<｜__DSML__｜__DSML__｜ parameter name=\"code\">x"));
     }
+
+    #[test]
+    fn parse_underscore_dsml_closers_without_invoke() {
+        // mẫu thật (dsh session 1a6065d5, turn 14): không có calls/invoke mở, đóng bằng `</｜__DSML__｜__DSML__｜>` rồi `… calls>`
+        let text = "Đủ 11 phần.\n\n<｜__DSML__｜__DSML__｜ parameter name=\"code\" string=\"true\">const r = await tools.bash({ command: `echo hi` });</｜__DSML__｜__DSML__｜ parameter>\n<｜__DSML__｜__DSML__｜ parameter name=\"description\" string=\"true\">Spot-check</｜__DSML__｜__DSML__｜ parameter>\n</｜__DSML__｜__DSML__｜>\n</｜__DSML__｜__DSML__｜ calls>";
+        let tools = vec![json!({"type":"function","function":{"name":"run_code","parameters":{"type":"object",
+            "properties":{"code":{"type":"string"},"description":{"type":"string"}},"required":["code","description"]}}})];
+        let (before, calls) = extract_tool_calls(text, &tools).expect("phải parse được");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].arguments.contains("echo hi") && calls[0].arguments.contains("Spot-check"), "{}", calls[0].arguments);
+        assert!(!before.contains("DSML") && before.contains("Đủ 11 phần"));
+    }
 }
 
 #[cfg(test)]
