@@ -639,7 +639,12 @@ async fn api_add_account(
     }
     // Token đã có trong pool = bấm bookmarklet / dán lại để làm mới acc đó (cookie, thiết bị, gỡ "đã đăng xuất"),
     // không phải lỗi trùng. Cùng người dùng mà token khác (đăng nhập lại) thì thay token vào acc cũ — xem dưới.
-    let existing_seed = st.store.read().await.accounts.iter().find(|a| a.token == p.token).map(|a| a.fp_seed.clone());
+    let (existing_seed, existing_sid) = st.store.read().await.accounts.iter().find(|a| a.token == p.token)
+        .map(|a| (a.fp_seed.clone(), a.cookies.get("ds_session_id").cloned())).unzip();
+    // acc đã có ds_session_id mà gói mới (bookmarklet) không đọc được nó: giữ cái cũ, đừng xin cái mới
+    if let (false, Some(Some(sid))) = (p.cookies.contains_key("ds_session_id"), existing_sid) {
+        p.cookies.insert("ds_session_id".into(), sid);
+    }
     // Có hồ sơ trình duyệt thật (bookmarklet) → gắn TRƯỚC khi tạo client, để ngay request verify cũng đi
     // bằng đúng TLS/UA/device id của máy user. Seed lấy từ gói; thiếu thì giữ seed của acc cũ, không có nữa thì sinh mới.
     let mut browser = p.browser.take();
@@ -664,12 +669,19 @@ async fn api_add_account(
                 Json(json!({"error": format!("token không hợp lệ: {}", v["msg"].as_str().unwrap_or("?"))})),
             ));
         }
-        Ok(v)
+        Ok((v, c))
     }.await;
-    let v = match verified {
-        Ok(v) => v,
+    let (v, c) = match verified {
+        Ok(x) => x,
         Err(e) => { restore_binding(&*st.store.read().await, &p.token); return Err(e); }
     };
+    // bookmarklet / dán token không có ds_session_id (HttpOnly): lấy như trình duyệt lấy, qua chính client của acc
+    if !p.cookies.contains_key("ds_session_id") {
+        match c.ensure_session_cookie().await {
+            Ok(sid) => { p.cookies.insert("ds_session_id".into(), sid); }
+            Err(e) => crate::elog!("[account] chưa lấy được ds_session_id: {:#}", e),
+        }
+    }
     let email = v["data"]["biz_data"]["email"].as_str().unwrap_or("?").to_string();
     let uid = v["data"]["biz_data"]["id"].as_str().map(|s| s.to_string());
 
@@ -3149,6 +3161,33 @@ async fn backfill_uids(st: Arc<AppState>) {
     crate::elog!("[uid] đã nhận id người dùng cho các tài khoản cũ");
 }
 
+/// Acc cũ (dán token, bookmarklet) chưa có ds_session_id: lấy một lần như trình duyệt lấy (xem
+/// `DsClient::ensure_session_cookie`). Lần lượt, có nghỉ, bỏ qua acc DS đã đăng xuất.
+async fn backfill_session_cookies(st: Arc<AppState>) {
+    let todo: Vec<(String, String, String)> = {
+        let store = st.store.read().await;
+        store.accounts.iter().filter(|a| a.auth_dead_at.is_none() && !a.cookies.contains_key("ds_session_id"))
+            .map(|a| (a.id.clone(), a.token.clone(), cookie_string(&a.cookies))).collect()
+    };
+    if todo.is_empty() { return; }
+    let mut got = 0;
+    for (id, token, cookies) in &todo {
+        let Ok(c) = DsClient::new(token.clone(), cookies.clone()) else { continue };
+        match c.ensure_session_cookie().await {
+            Ok(sid) => {
+                if let Some(a) = st.store.write().await.accounts.iter_mut().find(|a| &a.id == id) {
+                    a.cookies.entry("ds_session_id".into()).or_insert(sid);
+                    got += 1;
+                }
+                mark_dirty(&st);
+            }
+            Err(e) => crate::elog!("[cookie] {}: {:#}", &id[..8.min(id.len())], e),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    crate::elog!("[cookie] đã lấy ds_session_id cho {}/{} acc còn thiếu", got, todo.len());
+}
+
 /// Dọn phiên web nhàn rỗi quá DS_CONV_TTL (mặc định 1800s): xoá trên DS, khỏi registry phiên và khỏi registry hội thoại.
 async fn conv_sweeper(st: Arc<AppState>) {
     loop {
@@ -3226,6 +3265,7 @@ pub async fn run(port: u16) -> Result<()> {
     let _ = boot_id();
     crate::usage::spawn_background();
     tokio::spawn(backfill_uids(st.clone()));
+    tokio::spawn(backfill_session_cookies(st.clone()));
     tokio::spawn(conv_sweeper(st.clone()));
     tokio::spawn(store_flusher(st.clone()));
     tokio::spawn(auto_refresh_loop(st.clone()));

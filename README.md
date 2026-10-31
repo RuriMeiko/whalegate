@@ -201,13 +201,15 @@ Every account is one "machine" to DeepSeek: a TLS/HTTP2 fingerprint (a real Chro
 | | Machine the account uses | Cookie refresh |
 |---|---|---|
 | **Extension** | Your own browser, with every cookie including HttpOnly ones | Click the extension again on a DeepSeek tab |
-| **Bookmarklet** | Your own browser, without HttpOnly cookies (`ds_session_id`) | Click the bookmarklet again on a DeepSeek tab |
+| **Bookmarklet** | Your own browser; `ds_session_id` is whalegate's own, not the browser's | Click the bookmarklet again on a DeepSeek tab |
 | **Chrome login** | A new dedicated Chrome with its own generated fingerprint and profile | Automatic, every `DS_DEVICE_REFRESH_HOURS` (default 6h) |
 | **Paste a token** | Derived from the token (fixed, but not a real browser) | None |
 
 ### Option 1: browser extension (recommended)
 
 The extension does what the bookmarklet does, and also reads HttpOnly cookies such as `ds_session_id`. A page's own JavaScript can never read those, but an extension with the `cookies` permission can, just as CDP does for Chrome login.
+
+> **About `ds_session_id`.** It is `HttpOnly; Secure; SameSite=Strict` with no expiry. DeepSeek's web server sets it on the first response outside `/api` (the favicon or a page) when the request does not carry one; `/api/v0/*` never sets it. Signing in with Google issues a new one, because the strict cookie is not sent when Google redirects back. Accounts added by bookmarklet or pasted token cannot read the browser's value, so whalegate gets its own the same way a browser does: one `GET /favicon.ico` through the account's client when the account is added, and once at startup for older accounts that lack it.
 
 1. In **+ Thêm → Tiện ích**, click **Tải tiện ích** and unzip it. The download already points at the dashboard you opened it from.
 2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the unzipped `whalegate-extension` folder.

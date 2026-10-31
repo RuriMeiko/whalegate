@@ -317,6 +317,34 @@ impl DsClient {
         Ok(Self { http, token, device_id, tz_offset: fp.tz_offset_header(), accept_language: fp.accept_language() })
     }
 
+    /// Bảo đảm acc có `ds_session_id` như trình duyệt thật. Cookie này HttpOnly (bookmarklet không đọc được) và chỉ
+    /// được server web của DS đặt ở response ngoài `/api` khi request chưa mang nó — trình duyệt nhận nó lúc tải
+    /// favicon/trang đầu tiên. whalegate chỉ gọi `/api` nên tự làm đúng bước đó: một lượt `GET /favicon.ico` qua
+    /// client của acc (cùng vân tay), jar nhận Set-Cookie. Trả giá trị cookie (đã có sẵn thì trả luôn, không gọi gì).
+    pub async fn ensure_session_cookie(&self) -> Result<String> {
+        let has = || jar_snapshot(&self.token).and_then(|m| m.get("ds_session_id").cloned());
+        if let Some(v) = has() { return Ok(v); }
+        let resp = self.http
+            .get("https://chat.deepseek.com/favicon.ico")
+            .header("accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+            .header("accept-language", &self.accept_language)
+            .header("referer", "https://chat.deepseek.com/")
+            .header("sec-fetch-dest", "image")
+            .header("sec-fetch-mode", "no-cors")
+            .header("sec-fetch-site", "same-origin")
+            .send()
+            .await?;
+        let status = resp.status();
+        // AWS WAF chặn thì trả 202 + x-amzn-waf-action (không tới server web, không có cookie)
+        let waf = resp.headers().get("x-amzn-waf-action").and_then(|v| v.to_str().ok()).map(str::to_string);
+        let _ = resp.bytes().await;
+        if let Some(v) = has() { return Ok(v); }
+        match waf {
+            Some(a) => anyhow::bail!("AWS WAF đòi {} khi lấy ds_session_id", a),
+            None => anyhow::bail!("DS không đặt ds_session_id (favicon.ico -> {})", status),
+        }
+    }
+
     fn req(&self, method: wreq::Method, path: &str) -> wreq::RequestBuilder {
         self.req_to(method, format!("{}{}", DEEPSEEK_API, path))
     }
@@ -1175,5 +1203,32 @@ mod fingerprint_tests {
                 Err(e) => println!("HIF {name}: LỖI {}", format!("{e:#}").chars().take(300).collect::<String>()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod session_cookie_tests {
+    use super::*;
+
+    /// Acc đã có ds_session_id (tiện ích, đăng nhập qua Chrome): trả luôn cookie đó, không gọi mạng.
+    #[tokio::test]
+    async fn existing_session_cookie_is_kept_without_request() {
+        let c = DsClient::new("tok-sid-offline-0123456789abcdef".into(), "ds_session_id=abc123; smidV2=x".into()).unwrap();
+        let t = std::time::Instant::now();
+        assert_eq!(c.ensure_session_cookie().await.unwrap(), "abc123");
+        assert!(t.elapsed() < std::time::Duration::from_millis(50), "không được gọi mạng khi đã có cookie");
+    }
+
+    /// Lấy ds_session_id thật từ DS như trình duyệt (cần mạng): `cargo test live_session_cookie -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_session_cookie_from_favicon() {
+        let c = DsClient::new(format!("tok-sid-live-{}", uuid::Uuid::new_v4().simple()), String::new()).unwrap();
+        let sid = c.ensure_session_cookie().await.expect("DS phải đặt ds_session_id");
+        println!("ds_session_id = {}…", &sid[..8]);
+        assert_eq!(sid.len(), 32);
+        assert!(sid.chars().all(|ch| ch.is_ascii_hexdigit()));
+        // lần hai: jar đã có, trả cùng giá trị
+        assert_eq!(c.ensure_session_cookie().await.unwrap(), sid);
     }
 }
