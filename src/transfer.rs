@@ -140,9 +140,12 @@ pub(crate) async fn api_import_accounts(
     let (added, updated, skipped) = (plan.fresh.len(), plan.updates.len(), plan.skipped.len());
     let skipped_labels: Vec<String> = plan.skipped.iter().take(20).cloned().collect();
 
+    // token của mọi acc vừa nạp/cập nhật: client (kết nối + vân tay) dựng trước đó phải bỏ để dựng lại theo vân tay mới
+    let mut touched: Vec<String> = Vec::new();
     {
         let mut store = st.store.write().await;
         for mut a in plan.fresh.drain(..) {
+            touched.push(a.token.clone());
             // id trùng với acc đã có (gói cũ dùng lại uuid) thì sinh id mới để không đè nhầm.
             if store.accounts.iter().any(|e| e.id == a.id) { a.id = uuid::Uuid::new_v4().to_string(); }
             if a.last_status.is_none() { a.last_status = Some("imported".into()); }
@@ -150,11 +153,17 @@ pub(crate) async fn api_import_accounts(
         }
         for u in plan.updates.drain(..) {
             if let Some(e) = store.accounts.iter_mut().find(|e| e.id == u.id) {
+                touched.push(e.token.clone());
+                touched.push(u.token.clone());
                 let token_changed = e.token != u.token;
                 e.token = u.token;
                 e.cookies = u.cookies;
                 e.label = u.label;
                 if u.ds_uid.is_some() { e.ds_uid = u.ds_uid; }
+                // vân tay/thiết bị đi kèm tài khoản: gói mới có thì thay, gói cũ (không có field) thì giữ nguyên
+                if u.fp_seed.is_some() { e.fp_seed = u.fp_seed.clone(); }
+                if u.device_id.is_some() { e.device_id = u.device_id.clone(); }
+                if u.browser.is_some() { e.browser = u.browser.clone(); }
                 if token_changed {
                     // token mới → phiên web cũ không còn dùng được, xoá sạch trạng thái.
                     e.thread_session_id = None;
@@ -163,10 +172,28 @@ pub(crate) async fn api_import_accounts(
                     e.stats.reset();
                     e.last_status = Some("imported".into());
                     e.last_verified = None;
+                    e.auth_dead_at = None;
                 }
             }
         }
     }
+    // account vừa nạp phải được gắn lại vào registry vân tay, nếu không client sẽ dựng "máy" khác cho tới lần restart
+    {
+        let mut store = st.store.write().await;
+        for a in store.accounts.iter_mut() {
+            // gói thiếu seed (sửa tay, bản cũ): chốt một seed và lưu lại, kẻo vân tay đổi theo từng lần dựng
+            if let Some(b) = a.browser.as_mut() {
+                if b.seed.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
+                    b.seed = Some(a.fp_seed.clone().unwrap_or_else(crate::fingerprint::new_seed));
+                }
+                if a.fp_seed.is_none() { a.fp_seed = b.seed.clone(); }
+            }
+            crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+            crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+            crate::fingerprint::bind_profile(&a.token, a.browser.clone());
+        }
+    }
+    for t in &touched { crate::client::forget(t); }
     server::mark_dirty(&st);
     server::flush_store(&st).await;
     let total = st.store.read().await.accounts.len();

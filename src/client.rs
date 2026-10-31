@@ -74,6 +74,9 @@ pub struct DsClient {
     token: String,
     /// ổn định theo từng acc (web thật giữ 1 device id cố định / trình duyệt)
     device_id: String,
+    /// x-client-timezone-offset / accept-language của acc: acc bookmarklet mang giá trị thật của trình duyệt gốc
+    tz_offset: String,
+    accept_language: String,
 }
 
 /// UUID-dạng ổn định dẫn xuất từ token (FNV-1a 128 bit giả lập bằng 2 lần băm) — mỗi acc một "thiết bị".
@@ -83,10 +86,6 @@ fn device_id_for(token: &str) -> String {
     format!("{:08x}-{:04x}-4{:03x}-a{:03x}-{:012x}", (a >> 32) as u32, (a >> 16) as u16, a as u16 & 0xfff, (b >> 52) as u16 & 0xfff, b & 0xffff_ffff_ffff)
 }
 
-/// Lệch múi giờ tính bằng giây như web (UTC+7 → 25200). Đặt DS_TZ_OFFSET để đổi.
-fn tz_offset_secs() -> String {
-    crate::settings::get("DS_TZ_OFFSET")
-}
 
 /// DS từ chối chính FILE (không phải acc): ảnh quá lớn, định dạng lạ, nội dung bị đánh dấu unsafe,
 /// hoặc server trả 50404. Loại lỗi này lặp lại y hệt trên mọi acc, nên đổi acc là vô ích.
@@ -149,6 +148,11 @@ struct Slot { client: wreq::Client, jar: std::sync::Arc<wreq::cookie::Jar>, seed
 fn slot_pool() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Slot>>> {
     static POOL: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Slot>>>> = std::sync::OnceLock::new();
     POOL.get_or_init(Default::default)
+}
+
+/// Bỏ client (kết nối + jar) đã dựng cho token: vân tay của token vừa đổi/gỡ thì lần sau phải dựng lại theo vân tay mới.
+pub fn forget(token: &str) {
+    slot_pool().lock().unwrap_or_else(|e| e.into_inner()).remove(token);
 }
 
 /// Cookie hiện có trong jar của acc (gồm cả những cái DS vừa đặt qua Set-Cookie) để ghi lại vào store.
@@ -214,7 +218,7 @@ impl DsClient {
             .header("access-control-request-headers", "x-client-bundle-id,x-client-locale,x-client-platform,x-client-timezone-offset,x-client-version")
             .header("origin", "https://chat.deepseek.com")
             .header("referer", "https://chat.deepseek.com/")
-            .header("accept-language", "vi,en-US;q=0.9,en;q=0.8")
+            .header("accept-language", &self.accept_language)
             .header("sec-fetch-dest", "empty")
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-site")
@@ -223,7 +227,7 @@ impl DsClient {
         let resp = self.http
             .get(&url)
             .header("accept", "*/*")
-            .header("accept-language", "vi,en-US;q=0.9,en;q=0.8")
+            .header("accept-language", &self.accept_language)
             .header("origin", "https://chat.deepseek.com")
             .header("referer", "https://chat.deepseek.com/")
             .header("sec-fetch-dest", "empty")
@@ -232,7 +236,7 @@ impl DsClient {
             .header("x-client-bundle-id", "com.deepseek.chat")
             .header("x-client-locale", "vi")
             .header("x-client-platform", "web")
-            .header("x-client-timezone-offset", tz_offset_secs())
+            .header("x-client-timezone-offset", &self.tz_offset)
             .header("x-client-version", "2.7.0")
             .timeout(t3)
             .send().await.ok()?;
@@ -309,7 +313,8 @@ impl DsClient {
         }
         let http = slot.client.clone();
         let device_id = crate::fingerprint::device_for(&token).unwrap_or_else(|| device_id_for(&crate::fingerprint::seed_for(&token)));
-        Ok(Self { http, token, device_id })
+        let fp = crate::fingerprint::Fingerprint::for_token(&token);
+        Ok(Self { http, token, device_id, tz_offset: fp.tz_offset_header(), accept_language: fp.accept_language() })
     }
 
     fn req(&self, method: wreq::Method, path: &str) -> wreq::RequestBuilder {
@@ -325,7 +330,7 @@ impl DsClient {
             .header("referer", "https://chat.deepseek.com/")
             // Bộ header web thật (2.7.0) gửi kèm mọi call /api/v0 — thiếu là dấu hiệu "không phải trình duyệt"
             .header("accept", "*/*")
-            .header("accept-language", "vi,en-US;q=0.9,en;q=0.8")
+            .header("accept-language", &self.accept_language)
             .header("sec-fetch-dest", "empty")
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-origin")
@@ -333,7 +338,7 @@ impl DsClient {
             .header("x-client-version", "2.7.0")
             .header("x-client-locale", "vi")
             .header("x-client-bundle-id", "com.deepseek.chat")
-            .header("x-client-timezone-offset", tz_offset_secs())
+            .header("x-client-timezone-offset", &self.tz_offset)
             .header("x-device-model", "")
             .header("x-device-id", &self.device_id)
     }
@@ -378,11 +383,10 @@ impl DsClient {
         Ok(())
     }
 
-    /// Lỗi xác thực của DS web: HTTP 200 nhưng `code` 40003 ("invalid token") — phải đăng nhập lại, không retry mù.
+    /// Lỗi toàn cục của DS web (HTTP 200, `code` khác 0 ở gốc JSON) — cùng bảng mã web dùng
+    /// (`GLOBAL_ERROR_BIZ_CODE`). Mỗi loại cần xử lý khác nhau nên gắn tiền tố riêng cho tầng trên phân loại.
     fn check_auth(v: &Value) -> Result<()> {
-        if v["code"].as_i64() == Some(40003) {
-            anyhow::bail!("AUTH_INVALID: {}", v["msg"].as_str().unwrap_or("invalid token"));
-        }
+        if let Some(e) = classify_global_code(v) { return Err(e); }
         Ok(())
     }
 
@@ -631,6 +635,15 @@ pub async fn chat_stream(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("completion {} -> {}", status, body);
     }
+    // Lỗi ở completion về dạng JSON thường (không phải SSE): token chết, đòi hCaptcha, PoW sai… Đọc hết rồi phân
+    // loại — nếu để vòng SSE xử lý, các dòng này không có tiền tố `data:` nên bị bỏ qua và acc bị coi là "throttle".
+    let is_json = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/json"));
+    if is_json {
+        let body = resp.text().await.unwrap_or_default();
+        let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        if let Some(e) = classify_global_code(&v) { return Err(e); }
+        anyhow::bail!("completion trả JSON thay vì stream: {}", body.chars().take(300).collect::<String>());
+    }
 
     let (tx, rx) = mpsc::unbounded_channel::<StreamEv>();
     tokio::spawn(async move {
@@ -795,6 +808,27 @@ pub async fn chat_stream(
 
 }
 
+
+/// Mã lỗi toàn cục của web DS (bảng `GLOBAL_ERROR_BIZ_CODE` trong bundle 2.7.0) → lỗi có tiền tố cho tầng trên.
+/// None = không phải lỗi toàn cục (code 0 hoặc lỗi nghiệp vụ nằm trong `data.biz_code`).
+pub(crate) fn classify_global_code(v: &Value) -> Option<anyhow::Error> {
+    let code = v["code"].as_i64()?;
+    let msg = v["msg"].as_str().unwrap_or("").to_string();
+    let tag = match code {
+        0 => return None,
+        // web: onTokenInvalid → đăng xuất. Không có refresh token.
+        40002 | 40003 => "AUTH_INVALID",
+        // web: onIsBanned
+        40012 => "USER_BANNED",
+        // web: onIpAccessRestricted ("thao tác quá nhanh") — theo IP, không phải lỗi acc
+        40029 => "IP_RESTRICTED",
+        40300 | 40301 => "POW_INVALID",
+        // web: business challenge = hCaptcha cho người thật giải, rồi gửi lại kèm x-ds-challenge-response
+        40303 | 40304 => "CHALLENGE_REQUIRED",
+        _ => return Some(anyhow::anyhow!("DS code {}: {}", code, msg)),
+    };
+    Some(anyhow::anyhow!("{}: {} ({})", tag, if msg.is_empty() { tag } else { &msg }, code))
+}
 
 /// Kết quả dò "acc này có chat được không", tách bạch với "token còn hợp lệ không".
 /// /users/current chỉ chứng minh token chưa bị từ chối — một acc bị throttle vẫn qua được,

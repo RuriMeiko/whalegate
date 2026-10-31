@@ -442,11 +442,20 @@ async fn acquire(st: &Arc<AppState>, exclude: &[String], only: Option<&str>, dea
             if accs.is_empty() {
                 return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "no account configured"}))));
             }
-            let others_exist = accs.iter().any(|a| a.pool_enabled && !exclude.contains(&a.id));
+            // acc DS đã huỷ token không bao giờ được chọn; pool chỉ còn acc chết thì báo ngay, khỏi chờ hết hàng đợi
+            if !accs.iter().any(|a| a.pool_enabled && a.auth_dead_at.is_none() && only.is_none_or(|o| o == a.id)) {
+                let dead = accs.iter().filter(|a| a.pool_enabled && a.auth_dead_at.is_some()).count();
+                if dead > 0 {
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": {
+                        "message": format!("whalegate: DeepSeek đã đăng xuất {} acc trong pool — đăng nhập lại trên dashboard", dead),
+                        "type": "auth_error", "code": "accounts_logged_out"}}))));
+                }
+            }
+            let others_exist = accs.iter().any(|a| a.pool_enabled && a.auth_dead_at.is_none() && !exclude.contains(&a.id));
             let in_flight = st.in_flight.lk();
             let mut best: Option<((u32, u64), usize)> = None;
             for (i, a) in accs.iter().enumerate() {
-                if !a.pool_enabled || (others_exist && exclude.contains(&a.id)) || only.is_some_and(|o| o != a.id) {
+                if !a.pool_enabled || a.auth_dead_at.is_some() || (others_exist && exclude.contains(&a.id)) || only.is_some_and(|o| o != a.id) {
                     continue;
                 }
                 let conc = in_flight
@@ -539,18 +548,90 @@ async fn file_rejected_acc(st: &Arc<AppState>, acc_id: &str, err: &str) {
     mark_dirty(st);
 }
 
-/// Token chết (code 40003): cách ly acc lâu, gắn nhãn cần đăng nhập lại; đăng nhập lại/Reset sẽ gỡ.
-async fn mark_auth_invalid(st: &Arc<AppState>, acc_id: &str) {
+/// Token chết (code 40002/40003): DS đã huỷ session phía server và web không có luồng refresh token, nên acc
+/// đứng ngoài lịch chọn tới khi có token mới — không cooldown rồi thử lại cái token đã chết.
+pub(crate) async fn mark_auth_invalid(st: &Arc<AppState>, acc_id: &str) {
     let mut store = st.store.write().await;
+    let mut newly = false;
     if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
         a.stats.total_error += 1;
         a.stats.fail_streak = a.stats.fail_streak.max(5);
-        a.stats.cooldown_until = now() + 1800;
-        a.last_status = Some("invalid token — cần login lại".into());
+        newly = a.auth_dead_at.is_none();
+        a.set_auth_dead();
+    }
+    if newly {
+        // nhiều acc khác nhau chết trong vài phút = DS huỷ session hàng loạt, không phải lỗi riêng từng acc
+        let t = now();
+        let recent = store.accounts.iter().filter(|a| a.auth_dead_at.is_some_and(|d| t.saturating_sub(d) <= MASS_LOGOUT_WINDOW)).count();
+        let label = store.accounts.iter().find(|a| a.id == acc_id).map(|a| a.label.clone()).unwrap_or_default();
+        if recent >= 3 {
+            crate::elog!("[auth] DeepSeek đăng xuất hàng loạt: {} acc mất token trong {} phút (mới nhất: {})", recent, MASS_LOGOUT_WINDOW / 60, label);
+        } else {
+            crate::elog!("[auth] DeepSeek đã huỷ token của {} — rút khỏi pool tới khi đăng nhập lại", label);
+        }
     }
     drop(store);
     mark_dirty(st);
 }
+
+/// Loại lỗi DS trả cho một acc (tiền tố do `client::classify_global_code` gắn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccErr { Auth, Challenge, Banned, IpRestricted, Pow, Network, Other }
+
+pub(crate) fn acc_err_kind(e: &anyhow::Error) -> AccErr {
+    let m = format!("{:#}", e);
+    if m.contains("AUTH_INVALID") { AccErr::Auth }
+    else if m.contains("CHALLENGE_REQUIRED") { AccErr::Challenge }
+    else if m.contains("USER_BANNED") { AccErr::Banned }
+    else if m.contains("IP_RESTRICTED") { AccErr::IpRestricted }
+    else if m.contains("POW_INVALID") { AccErr::Pow }
+    else if is_network_error(e) { AccErr::Network }
+    else { AccErr::Other }
+}
+
+/// Ghi nhận lỗi lên acc theo đúng loại, trả loại để vòng failover quyết định có nới lượt không.
+pub(crate) async fn note_acc_error(st: &Arc<AppState>, acc_id: &str, e: &anyhow::Error) -> AccErr {
+    let kind = acc_err_kind(e);
+    match kind {
+        AccErr::Auth => mark_auth_invalid(st, acc_id).await,
+        AccErr::Challenge => {
+            // web bắt người thật giải hCaptcha rồi gửi lại kèm x-ds-challenge-response. whalegate không giải captcha:
+            // cho acc nghỉ và báo người dùng mở DeepSeek bằng acc đó để xác minh.
+            crate::elog!("[ds-challenge] acc {} bị DeepSeek đòi xác minh hCaptcha — nghỉ {} phút", &acc_id[..8.min(acc_id.len())], CHALLENGE_COOLDOWN / 60);
+            let mut store = st.store.write().await;
+            if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
+                a.stats.total_error += 1;
+                a.stats.cooldown_until = now() + CHALLENGE_COOLDOWN;
+                a.last_status = Some("DeepSeek đòi xác minh hCaptcha — mở chat.deepseek.com bằng acc này và gửi một tin để xác minh".into());
+            }
+            drop(store);
+            mark_dirty(st);
+        }
+        AccErr::Banned => {
+            crate::elog!("[ds-banned] acc {} bị DeepSeek khoá (40012) — tắt khỏi pool", &acc_id[..8.min(acc_id.len())]);
+            let mut store = st.store.write().await;
+            if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
+                a.stats.total_error += 1;
+                a.pool_enabled = false;
+                a.last_status = Some("DeepSeek đã khoá tài khoản này (40012) — đã tắt khỏi pool".into());
+            }
+            drop(store);
+            mark_dirty(st);
+        }
+        AccErr::IpRestricted => crate::elog!("[ds-ip] DeepSeek chặn tạm theo IP (40029, thao tác quá nhanh) — không phạt acc"),
+        // PoW sai thường là lỗi phía mình (challenge hết hạn, thuật toán đổi): không đổ cho acc
+        AccErr::Pow => crate::elog!("[ds-pow] DeepSeek từ chối PoW: {:#}", e),
+        AccErr::Network => {}
+        AccErr::Other => fail_acc(st, acc_id, "error", true).await,
+    }
+    kind
+}
+
+/// Acc bị đòi hCaptcha nghỉ bao lâu (giây) trước khi được thử lại.
+const CHALLENGE_COOLDOWN: u64 = 1800;
+
+/// Cửa sổ tính "đăng xuất hàng loạt" (giây) — log và dashboard dùng chung.
+pub(crate) const MASS_LOGOUT_WINDOW: u64 = 600;
 
 async fn ok_acc(st: &Arc<AppState>, acc_id: &str, sid: &str, shared: bool) {
     let mut store = st.store.write().await;
@@ -699,15 +780,17 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         failed.push(acc_id);
                         continue;
                     }
-                    if format!("{:#}", e).contains("AUTH_INVALID") {
-                        mark_auth_invalid(&st, &acc_id).await;
-                        if auth_skips < 8 { auth_skips += 1; max_attempts += 1; }
-                    } else if is_network_error(&e) {
-                        // DNS/kết nối từ máy mình tới DS (không tới được server) không phải lỗi của acc: không phạt,
-                        // và nới thêm lượt như token chết để một cơn chớp mạng không làm hỏng request
-                        if net_skips < 3 { net_skips += 1; max_attempts += 1; }
-                    } else {
-                        fail_acc(&st, &acc_id, "error", true).await;
+                    match note_acc_error(&st, &acc_id, &e).await {
+                        // acc hỏng hẳn (đăng xuất / đòi hCaptcha / bị khoá): đã rút khỏi pool, nới lượt để thử acc khác
+                        AccErr::Auth | AccErr::Challenge | AccErr::Banned => {
+                            if auth_skips < 8 { auth_skips += 1; max_attempts += 1; }
+                        }
+                        // DNS/kết nối từ máy mình tới DS, hoặc DS chặn theo IP: không phải lỗi của acc, không phạt,
+                        // và nới thêm lượt để một cơn chớp mạng không làm hỏng request
+                        AccErr::Network | AccErr::IpRestricted => {
+                            if net_skips < 3 { net_skips += 1; max_attempts += 1; }
+                        }
+                        AccErr::Pow | AccErr::Other => {}
                     }
                     failed.push(acc_id);
                     continue;
@@ -1213,7 +1296,7 @@ pub(crate) async fn api_search_messages(State(st): State<Arc<AppState>>, Json(re
             Ok(Err(e)) => {
                 crate::elog!("[search] attempt {} acc {} lỗi: {}", attempt, lease.acc_id, e);
                 last_err = e.to_string();
-                fail_acc(&st, &lease.acc_id, "error", true).await;
+                note_acc_error(&st, &lease.acc_id, &e).await;
                 failed.push(lease.acc_id.clone());
             }
             Err(_) => { last_err = format!("timed out after {}s", SEARCH_BUDGET.as_secs()); break; }
@@ -1386,5 +1469,95 @@ mod auto_effort_tests {
     #[test]
     fn auto_counts_as_thinking_before_tool_gating() {
         assert!(effort_to_thinking(Some("auto"), false, None));
+    }
+}
+
+#[cfg(test)]
+mod auth_dead_tests {
+    use super::*;
+
+    fn acc(id: &str) -> crate::server::Account {
+        serde_json::from_value(json!({"id": id, "label": id, "token": format!("tok-{id}"), "cookies": {}, "added_at": 0,
+            "last_verified": null, "last_status": "ok", "thread_session_id": null, "thread_parent_message_id": null})).unwrap()
+    }
+
+    fn state(accounts: Vec<crate::server::Account>) -> Arc<AppState> {
+        Arc::new(AppState {
+            store: tokio::sync::RwLock::new(crate::server::Store { accounts }),
+            save_lock: tokio::sync::Mutex::new(()),
+            store_ver: Default::default(),
+            store_written: Default::default(),
+            store_dirty: tokio::sync::Notify::new(),
+            in_flight: Default::default(),
+            login_watching: Default::default(),
+            file_cache: Default::default(),
+            convs: Default::default(),
+            sessions: Default::default(),
+            stat_conv_hit: Default::default(),
+            stat_conv_miss: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn dead_account_is_never_picked() {
+        let st = state(vec![acc("a"), acc("b")]);
+        mark_auth_invalid(&st, "a").await;
+        assert!(st.store.read().await.accounts[0].auth_dead_at.is_some());
+        // loại trừ mềm "b" vẫn không được rơi về acc chết "a"
+        for _ in 0..5 {
+            let l = acquire(&st, &["b".to_string()], None, Instant::now() + Duration::from_millis(50)).await.ok().unwrap();
+            assert_eq!(l.acc_id, "b");
+        }
+    }
+
+    #[tokio::test]
+    async fn all_dead_fails_fast_with_auth_error() {
+        let st = state(vec![acc("a"), acc("b")]);
+        mark_auth_invalid(&st, "a").await;
+        mark_auth_invalid(&st, "b").await;
+        let started = Instant::now();
+        let err = acquire(&st, &[], None, Instant::now() + Duration::from_secs(30)).await.err().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1), "không được chờ hết hàng đợi");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1 .0["error"]["code"], "accounts_logged_out");
+        // acc bị tắt tay không tính là "bị đăng xuất": pool chỉ còn acc tắt thì vẫn là lỗi cũ
+        let st = state(vec![acc("a")]);
+        st.store.write().await.accounts[0].pool_enabled = false;
+        let err = acquire(&st, &[], None, Instant::now() + Duration::from_millis(50)).await.err().unwrap();
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn new_token_brings_account_back() {
+        let st = state(vec![acc("a")]);
+        mark_auth_invalid(&st, "a").await;
+        let first = st.store.read().await.accounts[0].auth_dead_at;
+        // chết lần nữa không dời mốc: dashboard tính "đợt đăng xuất" theo lần chết đầu
+        mark_auth_invalid(&st, "a").await;
+        assert_eq!(st.store.read().await.accounts[0].auth_dead_at, first);
+        st.store.write().await.accounts[0].clear_auth_dead();
+        let l = acquire(&st, &[], None, Instant::now() + Duration::from_millis(50)).await.ok().unwrap();
+        assert_eq!(l.acc_id, "a");
+    }
+}
+
+#[cfg(test)]
+mod ds_code_tests {
+    use super::*;
+
+    #[test]
+    fn global_codes_map_to_account_error_kinds() {
+        let k = |code: i64| acc_err_kind(&crate::client::classify_global_code(&json!({"code": code, "msg": "x"})).unwrap());
+        assert_eq!(k(40003), AccErr::Auth);
+        assert_eq!(k(40002), AccErr::Auth);
+        assert_eq!(k(40303), AccErr::Challenge);
+        assert_eq!(k(40304), AccErr::Challenge);
+        assert_eq!(k(40012), AccErr::Banned);
+        assert_eq!(k(40029), AccErr::IpRestricted);
+        assert_eq!(k(40301), AccErr::Pow);
+        assert_eq!(k(50000), AccErr::Other);
+        assert!(crate::client::classify_global_code(&json!({"code": 0, "data": {}})).is_none());
+        // lỗi nghiệp vụ nằm trong data.biz_code, không phải lỗi toàn cục
+        assert!(crate::client::classify_global_code(&json!({"data": {"biz_code": 3}})).is_none());
     }
 }

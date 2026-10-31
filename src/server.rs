@@ -91,6 +91,22 @@ pub struct Account {
     /// lần cuối lấy cookie thiết bị từ Chrome riêng của acc (unix giây)
     #[serde(default)]
     pub device_refreshed_at: Option<u64>,
+    /// hồ sơ trình duyệt THẬT của acc thêm bằng bookmarklet (UA, client hints, màn hình, múi giờ, GPU…).
+    /// Có profile = acc dùng đúng "máy" của người dùng, KHÔNG mở Chrome riêng, KHÔNG tự sinh vân tay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<crate::fingerprint::BrowserProfile>,
+    /// DeepSeek huỷ token (40002/40003) lúc nào. Web không có luồng refresh token: token chết là chết hẳn, nên acc
+    /// đứng ngoài lịch chọn tới khi có token mới (đăng nhập lại, bookmarklet, sửa token) hoặc verify thấy sống lại.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_dead_at: Option<u64>,
+}
+
+impl Account {
+    pub(crate) fn set_auth_dead(&mut self) {
+        if self.auth_dead_at.is_none() { self.auth_dead_at = Some(now()); }
+        self.last_status = Some("DeepSeek đã đăng xuất token này (40003) — cần đăng nhập lại".into());
+    }
+    pub(crate) fn clear_auth_dead(&mut self) { self.auth_dead_at = None; }
 }
 
 fn default_true() -> bool {
@@ -238,7 +254,11 @@ pub(crate) async fn load_store() -> Store {
     };
     match serde_json::from_str::<Store>(&raw) {
         Ok(s) => {
-            for a in &s.accounts { crate::fingerprint::bind(&a.token, a.fp_seed.as_deref()); crate::fingerprint::bind_device(&a.token, a.device_id.as_deref()); }
+            for a in &s.accounts {
+                crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+                crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+                crate::fingerprint::bind_profile(&a.token, a.browser.clone());
+            }
             s
         }
         Err(e) => {
@@ -577,6 +597,10 @@ struct AddAccount {
     token: String,
     #[serde(default)]
     cookies: std::collections::BTreeMap<String, String>,
+    /// Gói "Thêm vào whalegate" từ bookmarklet: vân tay thật của trình duyệt đang đăng nhập DS.
+    /// Có gói này thì acc dùng đúng máy đó; không có thì như acc dán token cũ (vân tay dẫn xuất từ token).
+    #[serde(default)]
+    browser: Option<crate::fingerprint::BrowserProfile>,
 }
 
 /// Nhận token dán tay từ `localStorage.userToken`: JSON `{"value":"…","__version":"0"}`, chuỗi có nháy, `Bearer …` hoặc token trần.
@@ -593,6 +617,18 @@ pub(crate) fn normalize_token(raw: &str) -> String {
     t.strip_prefix("Bearer ").unwrap_or(t).trim().to_string()
 }
 
+/// Thêm acc hỏng giữa chừng: token đang thuộc acc nào trong pool thì gắn lại đúng vân tay của acc đó,
+/// không thì gỡ hẳn. Client đã dựng theo vân tay tạm cũng bỏ để lần sau dựng lại cho đúng.
+fn restore_binding(store: &Store, token: &str) {
+    crate::fingerprint::unbind(token);
+    if let Some(a) = store.accounts.iter().find(|a| a.token == token) {
+        crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+        crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+        crate::fingerprint::bind_profile(&a.token, a.browser.clone());
+    }
+    crate::client::forget(token);
+}
+
 async fn api_add_account(
     State(st): State<Arc<AppState>>,
     Json(mut p): Json<AddAccount>,
@@ -601,33 +637,69 @@ async fn api_add_account(
     if p.token.len() < 20 || p.token.chars().any(|c| c.is_whitespace()) {
         return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "không đọc được token — dán đúng giá trị localStorage.userToken"}))));
     }
-    // verify token trước khi lưu
-    let c = DsClient::new(p.token.clone(), cookie_string(&p.cookies))
-        .map_err(into_err)?;
-    let v = c.users_current().await.map_err(into_err)?;
-    let ok = v["code"].as_i64() == Some(0);
-    if !ok {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("token không hợp lệ: {}", v["msg"].as_str().unwrap_or("?"))})),
-        ));
+    // Token đã có trong pool = bấm bookmarklet / dán lại để làm mới acc đó (cookie, thiết bị, gỡ "đã đăng xuất"),
+    // không phải lỗi trùng. Cùng người dùng mà token khác (đăng nhập lại) thì thay token vào acc cũ — xem dưới.
+    let existing_seed = st.store.read().await.accounts.iter().find(|a| a.token == p.token).map(|a| a.fp_seed.clone());
+    // Có hồ sơ trình duyệt thật (bookmarklet) → gắn TRƯỚC khi tạo client, để ngay request verify cũng đi
+    // bằng đúng TLS/UA/device id của máy user. Seed lấy từ gói; thiếu thì giữ seed của acc cũ, không có nữa thì sinh mới.
+    let mut browser = p.browser.take();
+    let mut seed_generated = false;
+    if let Some(b) = browser.as_mut() {
+        if b.seed.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
+            b.seed = existing_seed.clone().flatten();
+            if b.seed.is_none() { b.seed = Some(crate::fingerprint::new_seed()); seed_generated = true; }
+        }
+        crate::fingerprint::bind_profile(&p.token, Some(b.clone()));
+        crate::fingerprint::bind(&p.token, b.seed.as_deref());
+        crate::fingerprint::bind_device(&p.token, b.device_id.as_deref());
+        crate::client::forget(&p.token);
     }
+    // verify token trước khi lưu; hỏng thì trả registry vân tay + client về như trước khi gắn
+    let verified = async {
+        let c = DsClient::new(p.token.clone(), cookie_string(&p.cookies)).map_err(into_err)?;
+        let v = c.users_current().await.map_err(into_err)?;
+        if v["code"].as_i64() != Some(0) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("token không hợp lệ: {}", v["msg"].as_str().unwrap_or("?"))})),
+            ));
+        }
+        Ok(v)
+    }.await;
+    let v = match verified {
+        Ok(v) => v,
+        Err(e) => { restore_binding(&*st.store.read().await, &p.token); return Err(e); }
+    };
     let email = v["data"]["biz_data"]["email"].as_str().unwrap_or("?").to_string();
     let uid = v["data"]["biz_data"]["id"].as_str().map(|s| s.to_string());
 
-    let label_out = if p.label.trim().is_empty() { email } else { p.label.trim().to_string() };
     let mut store = st.store.write().await;
-    // cùng người dùng DeepSeek nhưng token khác (đăng nhập lại) → báo trùng, không thêm lần hai
-    if let Some(dup) = uid.as_ref().and_then(|u| store.accounts.iter().find(|a| a.ds_uid.as_deref() == Some(u.as_str()))) {
-        return Err((StatusCode::CONFLICT, Json(json!({"error": format!("người dùng này đã có trong pool ({}) — dùng nút sửa để thay token", dup.label)}))));
+    // acc cũ: cùng token, hoặc cùng người dùng DeepSeek (đăng nhập lại → token mới)
+    let idx = store.accounts.iter().position(|a| a.token == p.token)
+        .or_else(|| uid.as_ref().and_then(|u| store.accounts.iter().position(|a| a.ds_uid.as_deref() == Some(u.as_str()))));
+    if let Some(i) = idx {
+        let a = &mut store.accounts[i];
+        // seed vừa sinh tạm cho lần verify: acc bookmarklet cũ đã có seed thì giữ seed đó, nhiễu canvas/audio khỏi đổi
+        if let (true, Some(b)) = (seed_generated, browser.as_mut()) {
+            if let Some(old) = a.browser.as_ref().and_then(|ob| ob.seed.clone()) { b.seed = Some(old); }
+        }
+        let old_token = a.token.clone();
+        let token_changed = apply_readd(a, p.token.clone(), p.cookies, browser, uid, p.label.trim());
+        // registry vân tay: token cũ bỏ, token mới gắn theo đúng acc (kể cả khi lần verify đã gắn tạm thứ khác)
+        if token_changed { crate::fingerprint::unbind(&old_token); crate::client::forget(&old_token); }
+        crate::fingerprint::unbind(&a.token);
+        crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+        crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+        crate::fingerprint::bind_profile(&a.token, a.browser.clone());
+        crate::client::forget(&a.token);
+        let (id, label) = (a.id.clone(), a.label.clone());
+        crate::elog!("[account] cập nhật {}{}", label, if token_changed { " (token mới)" } else { "" });
+        drop(store);
+        mark_dirty(&st);
+        flush_store(&st).await;
+        return Ok(Json(json!({"ok": true, "id": id, "label": label, "updated": true, "token_changed": token_changed})));
     }
-    // dedupe theo token
-    if store.accounts.iter().any(|a| a.token == p.token) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "token này đã có trong pool"})),
-        ));
-    }
+    let label_out = if p.label.trim().is_empty() { email } else { p.label.trim().to_string() };
     let acc = Account {
         id: uuid::Uuid::new_v4().to_string(),
         label: label_out.clone(),
@@ -642,16 +714,57 @@ async fn api_add_account(
         stats: Default::default(),
         pool_enabled: true,
         ds_uid: uid.clone(),
-        fp_seed: None,
-        device_id: None,
+        fp_seed: browser.as_ref().and_then(|b| b.seed.clone()),
+        device_id: browser.as_ref().and_then(|b| b.device_id.clone()),
         device_refreshed_at: None,
+        browser,
+        auth_dead_at: None,
     };
     let id = acc.id.clone();
     store.accounts.push(acc);
     drop(store);
     mark_dirty(&st);
     flush_store(&st).await;
-    Ok(Json(json!({"ok": true, "id": id, "label": label_out})))
+    Ok(Json(json!({"ok": true, "id": id, "label": label_out, "updated": false})))
+}
+
+/// Gộp một lần thêm lại vào acc đã có. Trả true nếu token đổi.
+/// - token đổi (đăng nhập lại): thay token, bỏ phiên web cũ, cookie thay hẳn (cookie phiên cũ không thuộc token mới);
+///   vân tay giữ nguyên trừ khi gói mang hồ sơ trình duyệt mới.
+/// - cùng token: cookie gộp (bookmarklet không đọc được cookie httpOnly, giữ những cái jar đã có).
+/// - có hồ sơ trình duyệt: token đến từ chính trình duyệt đó, nên "máy" của acc từ giờ là trình duyệt đó.
+fn apply_readd(
+    a: &mut Account,
+    token: String,
+    cookies: std::collections::BTreeMap<String, String>,
+    browser: Option<crate::fingerprint::BrowserProfile>,
+    uid: Option<String>,
+    label: &str,
+) -> bool {
+    let token_changed = a.token != token;
+    if token_changed {
+        if a.fp_seed.is_none() { a.fp_seed = Some(crate::fingerprint::seed_for(&a.token)); }
+        a.token = token;
+        a.thread_session_id = None;
+        a.thread_parent_message_id = None;
+        a.thread_uses = 0;
+        if !cookies.is_empty() { a.cookies = cookies; }
+    } else {
+        a.cookies.extend(cookies);
+    }
+    if let Some(b) = browser {
+        a.fp_seed = b.seed.clone();
+        a.device_id = b.device_id.clone();
+        a.device_refreshed_at = None;
+        a.browser = Some(b);
+    }
+    if !label.is_empty() { a.label = label.to_string(); }
+    if uid.is_some() { a.ds_uid = uid; }
+    a.clear_auth_dead();
+    a.stats.reset();
+    a.last_verified = Some(now());
+    a.last_status = Some(if token_changed { "ok (token mới)" } else { "ok (cập nhật)" }.into());
+    token_changed
 }
 
 async fn api_list_accounts(State(st): State<Arc<AppState>>) -> Json<Value> {
@@ -669,8 +782,10 @@ async fn api_list_accounts(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "token_prefix": a.token.get(..8).unwrap_or("?"),
                 "pool_enabled": a.pool_enabled,
                 "uid": a.ds_uid,
-                "device": a.fp_seed.is_some(),
+                "device": a.fp_seed.is_some() && a.browser.is_none(),
+                "browser": a.browser.is_some(),
                 "device_refreshed_at": a.device_refreshed_at,
+                "auth_dead_at": a.auth_dead_at,
             })
         })
         .collect();
@@ -765,8 +880,11 @@ async fn api_edit_account(
             // đổi token vẫn giữ nguyên vân tay: chốt seed vào acc (acc cũ: seed = token cũ) rồi gắn sang token mới
             if a.fp_seed.is_none() { a.fp_seed = Some(crate::fingerprint::seed_for(&a.token)); }
             a.token = t;
+            a.clear_auth_dead();
             crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
-    crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+            crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+            // acc thêm bằng bookmarklet: giữ đúng "máy" của trình duyệt gốc cho token mới
+            crate::fingerprint::bind_profile(&a.token, a.browser.clone());
             if verified_uid.is_some() { a.ds_uid = verified_uid.clone(); }
             a.thread_uses = 0;
             a.thread_parent_message_id = None;
@@ -859,6 +977,11 @@ async fn api_reset_account(
                 crate::client::Probe::AuthDead => "invalid token — cần login lại".into(),
                 crate::client::Probe::Unknown => "reset: không kết luận được".into(),
             });
+            match probe {
+                crate::client::Probe::Alive => a.clear_auth_dead(),
+                crate::client::Probe::AuthDead => a.set_auth_dead(),
+                _ => {}
+            }
         }
     }
     mark_dirty(&st);
@@ -897,6 +1020,7 @@ async fn api_verify_account(
                     a.last_status = Some("ok".into());
                     // chat được thì hết cooldown: acc đã tự hồi
                     a.stats.reset();
+                    a.clear_auth_dead();
                 }
                 crate::client::Probe::Throttled => {
                     // Giữ nguyên nhãn throttle, chỉ đẩy cooldown ra để scheduler né acc này.
@@ -904,9 +1028,8 @@ async fn api_verify_account(
                     a.stats.cooldown_until = now() + AccStats::cooldown();
                 }
                 crate::client::Probe::AuthDead => {
-                    a.last_status = Some("invalid token — cần login lại".into());
+                    a.set_auth_dead();
                     a.stats.fail_streak = a.stats.fail_streak.max(5);
-                    a.stats.cooldown_until = now() + 1800;
                 }
                 crate::client::Probe::Unknown => {
                     // Không kết luận được: giữ nhãn cũ thay vì ghi đè bằng "ok" giả.
@@ -2489,7 +2612,7 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "fail_streak": a.stats.fail_streak,
                 "id": a.id,
                 "label": a.label,
-                "available": a.stats.available(now),
+                "available": a.auth_dead_at.is_none() && a.stats.available(now),
                 "cooldown_until": a.stats.cooldown_until,
                 "cooldown_left_secs": a.stats.cooldown_until.saturating_sub(now),
                 "burst_count": a.stats.burst_count,
@@ -2501,17 +2624,26 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "last_status": a.last_status,
                 "pool_enabled": a.pool_enabled,
                 "uid": a.ds_uid,
-                "device": a.fp_seed.is_some(),
+                "device": a.fp_seed.is_some() && a.browser.is_none(),
+                "browser": a.browser.is_some(),
                 "device_refreshed_at": a.device_refreshed_at,
+                "auth_dead_at": a.auth_dead_at,
                 "dup": a.ds_uid.as_ref().is_some_and(|u| store.accounts.iter().filter(|b| b.ds_uid.as_ref() == Some(u)).count() > 1),
             })
         })
         .collect();
-    let available = store.accounts.iter().filter(|a| a.pool_enabled && a.stats.available(now)).count();
+    let available = store.accounts.iter().filter(|a| a.pool_enabled && a.auth_dead_at.is_none() && a.stats.available(now)).count();
+    // đợt đăng xuất gần nhất: các acc mất token trong cùng một cửa sổ với acc chết muộn nhất
+    let latest_dead = store.accounts.iter().filter_map(|a| a.auth_dead_at).max();
+    let logged_out_burst = latest_dead.map(|l| store.accounts.iter()
+        .filter(|a| a.auth_dead_at.is_some_and(|d| l - d <= crate::chat::MASS_LOGOUT_WINDOW)).count()).unwrap_or(0);
     Json(json!({
         "pool": {
             "total": store.accounts.len(),
             "available": available,
+            "logged_out": store.accounts.iter().filter(|a| a.auth_dead_at.is_some()).count(),
+            "logged_out_last_at": latest_dead,
+            "logged_out_last_burst": logged_out_burst,
             "capacity_now_rpm_hint": available as u64 * (AccStats::burst_limit() as u64),
             "max_conc_per_acc": AccStats::max_conc(),
             "stateful": {
@@ -2569,10 +2701,12 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                         if a.fp_seed.is_none() { a.fp_seed = Some(crate::fingerprint::seed_for(&a.token)); }
                         a.token = s.token.clone();
                         crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
-    crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+                        crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+                        crate::fingerprint::bind_profile(&a.token, a.browser.clone());
                         a.cookies = s.cookies.clone();
                         a.last_verified = Some(now());
                         a.last_status = Some("ok (re-login)".into());
+                        a.clear_auth_dead();
                         a.stats.reset();
                         a.thread_session_id = None;
                         refreshed += 1;
@@ -2594,6 +2728,8 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                             fp_seed: s.fp_seed.clone(),
                             device_id: s.device_id.clone(),
                             device_refreshed_at: None,
+                            browser: None,
+                            auth_dead_at: None,
                         };
                         emails.push(s.email.clone().unwrap_or_else(|| "unknown".into()));
                         store.accounts.push(acc);
@@ -2622,6 +2758,31 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
 // → thấy token → verify → LƯU → TẮT CHROME (giữ profile). Không cần bấm gì thêm sau khi login.
 // Chỉ 1 login đang canh tại 1 thời điểm (flag in-flight).
 async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
+    // Mỗi acc mới = một "máy" mới: seed riêng → profile Chrome riêng + vân tay riêng.
+    start_login(st, crate::fingerprint::new_seed()).await
+}
+
+/// Đăng nhập lại acc DS đã đăng xuất, mở đúng Chrome riêng của nó (profile `profiles/<seed>`, còn phiên Google)
+/// với đúng vân tay cũ. Người dùng tự bấm đăng nhập trong cửa sổ — whalegate không tự điền gì. Đăng nhập xong,
+/// `login_flow` nhận ra cùng người dùng qua uid và thay token vào chính acc này.
+async fn api_account_relogin(
+    State(st): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<Value> {
+    let acc = st.store.read().await.accounts.iter().find(|a| a.id == id).map(|a| (a.fp_seed.clone(), a.browser.is_some(), a.label.clone()));
+    let Some((seed, has_browser, label)) = acc else { return Json(json!({"ok": false, "error": "không tìm thấy tài khoản"})) };
+    if has_browser {
+        return Json(json!({"ok": false, "error": "acc này thêm bằng bookmarklet: đăng nhập lại trên trình duyệt đó rồi bấm bookmarklet trên tab chat.deepseek.com"}));
+    }
+    // acc dán token chưa từng có Chrome riêng: mở một máy mới — session cũ đã chết nên không có gì để "giữ máy"
+    let seed = seed
+        .filter(|s| std::path::Path::new(&crate::chrome_capture::account_profile_dir(s)).is_dir())
+        .unwrap_or_else(crate::fingerprint::new_seed);
+    crate::elog!("[login-flow] đăng nhập lại {} (profile {})", label, &seed[..8.min(seed.len())]);
+    start_login(st, seed).await
+}
+
+async fn start_login(st: Arc<AppState>, seed: String) -> Json<Value> {
     // chặn double-start
     {
         let mut watching = st.login_watching.lk();
@@ -2631,10 +2792,8 @@ async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
         *watching = true;
     }
     // Mở Chrome NGAY trong request để lỗi (thiếu màn hình, Chrome chết…) hiện lên dashboard thay vì chỉ nằm trong log.
-    // Mỗi acc mới = một "máy" mới: seed riêng → profile Chrome riêng + vân tay riêng.
-    let seed = crate::fingerprint::new_seed();
     let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
-    crate::elog!("[login-flow] vân tay mới: {} {} cores={} gpu={}", fp.user_agent(), fp.screen.0, fp.cores, fp.gpu_renderer);
+    crate::elog!("[login-flow] vân tay: {} {} cores={} gpu={}", fp.user_agent(), fp.screen.0, fp.cores, fp.gpu_renderer);
     let (browser, ws_url) = match crate::chrome_capture::launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", false).await {
         Ok(x) => x,
         Err(e) => {
@@ -2662,11 +2821,16 @@ async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
 /// của acc ở chế độ nền, DeepSeek cấp cookie mới (WAF…), ghi vào acc. KHÔNG cấp thiết bị mới cho acc chưa có: một phiên
 /// đang sống bỗng xuất hiện trên máy khác (UA/OS/device id/smidV2 khác) là tín hiệu dễ bị đánh dấu.
 async fn give_device(st: &Arc<AppState>, id: &str) -> Result<String> {
-    let (token, seed) = {
+    let (token, seed, has_browser) = {
         let store = st.store.read().await;
         let a = store.accounts.iter().find(|a| a.id == id).ok_or_else(|| anyhow::anyhow!("không tìm thấy tài khoản"))?;
-        (a.token.clone(), a.fp_seed.clone())
+        (a.token.clone(), a.fp_seed.clone(), a.browser.is_some())
     };
+    // Acc thêm bằng bookmarklet đang sống trên đúng trình duyệt của user: dựng Chrome riêng cho nó là tự tạo
+    // một "máy" khác (UA/GPU/device id khác) → đúng thứ dễ bị đánh dấu. Cookie của nó do chính user làm mới.
+    if has_browser {
+        anyhow::bail!("tài khoản này dùng trình duyệt gốc (bookmarklet) — không tự làm mới thiết bị; bấm bookmarklet trên tab chat.deepseek.com của trình duyệt đó để làm mới");
+    }
     let seed = seed.ok_or_else(|| anyhow::anyhow!("tài khoản này không có thiết bị riêng (chỉ acc đăng nhập qua Chrome mới làm mới được)"))?;
     let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
     let s = crate::chrome_capture::materialize_device(&fp, &token).await?;
@@ -2708,7 +2872,7 @@ async fn device_refresh_loop(st: Arc<AppState>) {
         let due: Vec<(String, String)> = {
             let store = st.store.read().await;
             store.accounts.iter()
-                .filter(|a| a.fp_seed.is_some() && a.device_refreshed_at.map(|t| now().saturating_sub(t) >= hours * 3600).unwrap_or(true))
+                .filter(|a| a.browser.is_none() && a.fp_seed.is_some() && a.device_refreshed_at.map(|t| now().saturating_sub(t) >= hours * 3600).unwrap_or(true))
                 .map(|a| (a.id.clone(), a.label.clone()))
                 .collect()
         };
@@ -2722,6 +2886,20 @@ async fn device_refresh_loop(st: Arc<AppState>) {
 }
 
 /// Canh cửa sổ login đã mở tới khi đăng nhập xong (tối đa 10 phút), tắt Chrome (giữ profile), lưu acc.
+/// Acc vừa đăng nhập trong Chrome riêng: từ giờ "máy" của nó là Chrome đó (seed + device id + cookie vừa sinh).
+/// Bỏ hồ sơ bookmarklet nếu có, gắn lại registry và bỏ client cũ — giữ profile cũ là gửi cookie của máy này
+/// bằng vân tay của máy kia.
+fn adopt_chrome_device(a: &mut Account, session: &crate::chrome_capture::CapturedSession) {
+    a.fp_seed = session.fp_seed.clone();
+    a.device_id = session.device_id.clone();
+    a.device_refreshed_at = Some(now());
+    a.browser = None;
+    crate::fingerprint::unbind(&a.token);
+    crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+    crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+    crate::client::forget(&a.token);
+}
+
 async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capture::AccountBrowser, ws_url: String) -> Result<()> {
     // canh login tới 10 phút, xong thì tắt Chrome (giữ profile)
     let res = crate::chrome_capture::watch_login_tab(ws_url, 600, browser.port, &seed).await;
@@ -2737,21 +2915,24 @@ async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capt
             a.cookies = session.cookies.clone();
             a.last_verified = Some(now());
             a.last_status = Some("ok (re-login)".into());
+            a.clear_auth_dead();
             a.stats.reset();
-            if session.fp_seed.is_some() { a.fp_seed = session.fp_seed.clone(); a.device_id = session.device_id.clone(); a.device_refreshed_at = Some(now()); }
+            if session.fp_seed.is_some() { adopt_chrome_device(a, &session); }
         } else if let Some(a) = session.uid.as_ref().and_then(|u| store.accounts.iter_mut().find(|a| a.ds_uid.as_deref() == Some(u.as_str()))) {
             // cùng người dùng đăng nhập lại (token mới): thay token thay vì thêm bản trùng
             // đổi token vẫn giữ nguyên vân tay: chốt seed vào acc (acc cũ: seed = token cũ) rồi gắn sang token mới
             if a.fp_seed.is_none() { a.fp_seed = Some(crate::fingerprint::seed_for(&a.token)); }
             a.token = session.token.clone();
             crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
-    crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+            crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+            crate::fingerprint::bind_profile(&a.token, a.browser.clone());
             a.cookies = session.cookies.clone();
             a.last_verified = Some(now());
             a.last_status = Some("ok (re-login)".into());
+            a.clear_auth_dead();
             a.stats.reset();
             a.thread_session_id = None;
-            if session.fp_seed.is_some() { a.fp_seed = session.fp_seed.clone(); a.device_id = session.device_id.clone(); a.device_refreshed_at = Some(now()); }
+            if session.fp_seed.is_some() { adopt_chrome_device(a, &session); }
         } else {
             let acc = Account {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -2770,6 +2951,8 @@ async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capt
                 fp_seed: session.fp_seed.clone(),
                 device_id: session.device_id.clone(),
                 device_refreshed_at: session.fp_seed.as_ref().map(|_| now()),
+                browser: None,
+                auth_dead_at: None,
             };
             store.accounts.push(acc);
         }
@@ -2881,18 +3064,23 @@ async fn access_guard(
     next: axum::middleware::Next,
 ) -> Response {
     let path = req.uri().path().to_string();
-    if (path == "/" || path.starts_with("/api/")) && !addr.ip().is_loopback() {
+    // Qua tunnel/reverse proxy cùng máy (cloudflared, nginx…) kết nối vẫn đến từ 127.0.0.1, nhưng người gửi thật ở
+    // ngoài Internet: header proxy để lại là dấu hiệu. Không coi những request đó là "localhost".
+    let local = addr.ip().is_loopback() && !is_proxied(req.headers());
+    if (path == "/" || path.starts_with("/api/")) && !local {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "admin chỉ cho phép từ localhost"}))).into_response();
     }
     if path.starts_with("/v1/") {
-        if let Ok(key) = std::env::var("DS_API_KEY") {
-            if !key.is_empty() {
-                let ok = req.headers().get("authorization").and_then(|v| v.to_str().ok())
-                    .map(|v| v == format!("Bearer {}", key)).unwrap_or(false);
-                if !ok {
-                    return (StatusCode::UNAUTHORIZED, Json(json!({"error": "thiếu hoặc sai API key"}))).into_response();
-                }
+        let key = std::env::var("DS_API_KEY").unwrap_or_default();
+        if !key.is_empty() {
+            let ok = req.headers().get("authorization").and_then(|v| v.to_str().ok())
+                .map(|v| v == format!("Bearer {}", key)).unwrap_or(false);
+            if !ok {
+                return (StatusCode::UNAUTHORIZED, Json(json!({"error": "thiếu hoặc sai API key"}))).into_response();
             }
+        } else if !local {
+            // mở /v1 ra Internet mà không có key = ai cũng dùng được pool acc của bạn
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "whalegate đang được truy cập từ ngoài máy mà chưa đặt DS_API_KEY — đặt DS_API_KEY trước khi mở ra Internet"}))).into_response();
         }
     }
     let mut resp = next.run(req).await;
@@ -2900,6 +3088,11 @@ async fn access_guard(
         resp.headers_mut().insert("retry-after", axum::http::HeaderValue::from_static("5"));
     }
     resp
+}
+
+/// Request đi qua proxy/tunnel (Cloudflare Tunnel, nginx, Caddy…): các proxy này luôn gắn ít nhất một header sau.
+fn is_proxied(h: &axum::http::HeaderMap) -> bool {
+    ["cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host"].iter().any(|k| h.contains_key(*k))
 }
 
 /// Tài khoản cũ chưa có id người dùng DeepSeek: hỏi users/current một lần (lần lượt, nhẹ) để nhận ra bản trùng.
@@ -2975,6 +3168,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/accounts/{id}/pool", post(api_toggle_pool))
         .route("/api/accounts/{id}/reset", post(api_reset_account))
         .route("/api/accounts/{id}/device", post(api_account_device))
+        .route("/api/accounts/{id}/relogin", post(api_account_relogin))
         .route("/api/capture", post(api_capture_from_chrome))
         .route("/api/login_start", post(api_login_start))
         .route("/api/stats", get(api_stats))
@@ -3641,5 +3835,75 @@ mod hourly_limit_tests {
         s.record_call(t0 + 3600);
         assert_eq!(s.hour_count, 1, "sang giờ mới thì đếm lại");
         std::env::remove_var("DS_HOURLY_LIMIT");
+    }
+}
+
+#[cfg(test)]
+mod readd_tests {
+    use super::*;
+
+    fn acc() -> Account {
+        let mut a: Account = serde_json::from_value(json!({"id": "x", "label": "x@mail", "token": "old-token", "cookies": {"ds_session_id": "s1", "aws-waf-token": "w1"},
+            "added_at": 0, "last_verified": null, "last_status": null, "thread_session_id": "sid", "thread_parent_message_id": 7})).unwrap();
+        a.thread_uses = 3;
+        a.set_auth_dead();
+        a
+    }
+
+    #[test]
+    fn same_token_merges_cookies_and_revives() {
+        let mut a = acc();
+        let changed = apply_readd(&mut a, "old-token".into(), [("aws-waf-token".to_string(), "w2".to_string())].into(), None, Some("u1".into()), "");
+        assert!(!changed);
+        // cookie httpOnly bookmarklet không đọc được (ds_session_id) phải còn nguyên
+        assert_eq!(a.cookies["ds_session_id"], "s1");
+        assert_eq!(a.cookies["aws-waf-token"], "w2");
+        assert!(a.auth_dead_at.is_none());
+        assert_eq!(a.thread_session_id.as_deref(), Some("sid"), "cùng token thì phiên web vẫn dùng tiếp được");
+        assert_eq!(a.label, "x@mail");
+    }
+
+    #[test]
+    fn new_token_replaces_session_but_keeps_machine() {
+        let mut a = acc();
+        let changed = apply_readd(&mut a, "new-token".into(), Default::default(), None, None, "");
+        assert!(changed);
+        assert_eq!(a.token, "new-token");
+        // vân tay cũ dẫn xuất từ token cũ → chốt lại để token mới vẫn đi đúng "máy" đó
+        assert_eq!(a.fp_seed.as_deref(), Some("old-token"));
+        assert!(a.thread_session_id.is_none() && a.thread_parent_message_id.is_none() && a.thread_uses == 0);
+        assert!(a.auth_dead_at.is_none());
+    }
+
+    #[test]
+    fn browser_profile_moves_account_to_that_browser() {
+        let mut a = acc();
+        a.fp_seed = Some("chrome-seed".into());
+        a.device_refreshed_at = Some(1);
+        let b = crate::fingerprint::BrowserProfile { seed: Some("bm-seed".into()), device_id: Some("dev-bm".into()), ..Default::default() };
+        apply_readd(&mut a, "new-token".into(), [("aws-waf-token".to_string(), "w9".to_string())].into(), Some(b), None, "nhãn mới");
+        assert_eq!(a.fp_seed.as_deref(), Some("bm-seed"));
+        assert_eq!(a.device_id.as_deref(), Some("dev-bm"));
+        assert!(a.browser.is_some() && a.device_refreshed_at.is_none());
+        // token mới: cookie thay hẳn, không mang cookie phiên của token cũ
+        assert!(!a.cookies.contains_key("ds_session_id"));
+        assert_eq!(a.label, "nhãn mới");
+    }
+}
+
+#[cfg(test)]
+mod proxy_guard_tests {
+    use super::*;
+
+    #[test]
+    fn tunnel_requests_are_not_local() {
+        let mut h = axum::http::HeaderMap::new();
+        assert!(!is_proxied(&h), "trình duyệt trên chính máy này không gắn header proxy");
+        // cloudflared gắn cf-connecting-ip/cf-ray; nginx/caddy gắn x-forwarded-for
+        for k in ["cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-real-ip", "forwarded"] {
+            h.clear();
+            h.insert(k, axum::http::HeaderValue::from_static("1.2.3.4"));
+            assert!(is_proxied(&h), "{k}");
+        }
     }
 }

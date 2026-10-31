@@ -20,3 +20,6 @@ worker/.dev.vars
 
 # Scratch dùng khi build/test trong sandbox
 .cargo-home/
+
+# Bản chạy thử dashboard tại chỗ
+.wgtest/

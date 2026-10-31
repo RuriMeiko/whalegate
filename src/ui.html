@@ -108,6 +108,14 @@
   .cmd code { border: 0; padding: 0; font-size: 12.5px; }
   .cmd span { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; }
   .cmd.done span { color: var(--ok); }
+  /* bookmarklet: kéo lên thanh bookmark, nên phải trông như một nút cầm được */
+  .cmd.bm { cursor: grab; text-decoration: none; }
+  .cmd.bm:active { cursor: grabbing; }
+  .cmd.bm span { color: var(--ink); }
+  .lead { margin: 0 0 10px; }
+  details#advAdd { margin: 4px 0 0; }
+  details#advAdd summary { cursor: pointer; font: 12px/1.6 var(--mono); color: var(--mute); margin-bottom: 8px; }
+  details#advAdd[open] summary { color: var(--ink); }
   .fl { display: block; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; margin: 12px 0 6px; }
   .fl:first-child { margin-top: 0; }
   .fl small { text-transform: none; letter-spacing: 0; }
@@ -154,6 +162,12 @@
   #updBar { display: none; align-items: center; gap: 10px; border: 1px solid var(--ink); background: #ddd3b9; padding: 9px 12px; margin: 0 0 14px; font: 12px/1.4 var(--mono); flex-wrap: wrap; }
   #updBar.show { display: flex; }
   #updBar .t { flex: 1; min-width: 180px; }
+  /* DS đăng xuất acc: cùng khuôn với updBar nhưng viền đỏ, vì pool đang mất acc thật */
+  #authBar { display: none; align-items: center; gap: 10px; border: 1px solid var(--bad); color: var(--bad); padding: 9px 12px; margin: 0 0 14px; font: 12px/1.5 var(--mono); flex-wrap: wrap; }
+  #authBar.show { display: flex; }
+  #authBar .t { flex: 1; min-width: 200px; }
+  #authBar b { font-weight: 600; }
+  #authBar small { display: block; color: var(--mute); }
   #updBar b { font-weight: 600; }
   .dshProf { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--hair); font: 12.5px/1.3 var(--mono); cursor: pointer; }
   .dshProf:last-child { border-bottom: 0; }
@@ -206,6 +220,11 @@
     <button class="sm ghost" onclick="hideUpdateBar()" aria-label="Ẩn">×</button>
   </div>
 
+  <div id="authBar" role="alert">
+    <span class="t"><span id="authTxt"></span><small>Web DeepSeek không có cách gia hạn token đã bị huỷ. Acc thêm bằng bookmarklet: đăng nhập lại trên trình duyệt đó rồi bấm bookmarklet. Acc đăng nhập qua Chrome: bấm "đăng nhập lại" trên acc. Acc dán token: bấm "sửa" và dán token mới.</small></span>
+    <button class="sm ghost" onclick="hideAuthBar()" aria-label="Ẩn">×</button>
+  </div>
+
   <main class="grid">
     <div class="cell k"><div class="lab">Token hôm nay</div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
     <div class="cell k"><div class="lab">Tiết kiệm hôm nay</div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
@@ -238,9 +257,16 @@
   <div class="dlg">
     <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeAdd()">×</button></div>
     <div class="inner">
-      <p>Mở tab đã đăng nhập chat.deepseek.com → F12 → Console, dán lệnh này rồi chạy, sau đó dán kết quả vào ô dưới.</p>
-      <button class="cmd" id="cmdCopy" onclick="copyCmd()" title="Bấm để copy"><code>copy(localStorage.userToken)</code><span>copy</span></button>
-      <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder='{"value":"…"} hoặc token trần'></textarea>
+      <p class="lead">Kéo nút này lên thanh bookmark <b>một lần</b>. Sau đó, khi đang ở tab đã đăng nhập chat.deepseek.com, bấm bookmark đó là xong — không cần F12, không phải copy gì.</p>
+      <a class="cmd bm" id="bmLink" href="#" onclick="return false" draggable="true" title="Kéo lên thanh bookmark"><code>Thêm vào whalegate</code><span>kéo lên đây</span></a>
+      <p class="sub" id="bmWhere"></p>
+      <p class="sub">Bookmarklet gom token, device id, cookie đọc được, UA, màn hình, múi giờ, ngôn ngữ, GPU, rồi mở tab dashboard và chuyển thẳng dữ liệu sang tab đó (postMessage). Dữ liệu <b>không nằm trong URL</b>, không vào lịch sử, không đi qua mạng; dashboard chỉ nhận từ đúng tab chat.deepseek.com đã mở nó.</p>
+      <details id="advAdd">
+        <summary>Dán thủ công (dự phòng)</summary>
+        <p>Nếu bookmarklet không dùng được: mở tab đã đăng nhập chat.deepseek.com → F12 → Console, dán lệnh dưới rồi chạy, sau đó dán kết quả vào ô.</p>
+        <button class="cmd" id="cmdCopy" onclick="copyCmd()" title="Bấm để copy"><code>copy(await (…)())</code><span>copy</span></button>
+        <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder='{"token":"…","browser":{…}} hoặc token trần'></textarea>
+      </details>
       <div class="btns" style="margin-top:10px"><input type="text" id="lblIn" style="flex:1;min-width:0" placeholder="nhãn (tuỳ chọn)" aria-label="Nhãn" autocomplete="off"><button class="solid" id="btnAdd" onclick="addManual()">Thêm</button></div>
       <div class="alt">
         <p>Hoặc đăng nhập trong một cửa sổ Chrome riêng (vân tay riêng); đăng nhập xong cửa sổ tự đóng.</p>
@@ -462,25 +488,120 @@ function ask(title, text, okLabel, danger) {
 function askDone(v) { if (!ASK) return; const r = ASK; ASK = null; closeModal('cfmModal'); r(v); }
 
 /* ---- tài khoản ---- */
-function openAdd() { openModal('addModal'); setTimeout(() => $('tokIn').focus(), 60); }
+function openAdd() { openModal('addModal'); refreshBookmarklet(); }
 function closeAdd() { closeModal('addModal'); }
 
+const DS_ORIGIN = 'https://chat.deepseek.com';
+
+/// Mã gom "máy" của trình duyệt đang chạy: dùng chung cho bookmarklet và lệnh console dự phòng (trả Promise).
+/// Mọi thứ ở đây là giá trị trang web đọc được, nên chỉ cần đang đăng nhập chat.deepseek.com là chạy.
+/// CHỈ dùng comment /* */: URL javascript: bị trình duyệt bỏ hết xuống dòng, một `//` sẽ nuốt phần code phía sau.
+const COLLECT_JS = String.raw`(async function () {
+  if (location.origin !== 'https://chat.deepseek.com') { alert('whalegate: chạy trên tab chat.deepseek.com'); return null; }
+  var raw = null;
+  try { raw = localStorage.getItem('userToken'); } catch (e) {}
+  var tok = null;
+  try { tok = JSON.parse(raw || 'null'); } catch (e) { tok = raw; } /* token trần, không bọc JSON */
+  var token = tok && typeof tok === 'object' ? tok.value : tok;
+  if (!token) { alert('whalegate: tab này chưa đăng nhập chat.deepseek.com (không thấy userToken).'); return null; }
+  var nav = navigator, gpu = [null, null];
+  try {
+    var c = document.createElement('canvas'), gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+    if (gl) { var dbg = gl.getExtension('WEBGL_debug_renderer_info'); if (dbg) gpu = [gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL), gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)]; }
+  } catch (e) {}
+  var cookies = {};
+  try {
+    String(document.cookie || '').split(/;\s*/).forEach(function (kv) {
+      var i = kv.indexOf('='); if (i > 0) cookies[kv.slice(0, i)] = kv.slice(i + 1);
+    });
+  } catch (e) {}
+  var tz = null;
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) {}
+  var dev = null;
+  try { dev = localStorage.getItem('deepseek-device-id:chat'); } catch (e) {}
+  return {
+    token: token,
+    device_id: dev,
+    cookies: cookies,
+    browser: {
+      user_agent: nav.userAgent,
+      cores: nav.hardwareConcurrency || null,
+      memory_gb: nav.deviceMemory || null,
+      screen: [screen.width, screen.height],
+      avail: [screen.availWidth, screen.availHeight],
+      dpr: window.devicePixelRatio || 1,
+      tz: tz,
+      tz_offset: -new Date().getTimezoneOffset() * 60,
+      langs: (nav.languages && nav.languages.length ? nav.languages : [nav.language || 'vi']).slice(),
+      gpu_vendor: gpu[0],
+      gpu_renderer: gpu[1]
+    }
+  };
+})`;
+
+/// Bookmarklet: mở tab dashboard, chờ nó báo sẵn sàng rồi gửi gói qua postMessage — không nằm trong URL,
+/// không vào lịch sử, không đi qua mạng. Dashboard chỉ nhận tin từ đúng tab chat.deepseek.com đã mở nó.
+/// Mở tab NGAY trong cú bấm (trước mọi await) để trình chặn popup không chặn.
+function bookmarkletCode() {
+  const base = location.origin + location.pathname;
+  return 'javascript:(function(){try{' +
+    'var O=' + JSON.stringify(location.origin) + ';' +
+    'if(location.origin!=="' + DS_ORIGIN + '"){alert("whalegate: bấm bookmarklet này trên tab chat.deepseek.com");return;}' +
+    'var w=window.open(' + JSON.stringify(base + '#bm') + ',"_blank");' +
+    'if(!w){alert("whalegate: trình duyệt chặn tab mới — cho phép popup rồi bấm lại");return;}' +
+    'var p=' + COLLECT_JS + '();' +
+    'var h=function(e){if(e.source!==w||e.origin!==O||e.data!=="whalegate-ready")return;' +
+    'window.removeEventListener("message",h);' +
+    'p.then(function(d){w.postMessage({whalegate:d},O);},function(x){w.postMessage({whalegate:null,error:String(x&&x.message||x)},O);});};' +
+    'window.addEventListener("message",h);' +
+    'setTimeout(function(){window.removeEventListener("message",h);},120000);' +
+    '}catch(e){alert("whalegate: "+e.message)}})()';
+}
+
+function refreshBookmarklet() {
+  const a = $('bmLink');
+  if (!a) return;
+  a.setAttribute('href', bookmarkletCode());
+  $('bmWhere').textContent = 'Bookmarklet trỏ về ' + location.host + ' — nếu whalegate chạy ở máy khác, hãy mở dashboard bằng địa chỉ của máy đó rồi kéo lại nút này.';
+}
+
 async function copyCmd() {
-  const text = 'copy(localStorage.userToken)', b = $('cmdCopy');
+  const text = 'copy(await ' + COLLECT_JS + '())', b = $('cmdCopy');
   try { await navigator.clipboard.writeText(text); }
   catch (e) { const t = el('textarea'); t.value = text; t.style.cssText = 'position:fixed;opacity:0'; document.body.append(t); t.select(); try { document.execCommand('copy'); } finally { t.remove(); } }
-  b.classList.add('done'); b.querySelector('span').textContent = 'đã copy'; say('Đã copy lệnh — dán vào Console', 'ok');
+  b.classList.add('done'); b.querySelector('span').textContent = 'đã copy'; say('Đã copy lệnh — dán vào Console của tab chat.deepseek.com', 'ok');
   setTimeout(() => { b.classList.remove('done'); b.querySelector('span').textContent = 'copy'; }, 1800);
 }
+
+/// Nhận gói từ bookmarklet/lệnh console. Có token + browser thì acc giữ đúng "máy" của trình duyệt gốc.
+async function addPayload(d, label) {
+  const body = {label: label || d.label || ''};
+  if (d.browser) { body.browser = d.browser; body.token = d.token || d.raw_token; body.cookies = d.cookies || {}; }
+  else { body.token = d.token || d.raw_token || ''; body.cookies = d.cookies || {}; }
+  if (d.device_id && body.browser) body.browser.device_id = d.device_id;
+  const r = await fetch('/api/accounts', {method: 'POST', headers: J, body: JSON.stringify(body)});
+  const res = await r.json();
+  if (!r.ok || res.error) throw new Error(res.error || ('lỗi ' + r.status));
+  return res;
+}
+
+/// Thông báo sau khi thêm: acc mới, hay acc cũ được làm mới (bấm lại bookmarklet / đăng nhập lại ra token mới).
+function addedText(res, browser) {
+  const who = res.label || 'tài khoản';
+  if (res.updated) return (res.token_changed ? 'Đã thay token mới cho ' : 'Đã làm mới cookie/thiết bị cho ') + who + ' — acc quay lại pool';
+  return 'Đã thêm ' + who + (browser ? ' (giữ vân tay trình duyệt gốc)' : '');
+}
+
 async function addManual() {
-  const b = $('btnAdd'), token = $('tokIn').value.trim();
-  if (!token) return say('Dán token trước', 'err');
+  const b = $('btnAdd'), raw = $('tokIn').value.trim();
+  if (!raw) return say('Dán token trước', 'err');
+  let d = {token: raw};
+  if (raw.startsWith('{')) { try { const o = JSON.parse(raw); if (o && (o.token || o.browser)) d = o; } catch (e) {} }
   b.disabled = true;
   try {
-    const r = await fetch('/api/accounts', {method: 'POST', headers: J, body: JSON.stringify({token, label: $('lblIn').value})});
-    const d = await r.json();
-    if (!r.ok || d.error) return say(d.error || ('lỗi ' + r.status), 'err');
-    say('Đã thêm ' + (d.label || 'tài khoản'), 'ok'); $('tokIn').value = ''; $('lblIn').value = ''; closeAdd(); loadStats();
+    const res = await addPayload(d, $('lblIn').value);
+    say(addedText(res, !!d.browser), 'ok');
+    $('tokIn').value = ''; $('lblIn').value = ''; closeAdd(); loadStats();
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
 async function loginStart() {
@@ -505,6 +626,15 @@ function ago(ts) {
   const s = Math.max(0, Date.now() / 1000 - ts);
   return s < 3600 ? Math.round(s / 60) + ' phút trước' : s < 86400 ? Math.round(s / 3600) + ' giờ trước' : Math.round(s / 86400) + ' ngày trước';
 }
+async function relogin(a) {
+  try {
+    const d = await post('/api/accounts/' + a.id + '/relogin');
+    if (!d.ok) return say(d.error, 'err');
+    say('Đã mở Chrome của ' + a.label + ' — đăng nhập đúng tài khoản này, xong cửa sổ tự đóng và acc quay lại pool', 'ok');
+    const t = setInterval(loadStats, 2000); setTimeout(() => clearInterval(t), 660000);
+  } catch (e) { say(e.message, 'err'); }
+}
+
 async function device(a) {
   const t = say('Đang làm mới thiết bị ' + a.label + '…', 'wait');
   try {
@@ -607,7 +737,8 @@ let OPEN_ACC = null;
 function accItem(a, perAcc) {
   const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
   let kind = '', text = 'sẵn sàng';
-  if (relogin) { kind = 'bad'; text = 'cần đăng nhập lại'; }
+  if (a.auth_dead_at) { kind = 'bad'; text = 'DS đã đăng xuất'; }
+  else if (relogin) { kind = 'bad'; text = 'cần đăng nhập lại'; }
   else if (a.cooldown_left_secs > 0) { kind = 'warn'; text = `nghỉ ${a.cooldown_left_secs}s`; }
   else if (!/ok/.test(a.last_status || '')) { kind = 'bad'; text = a.last_status || 'lỗi'; }
   else if (a.in_flight > 0) { kind = 'run'; text = `đang chạy ${a.in_flight}/${perAcc}`; }
@@ -627,9 +758,19 @@ function accItem(a, perAcc) {
   }
   // acc có thiết bị riêng (login qua Chrome): ghi lần làm mới cookie gần nhất
   const dev = a.device && a.device_refreshed_at ? ' · làm mới ' + ago(a.device_refreshed_at) : '';
-  more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}${dev}`), el('span', 'sp'), sw);
+  // acc thêm bằng bookmarklet: "máy" là trình duyệt gốc của user, không mở Chrome riêng
+  const bm = a.browser ? ' · trình duyệt gốc' : '';
+  const dead = a.auth_dead_at ? ' · mất token ' + ago(a.auth_dead_at) : '';
+  more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}${dev}${bm}${dead}`), el('span', 'sp'), sw);
   const mk = (t, cls, fn) => { const b = el('button', 'sm ' + cls, t); b.onclick = fn; return b; };
-  if (a.device) { const b = mk('thiết bị', '', () => device(a)); b.title = 'Làm mới cookie thiết bị ngay (Chrome nền của acc)'; more.append(b); }
+  if (a.device && !a.auth_dead_at) { const b = mk('thiết bị', '', () => device(a)); b.title = 'Làm mới cookie thiết bị ngay (Chrome nền của acc)'; more.append(b); }
+  // DS đã đăng xuất acc: acc Chrome/dán token → mở lại Chrome riêng của nó để bạn tự đăng nhập; acc bookmarklet → làm trên trình duyệt gốc
+  if (a.auth_dead_at && !a.browser) { const b = mk('đăng nhập lại', 'solid', () => relogin(a)); b.title = 'Mở Chrome riêng của acc này (giữ vân tay và phiên Google cũ) để bạn đăng nhập lại; xong tự thay token vào acc'; more.append(b); }
+  if (a.browser) {
+    const b = el('span', 'sub', a.auth_dead_at ? 'đăng nhập lại trên trình duyệt gốc rồi bấm bookmarklet' : 'vân tay từ trình duyệt của bạn');
+    b.title = 'Acc này thêm bằng bookmarklet: giữ UA, màn hình, múi giờ, ngôn ngữ, GPU và device id của chính trình duyệt gốc. Muốn làm mới cookie (hoặc đã đăng nhập lại) thì bấm bookmarklet trên tab chat.deepseek.com của trình duyệt đó.';
+    more.append(b);
+  }
   more.append(mk('sửa', '', () => openEdit(a)), mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label)), mk('xoá', 'del', () => del(a.id, a.label)));
   box.append(hd, more);
   return box;
@@ -681,9 +822,30 @@ async function loadStats() {
     const list = $('accList'); list.textContent = '';
     $('empty').style.display = d.accounts.length ? 'none' : 'block';
     for (const a of d.accounts) list.append(accItem(a, p.max_conc_per_acc));
+    window.__lastPool = p; renderAuthBar(p);
     if (u && u.pricing) renderUsage(u);
     $('dot').className = 'dot'; $('liveTxt').textContent = new Date().toLocaleTimeString([], {hour12: false});
   } catch (e) { $('dot').className = 'dot off'; $('liveTxt').textContent = 'mất kết nối'; }
+}
+
+/// Băng đỏ khi DS đăng xuất acc. Ẩn bằng × thì nhớ theo mốc acc chết muộn nhất: có acc mới chết là hiện lại.
+function renderAuthBar(p) {
+  const bar = $('authBar'), n = p.logged_out || 0, last = p.logged_out_last_at || 0;
+  let hidden = 0;
+  try { hidden = +localStorage.getItem('wg.authBarHidden') || 0; } catch (e) {}
+  if (!n || hidden >= last) { bar.classList.remove('show'); return; }
+  const at = new Date(last * 1000).toLocaleString([], {hour12: false, hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit'});
+  const burst = p.logged_out_last_burst || 0;
+  $('authTxt').innerHTML = '';
+  $('authTxt').append(el('b', null, `DeepSeek đã đăng xuất ${n} acc`), burst >= 3
+    ? ` — ${burst} acc mất token cùng lúc quanh ${at}: DS huỷ session hàng loạt phía server, không phải lỗi từng acc.`
+    : ` — lần gần nhất ${at}. Các acc này đã được rút khỏi pool.`);
+  bar.classList.add('show');
+}
+function hideAuthBar() {
+  const last = (window.__lastPool && window.__lastPool.logged_out_last_at) || Math.floor(Date.now() / 1000);
+  try { localStorage.setItem('wg.authBarHidden', String(last)); } catch (e) {}
+  $('authBar').classList.remove('show');
 }
 
 /* ---- cài đặt: sửa → Lưu → đợi rảnh → khởi động lại ---- */
@@ -1166,6 +1328,35 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   for (const [id, fn] of [['cfmModal', () => askDone(false)], ['editModal', closeEdit], ['addModal', closeAdd], ['setModal', closeSettings], ['logModal', closeLog]]) if ($(id).classList.contains('open')) { fn(); break; }
 });
+
+// Tab do bookmarklet mở (#bm): báo cho tab chat.deepseek.com đã mở nó là sẵn sàng, rồi nhận gói qua postMessage.
+// Chỉ tin tin nhắn từ đúng window.opener có origin chat.deepseek.com — trang khác mở /#bm cũng không nhét được acc vào pool.
+(function bootBookmarklet() {
+  if (location.hash !== '#bm') return;
+  history.replaceState(null, '', location.pathname + location.search);
+  const src = window.opener;
+  if (!src) return say('Tab này phải do bookmarklet mở từ chat.deepseek.com', 'err');
+  openAdd();
+  const t = say('Đang nhận dữ liệu từ chat.deepseek.com…', 'wait');
+  let got = false;
+  const done = () => { got = true; window.removeEventListener('message', onMsg); clearInterval(ping); if (t) t.remove(); };
+  const onMsg = (e) => {
+    if (got || e.source !== src || e.origin !== DS_ORIGIN || !e.data || !('whalegate' in e.data)) return;
+    done();
+    const d = e.data.whalegate;
+    if (!d) return say('Bookmarklet không gom được dữ liệu' + (e.data.error ? ': ' + e.data.error : ''), 'err');
+    const w = say('Đang thêm tài khoản…', 'wait');
+    addPayload(d, '')
+      .then((res) => { if (w) w.remove(); say(addedText(res, true), 'ok'); closeAdd(); loadStats(); })
+      .catch((err) => { if (w) w.remove(); say(err.message, 'err'); $('advAdd').open = true; $('tokIn').value = JSON.stringify(d, null, 1); });
+  };
+  window.addEventListener('message', onMsg);
+  // tab gốc có thể đăng ký listener chậm hơn lúc tab này tải xong: gửi lại vài lần
+  const send = () => { try { src.postMessage('whalegate-ready', DS_ORIGIN); } catch (e) {} };
+  send();
+  let n = 0;
+  const ping = setInterval(() => { if (++n > 20) { done(); say('Không nhận được dữ liệu từ chat.deepseek.com — thử bấm bookmarklet lại', 'err'); } else send(); }, 500);
+})();
 
 loadStats();
 setInterval(loadStats, 5000);

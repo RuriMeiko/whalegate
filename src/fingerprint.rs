@@ -2,6 +2,7 @@
 //   - phía mạng (wreq): TLS/HTTP2/UA/sec-ch-ua của đúng bản Chrome/Edge đã chọn
 //   - phía trình duyệt (CDP): UA + client hints, canvas, WebGL, audio, màn hình, phần cứng, múi giờ
 // Mọi giá trị dẫn xuất từ `seed` của acc nên cùng một acc luôn ra cùng một "máy", khác acc ra khác máy.
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -20,6 +21,41 @@ const BROWSERS: &[(Profile, u32, bool)] = &[
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Os { Windows, Mac, Linux }
 
+/// Hồ sơ trình duyệt thật do bookmarklet gửi về (acc thêm bằng "Thêm vào whalegate" trên chat.deepseek.com).
+/// Mọi trường đều là giá trị trang web đọc được từ chính trình duyệt đó; thiếu trường nào thì trường đó
+/// dẫn xuất tiếp từ `seed` như acc login qua Chrome, để một acc cũ/một gói thiếu field vẫn dựng được vân tay.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct BrowserProfile {
+    #[serde(default)]
+    pub seed: Option<String>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub cores: Option<u32>,
+    #[serde(default)]
+    pub memory_gb: Option<u32>,
+    #[serde(default)]
+    pub screen: Option<(u32, u32)>,
+    #[serde(default)]
+    pub avail: Option<(u32, u32)>,
+    #[serde(default)]
+    pub dpr: Option<f64>,
+    /// múi giờ IANA (`Intl…timeZone`)
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// lệch múi giờ tính bằng giây như header x-client-timezone-offset (UTC+7 → 25200)
+    #[serde(default)]
+    pub tz_offset: Option<i64>,
+    #[serde(default)]
+    pub langs: Option<Vec<String>>,
+    #[serde(default)]
+    pub gpu_vendor: Option<String>,
+    #[serde(default)]
+    pub gpu_renderer: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Fingerprint {
     pub seed: String,
@@ -32,10 +68,15 @@ pub struct Fingerprint {
     pub screen: (u32, u32),
     pub avail: (u32, u32),
     pub dpr: f64,
-    pub gpu_vendor: &'static str,
-    pub gpu_renderer: &'static str,
+    /// String (không phải &'static str) vì acc thêm bằng bookmarklet mang GPU thật của máy user.
+    pub gpu_vendor: String,
+    pub gpu_renderer: String,
     /// hạt giống nhiễu canvas/audio — ổn định theo acc
     pub noise: u32,
+    /// Múi giờ/ngôn ngữ thật của trình duyệt gốc (acc bookmarklet); None = theo DS_TZ_OFFSET và bộ "vi,en-US,en" mặc định.
+    pub tz: Option<String>,
+    pub tz_offset: Option<i64>,
+    pub langs: Option<Vec<String>>,
 }
 
 static SEEDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -49,6 +90,27 @@ pub fn bind(token: &str, seed: Option<&str>) {
 
 pub fn seed_for(token: &str) -> String {
     SEEDS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).get(token).cloned().unwrap_or_else(|| token.to_string())
+}
+
+static PROFILES: OnceLock<Mutex<HashMap<String, BrowserProfile>>> = OnceLock::new();
+
+/// Gắn token → hồ sơ trình duyệt THẬT của acc (acc thêm bằng bookmarklet từ chính máy user đang dùng).
+/// Acc kiểu này không mở Chrome riêng, không tự sinh "máy" nào: vân tay mạng và mọi thứ phải là của trình duyệt đó.
+pub fn bind_profile(token: &str, p: Option<BrowserProfile>) {
+    if let Some(p) = p {
+        PROFILES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).insert(token.to_string(), p);
+    }
+}
+
+pub fn profile_for(token: &str) -> Option<BrowserProfile> {
+    PROFILES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).get(token).cloned()
+}
+
+/// Gỡ token khỏi mọi registry vân tay (thêm acc thất bại / trùng) để không để lại "máy" mồ côi cho token đó.
+pub fn unbind(token: &str) {
+    SEEDS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+    PROFILES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+    DEVICES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).remove(token);
 }
 
 static DEVICES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -101,8 +163,117 @@ const LINUX_GPU: &[(&str, &str)] = &[
     ("Google Inc. (AMD)", "ANGLE (AMD, AMD Radeon RX 580 Series (radeonsi, polaris10, LLVM 17.0.6, DRM 3.57, 6.8.0), OpenGL 4.6 (Core Profile) Mesa 24.0.9)"),
 ];
 
+/// Dòng máy + Edge/Chrome từ UA thật. UA lạ (Firefox, Safari…) rơi về Windows/Chrome vì wreq chỉ có bảng Chrome/Edge —
+/// dù sao wreq cũng phải giả một bản Chromium, nên chọn bản gần nhất thay vì bỏ acc.
+fn os_from_ua(ua: &str) -> (Os, bool) {
+    let edge = ua.contains(" Edg/");
+    let os = if ua.contains("Windows NT") {
+        Os::Windows
+    } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+        Os::Mac
+    } else if ua.contains("Linux") || ua.contains("X11") {
+        // Android UA cũng chứa "Linux" nhưng thiếu "X11"; vẫn xếp Linux vì wreq không có bảng Android
+        Os::Linux
+    } else {
+        Os::Windows
+    };
+    (os, edge)
+}
+
+/// Số phiên bản chính của Chromium trong UA (`Chrome/141.0.0.0` → 141).
+fn chrome_major(ua: &str) -> Option<u32> {
+    let idx = ua.find("Chrome/")?;
+    let rest = &ua[idx + "Chrome/".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Chọn profile wreq gần nhất với bản Chrome/Edge thật. Lệch vài phiên bản vẫn tốt hơn hẳn một profile
+/// ngẫu nhiên: JA3/JA4 và sec-ch-ua chỉ đổi giữa các bản lớn.
+fn pick_profile_for(major: u32, edge: bool) -> Option<(Profile, u32, bool)> {
+    let mut best: Option<(Profile, u32, bool)> = None;
+    for &(p, m, e) in BROWSERS {
+        if e != edge {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((_, bm, _)) => m.abs_diff(major) < bm.abs_diff(major),
+        };
+        if better {
+            best = Some((p, m, e));
+        }
+    }
+    // Không có bản Edge nào gần: rơi về Chrome cùng phiên bản thay vì bỏ cuộc
+    best.or_else(|| pick_profile_for(major, !edge))
+}
+
 impl Fingerprint {
-    pub fn for_token(token: &str) -> Self { Self::from_seed(&seed_for(token)) }
+    pub fn for_token(token: &str) -> Self {
+        match profile_for(token) {
+            Some(p) => Self::from_profile(&p, &seed_for(token)),
+            None => Self::from_seed(&seed_for(token)),
+        }
+    }
+
+    /// Dựng vân tay từ hồ sơ trình duyệt THẬT (bookmarklet). Trường nào thiếu thì rơi về giá trị dẫn xuất
+    /// từ seed, nên một gói thiếu field vẫn dùng được thay vì hỏng cả acc. Gói không có seed dùng `fallback_seed`
+    /// (seed theo token) — phải cố định, không sinh mới, kẻo mỗi lần dựng client lại ra một "máy" khác.
+    pub fn from_profile(p: &BrowserProfile, fallback_seed: &str) -> Self {
+        let seed = p.seed.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| fallback_seed.to_string());
+
+        let mut base = Self::from_seed(&seed);
+        // UA thật quyết định dòng máy: đoán OS/phiên bản từ chính UA để các giá trị dẫn xuất còn lại khớp
+        let ua = p.user_agent.clone().unwrap_or_else(|| base.user_agent());
+        let (os, edge) = os_from_ua(&ua);
+        let major = chrome_major(&ua).unwrap_or(base.major);
+        // UA/sec-ch-ua trên dây là của profile wreq, nên major/edge lấy theo đúng profile đã chọn — trình duyệt thật
+        // mới hơn bảng (tự cập nhật mỗi 4 tuần) thì cả vân tay lùi về bản gần nhất, không nửa nọ nửa kia.
+        let (profile, major, edge) = pick_profile_for(major, edge).unwrap_or((base.profile, base.major, base.edge));
+        base.seed = seed;
+        base.os = os;
+        base.major = major;
+        base.edge = edge;
+        base.profile = profile;
+        if let Some(c) = p.cores.filter(|c| *c > 0) { base.cores = c; }
+        if let Some(m) = p.memory_gb.filter(|m| *m > 0) { base.memory_gb = m; }
+        if let Some((w, h)) = p.screen.filter(|(w, h)| *w > 0 && *h > 0) { base.screen = (w, h); }
+        let bar = base.screen.1.saturating_sub(base.avail.1).max(if os == Os::Mac { 25 } else { 40 });
+        base.avail = p.avail.filter(|(w, h)| *w > 0 && *h > 0).unwrap_or((base.screen.0, base.screen.1.saturating_sub(bar)));
+        if let Some(d) = p.dpr.filter(|d| *d > 0.0) { base.dpr = d; }
+        if let Some(v) = p.gpu_vendor.clone().filter(|s| !s.is_empty()) { base.gpu_vendor = v; }
+        if let Some(v) = p.gpu_renderer.clone().filter(|s| !s.is_empty()) { base.gpu_renderer = v; }
+        base.tz = p.tz.clone().filter(|s| !s.is_empty());
+        // ±14h là biên múi giờ thật; ngoài khoảng đó là gói hỏng
+        base.tz_offset = p.tz_offset.filter(|s| s.abs() <= 14 * 3600);
+        base.langs = p.langs.clone().map(|l| l.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>()).filter(|l| !l.is_empty());
+        base
+    }
+
+    /// Giá trị header x-client-timezone-offset: của trình duyệt gốc nếu có, không thì DS_TZ_OFFSET.
+    pub fn tz_offset_header(&self) -> String {
+        match self.tz_offset {
+            Some(s) => s.to_string(),
+            None => crate::settings::get("DS_TZ_OFFSET"),
+        }
+    }
+
+    /// Accept-Language như Chromium dựng từ danh sách ngôn ngữ: chèn ngôn ngữ gốc sau nhóm biến thể
+    /// (`en-US` → thêm `en`), q giảm 0.1 mỗi mục, tối thiểu 0.1.
+    pub fn accept_language(&self) -> String {
+        let Some(langs) = &self.langs else { return "vi,en-US;q=0.9,en;q=0.8".into() };
+        let base = |l: &str| l.split('-').next().unwrap_or(l).to_string();
+        let mut out: Vec<String> = Vec::new();
+        for (i, l) in langs.iter().enumerate() {
+            if !out.contains(l) { out.push(l.clone()); }
+            let b = base(l);
+            let next_same = langs.get(i + 1).map(|n| base(n) == b).unwrap_or(false);
+            if !next_same && !out.contains(&b) && !langs.contains(&b) { out.push(b); }
+        }
+        out.iter().enumerate().map(|(i, l)| {
+            if i == 0 { l.clone() } else { format!("{};q={:.1}", l, (1.0 - 0.1 * i as f64).max(0.1)) }
+        }).collect::<Vec<_>>().join(",")
+    }
 
     pub fn from_seed(seed: &str) -> Self {
         let mut r = Rng::new(seed);
@@ -113,6 +284,7 @@ impl Fingerprint {
             Os::Mac => r.pick(MAC_GPU),
             Os::Linux => r.pick(LINUX_GPU),
         };
+        let (gpu_vendor, gpu_renderer) = (gpu_vendor.to_string(), gpu_renderer.to_string());
         // (màn hình, phần chiếm bởi taskbar/menu bar, dpr)
         let (screen, bar, dpr) = match os {
             Os::Mac => {
@@ -130,6 +302,7 @@ impl Fingerprint {
         Fingerprint {
             seed: seed.to_string(), profile, major, edge, os, cores, memory_gb,
             screen, avail: (screen.0, screen.1 - bar), dpr, gpu_vendor, gpu_renderer, noise,
+            tz: None, tz_offset: None, langs: None,
         }
     }
 
@@ -203,6 +376,7 @@ impl Fingerprint {
 
     /// Múi giờ IANA theo DS_TZ_OFFSET (giây, UTC+7 = 25200) — cùng nguồn với header x-client-timezone-offset.
     fn timezone_id(&self) -> String {
+        if let Some(tz) = &self.tz { return tz.clone(); }
         let secs: i64 = crate::settings::get("DS_TZ_OFFSET").trim().parse().unwrap_or(25200);
         if secs == 25200 { return "Asia/Ho_Chi_Minh".into(); }
         let h = secs / 3600;
@@ -222,7 +396,10 @@ impl Fingerprint {
 
     /// Mã JS chạy trước mọi script của trang: canvas, WebGL, audio, màn hình, phần cứng.
     pub fn js_patch(&self) -> String {
-        let langs = r#"["vi","en-US","en"]"#;
+        let langs = match &self.langs {
+            Some(l) => serde_json::to_string(l).unwrap(),
+            None => r#"["vi","en-US","en"]"#.to_string(),
+        };
         PATCH_JS
             .replace("%NOISE%", &self.noise.to_string())
             .replace("%CORES%", &self.cores.to_string())
@@ -232,10 +409,10 @@ impl Fingerprint {
             .replace("%AW%", &self.avail.0.to_string())
             .replace("%AH%", &self.avail.1.to_string())
             .replace("%DPR%", &self.dpr.to_string())
-            .replace("%GV%", &serde_json::to_string(self.gpu_vendor).unwrap())
-            .replace("%GR%", &serde_json::to_string(self.gpu_renderer).unwrap())
+            .replace("%GV%", &serde_json::to_string(&self.gpu_vendor).unwrap())
+            .replace("%GR%", &serde_json::to_string(&self.gpu_renderer).unwrap())
             .replace("%PLAT%", &serde_json::to_string(self.nav_platform()).unwrap())
-            .replace("%LANGS%", langs)
+            .replace("%LANGS%", &langs)
             .replace("%GLPARAMS%", &self.gl_params())
             .replace("%FONTS%", &self.font_list())
     }
@@ -425,6 +602,105 @@ mod tests {
         assert_eq!(f(149, false), r#""Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24""#);
         assert_eq!(f(142, true), r#""Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99""#);
         assert_eq!(f(144, true), r#""Not(A:Brand";v="8", "Chromium";v="144", "Microsoft Edge";v="144""#);
+    }
+
+    #[test]
+    fn profile_from_real_browser_keeps_its_own_machine() {
+        // Gói thật từ Chrome 141 trên Windows, RTX 3060, màn 2560×1440
+        let p = BrowserProfile {
+            seed: Some("bm-seed".into()),
+            user_agent: Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36".into()),
+            cores: Some(12),
+            memory_gb: Some(8),
+            screen: Some((2560, 1440)),
+            avail: Some((2560, 1400)),
+            dpr: Some(1.25),
+            tz: Some("Asia/Ho_Chi_Minh".into()),
+            langs: Some(vec!["vi".into(), "en-US".into()]),
+            gpu_vendor: Some("Google Inc. (NVIDIA)".into()),
+            gpu_renderer: Some("ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)".into()),
+            device_id: Some("dev-abc".into()),
+            ..Default::default()
+        };
+        let f = Fingerprint::from_profile(&p, "tok-fallback");
+        assert_eq!(f.seed, "bm-seed");
+        assert_eq!(f.os, Os::Windows);
+        assert_eq!(f.major, 141);
+        assert!(!f.edge);
+        // các giá trị thật được giữ nguyên, không bị seed ghi đè
+        assert_eq!(f.cores, 12);
+        assert_eq!(f.screen, (2560, 1440));
+        assert_eq!(f.avail, (2560, 1400));
+        assert_eq!(f.dpr, 1.25);
+        assert_eq!(f.gpu_renderer, p.gpu_renderer.clone().unwrap());
+        // profile wreq phải là Chrome 141 — đúng bản trong UA
+        assert_eq!(f.profile, Profile::Chrome141);
+        assert!(f.user_agent().contains("Chrome/141.0.0.0"));
+    }
+
+    #[test]
+    fn profile_falls_back_when_fields_missing() {
+        // gói tối thiểu: chỉ có UA, không có seed/GPU/màn hình
+        let p = BrowserProfile {
+            user_agent: Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36".into()),
+            ..Default::default()
+        };
+        let f = Fingerprint::from_profile(&p, "tok-fallback");
+        // gói thiếu seed dùng seed theo token — cố định, gọi lại vẫn ra đúng máy đó
+        assert_eq!(f.seed, "tok-fallback");
+        assert_eq!(f.noise, Fingerprint::from_profile(&p, "tok-fallback").noise);
+        assert_eq!(f.os, Os::Mac);
+        assert_eq!(f.major, 140);
+        assert_eq!(f.profile, Profile::Chrome140);
+        // GPU rơi về bảng của OS tương ứng, không rỗng
+        assert!(!f.gpu_renderer.is_empty());
+    }
+
+    #[test]
+    fn edge_ua_picks_edge_profile() {
+        let p = BrowserProfile {
+            user_agent: Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0".into()),
+            ..Default::default()
+        };
+        let f = Fingerprint::from_profile(&p, "tok-fallback");
+        assert!(f.edge);
+        assert_eq!(f.major, 144);
+        assert_eq!(f.profile, Profile::Edge144);
+    }
+
+    #[test]
+    fn newer_browser_than_table_snaps_whole_fingerprint() {
+        // Chrome 160 chưa có trong bảng wreq: UA/sec-ch-ua/TLS cùng lùi về bản gần nhất, không lệch nhau
+        let p = BrowserProfile {
+            user_agent: Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/160.0.0.0 Safari/537.36".into()),
+            ..Default::default()
+        };
+        let f = Fingerprint::from_profile(&p, "t");
+        assert_eq!(f.profile, Profile::Chrome149);
+        assert_eq!(f.major, 149);
+        // Edge 146 → Edge144 và UA ghi Edg/144
+        let p = BrowserProfile {
+            user_agent: Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0".into()),
+            ..Default::default()
+        };
+        let f = Fingerprint::from_profile(&p, "t");
+        assert_eq!((f.profile, f.major, f.edge), (Profile::Edge144, 144, true));
+        assert!(f.user_agent().ends_with("Edg/144.0.0.0"));
+    }
+
+    #[test]
+    fn real_tz_and_langs_reach_headers() {
+        let p = BrowserProfile { tz_offset: Some(-18000), langs: Some(vec!["vi".into(), "en-US".into()]), ..Default::default() };
+        let f = Fingerprint::from_profile(&p, "t");
+        assert_eq!(f.tz_offset_header(), "-18000");
+        assert_eq!(f.accept_language(), "vi,en-US;q=0.9,en;q=0.8");
+        let p = BrowserProfile { langs: Some(vec!["en-US".into(), "en-GB".into(), "fr".into()]), ..Default::default() };
+        assert_eq!(Fingerprint::from_profile(&p, "t").accept_language(), "en-US,en-GB;q=0.9,en;q=0.8,fr;q=0.7");
+        // gói hỏng (offset vô lý) → bỏ, dùng mặc định
+        let p = BrowserProfile { tz_offset: Some(999_999), ..Default::default() };
+        assert_eq!(Fingerprint::from_profile(&p, "t").tz_offset, None);
+        // acc thường giữ nguyên bộ mặc định
+        assert_eq!(Fingerprint::from_seed("s").accept_language(), "vi,en-US;q=0.9,en;q=0.8");
     }
 
     #[test]

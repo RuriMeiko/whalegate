@@ -53,7 +53,7 @@
 | 🔁 **Failover** | An error, empty or truncated stream moves the request to another account (up to 3 attempts) |
 | 🧵 **Stateful** | Continues the same web conversation and sends only the new messages, so long agent loops stay fast and cheap |
 | 🔐 **Proof-of-work** | Built-in solver for `DeepSeekHashV1`, with optional prefetch for the next request |
-| 🌐 **Session capture** | Log in once in Chrome. The gateway grabs the token and cookies over CDP and refreshes the cookies every 5 minutes |
+| 🌐 **Session capture** | One click on a bookmarklet adds the account with your own browser's fingerprint, or log in through a dedicated Chrome with its own fingerprint and auto-refreshed device cookies |
 | 📦 **One-line install** | Prebuilt static binaries for Linux (x86_64/arm64), macOS and Windows. The installer starts the gateway on login and configures dsh |
 | 🔄 **Self-update** | The dashboard checks GitHub Releases and, on one click, downloads, checksum-verifies, installs and restarts into the new build |
 | 📦 **Portable accounts** | Export the pool as a file or clipboard JSON and import it on another machine; merging is idempotent |
@@ -196,22 +196,60 @@ systemctl --user daemon-reload && systemctl --user enable --now whalegate
 
 Accounts are stored in `~/.whalegate/accounts.json`, which you can override with `DS_ACCOUNTS_PATH`. Upgrading from ds-harness moves `~/.ds-harness` there automatically. That file holds **live session tokens**: never commit or share it.
 
-### Option 1: Chrome login (recommended)
+Every account is one "machine" to DeepSeek: a TLS/HTTP2 fingerprint (a real Chrome/Edge build emulated by wreq), a user agent, a device id, cookies, a timezone and languages. All of these stay fixed for the life of the account, because a live session suddenly showing up on a different machine is exactly what gets flagged. There are three ways to add an account, and they differ in *which* machine the account lives on.
+
+| | Machine the account uses | Cookie refresh |
+|---|---|---|
+| **Bookmarklet** | Your own browser: its UA, screen, GPU, timezone, languages and device id | Click the bookmarklet again on a DeepSeek tab |
+| **Chrome login** | A new dedicated Chrome with its own generated fingerprint and profile | Automatic, every `DS_DEVICE_REFRESH_HOURS` (default 6h) |
+| **Paste a token** | Derived from the token (fixed, but not a real browser) | None |
+
+### Option 1: bookmarklet (recommended)
+
+```mermaid
+sequenceDiagram
+    participant DS as chat.deepseek.com tab<br/>(logged in)
+    participant D as whalegate dashboard tab
+    participant G as gateway
+    Note over DS: you click the bookmark
+    DS->>D: window.open(dashboard#bm)
+    DS->>DS: read userToken, device id, cookies,<br/>UA, screen, GPU, timezone, languages
+    D->>DS: postMessage "ready"
+    DS->>D: postMessage(bundle)<br/>(only to the dashboard origin)
+    Note over D: accepts only from its opener<br/>with origin chat.deepseek.com
+    D->>G: POST /api/accounts {token, cookies, browser}
+    G->>G: bind the browser's fingerprint
+    G->>DS: verify (users/current) with that fingerprint
+    G->>G: same token or same DeepSeek user already in pool?<br/>update that account : add a new one
+    G-->>D: saved (or error, fingerprint restored)
+```
+
+1. On the dashboard, open **+ Add** and drag **Thêm vào whalegate** onto the bookmarks bar (once). The bookmarklet points at the dashboard address you opened it from, so if whalegate runs on another machine, open the dashboard by that machine's address before dragging.
+2. On a logged-in `chat.deepseek.com` tab, click the bookmark. A dashboard tab opens and the account is added.
+
+The bundle never touches the URL, browser history or the network: it goes tab-to-tab with `postMessage`, and the dashboard only accepts it from the `chat.deepseek.com` tab that opened it, so another site cannot push an account into your pool. The account then uses your browser's own machine: the closest wreq Chrome/Edge build to your browser version (a browser newer than the table snaps the whole fingerprint to the nearest build), your OS, your device id, and your timezone and languages in `x-client-timezone-offset` / `Accept-Language`. The gateway never opens a separate Chrome for these accounts. Cookies DeepSeek sets on responses are kept automatically, but the WAF cookie (`aws-waf-token`) can only be renewed by a real browser. To refresh it, click the bookmarklet again on a DeepSeek tab: an account that is already in the pool is updated in place (cookies merged, device and browser profile refreshed) instead of being added twice. If you signed in again and got a new token, the same click swaps the new token into the existing account.
+
+If the bookmarklet can't run, the same collector is available under **Dán thủ công**: copy the command, run it in the DevTools console of the DeepSeek tab, and paste the result.
+
+### Option 2: Chrome login
 
 ```mermaid
 flowchart LR
-    A["Dashboard:<br/>➕ Login new account"] --> B["Gateway spawns a dedicated<br/>Chrome (CDP :9777, fixed profile)"]
-    B --> C["You sign in<br/>(Google / email / passkey)"]
-    C --> D["Gateway polls the tab every 2s<br/>→ token found"]
-    D --> E["Verify with DeepSeek<br/>→ save → close tab"]
-    E --> F["Cookies auto-refreshed<br/>every 5 min"]
+    A["Dashboard:<br/>Đăng nhập qua Chrome"] --> B["New seed → new fingerprint<br/>+ profile ~/.whalegate/profiles/&lt;seed&gt;"]
+    B --> C["Dedicated Chrome on a random<br/>CDP port, fingerprint applied to every tab"]
+    C --> D["You sign in<br/>(Google / email / passkey)"]
+    D --> E["Gateway watches the tab (up to 10 min)<br/>→ token + device id + cookies"]
+    E --> F["Save, close Chrome<br/>(profile is kept)"]
+    F --> G["Every DS_DEVICE_REFRESH_HOURS:<br/>reopen that Chrome headless → fresh cookies"]
 ```
 
-- **🔍 Scan tabs & save sessions** captures every already-logged-in `chat.deepseek.com` tab from your main Chrome. Start Chrome with `--remote-debugging-port=9333` first.
-- **🏗️ Build profile** (~40s, do it once) warms the login profile by browsing real sites. This makes `Current device environment error` much less likely.
-- If the same DeepSeek user logs in again, the existing account's token is replaced rather than duplicated.
+- Closing the window before you sign in cancels the login. Only one login window can be open at a time.
+- Under systemd the gateway picks up `DISPLAY` / `WAYLAND_DISPLAY` from the user session so the window can open.
+- If the same DeepSeek user logs in again, the existing account's token is replaced rather than duplicated. The account moves to the new Chrome device, and any bookmarklet profile it had is dropped.
+- The **thiết bị** button on an account refreshes its device cookies right away.
+- **Quét tab Chrome** captures every already-logged-in `chat.deepseek.com` tab from your main Chrome. Start Chrome with `--remote-debugging-port=9333` first.
 
-### Option 2: paste a token
+### Option 3: paste a token
 
 On a logged-in `chat.deepseek.com` tab, open DevTools → Console and run:
 
@@ -219,7 +257,7 @@ On a logged-in `chat.deepseek.com` tab, open DevTools → Console and run:
 copy(localStorage.userToken)
 ```
 
-Paste the result into **Add account manually** on the dashboard. Any of these shapes is accepted: `{"value":"…","__version":"0"}`, a quoted string, `Bearer …`, or the bare token. The token is verified before it is saved, and cookies are optional. You can also add one through the API:
+Paste the result into the box under **Dán thủ công**. Any of these shapes is accepted: `{"value":"…","__version":"0"}`, a quoted string, `Bearer …`, or the bare token. The token is verified before it is saved, and cookies are optional. You can also add one through the API, optionally with a `browser` profile (the bookmarklet's fields: `user_agent`, `cores`, `memory_gb`, `screen`, `avail`, `dpr`, `tz`, `tz_offset`, `langs`, `gpu_vendor`, `gpu_renderer`, `device_id`):
 
 ```bash
 curl -X POST http://127.0.0.1:8790/api/accounts \
@@ -511,7 +549,7 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | Variable | Default | Meaning |
 |---|---|---|
 | `DS_PORT` | `8790` | Listen port (always binds `127.0.0.1`) |
-| `DS_API_KEY` | – | If set, `/v1/*` requires `Authorization: Bearer <key>` |
+| `DS_API_KEY` | – | If set, `/v1/*` requires `Authorization: Bearer <key>`. Required before `/v1/*` answers anything from outside the machine |
 | `DS_ACCOUNTS_PATH` | `~/.whalegate/accounts.json` | Account store. Settings, usage and samples live next to it |
 | ⚙️ `DS_STATEFUL` | `1` | Continue web conversations and send deltas only |
 | ⚙️ `DS_POW_PREFETCH` | `1` | Fetch and solve the next PoW ahead of time |
@@ -529,8 +567,8 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `DS_MAX_IMAGE_MB` | `20` | Maximum size per image |
 | `DS_READ_TIMEOUT_SECS` | `120` | Socket read timeout (restart required) |
 | `DS_CHROME_BIN` | auto | Chrome/Chromium path for login |
-| `DS_LOGIN_CDP_PORT` / `DS_LOGIN_PROFILE` | `9777` / `~/.whalegate/login-profile` | Dedicated login Chrome |
-| `DS_RESET_LOGIN_PROFILE` | – | `1` wipes the login profile before opening |
+| `DS_LOGIN_CDP_PORT` | random 40000–59999 | Force a fixed CDP port for the dedicated login Chrome |
+| `DS_DEVICE_REFRESH_HOURS` | `6` | Reopen each Chrome-login account's Chrome in the background for fresh device cookies (`0` = off) |
 | `DS_CN_HOLIDAYS` | – | Extra Chinese holidays (`YYYY-MM-DD,…`) for peak-price math |
 | `DS_DEBUG_SSE` | `0` | Dump raw SSE to `/tmp/ds_debug_sse.log` |
 
@@ -543,10 +581,11 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat |
 | `GET` | `/v1/models` | Model list (`context_length`, `reasoning_efforts`, modalities) |
 | `GET` | `/` | Dashboard |
-| `GET` / `POST` | `/api/accounts` | List / add accounts (`{token, label?}` or `{token, cookies}`) |
+| `GET` / `POST` | `/api/accounts` | List / add accounts (`{token, label?, cookies?, browser?}`) |
 | `PATCH` / `DELETE` | `/api/accounts/{id}` | Edit label or token / delete |
 | `POST` | `/api/accounts/{id}/verify` · `/reset` · `/pool` | Probe with a real chat (returns `probe: alive\|throttled\|auth_dead\|unknown`) / clear errors and sessions, then probe / `{"pool_enabled": bool}` |
-| `POST` | `/api/capture` · `/api/login_start` · `/api/build_profile` | Chrome session capture, login flow, profile warm-up |
+| `POST` | `/api/accounts/{id}/device` | Refresh device cookies now (Chrome-login accounts) |
+| `POST` | `/api/capture` · `/api/login_start` | Capture logged-in tabs from your main Chrome / open the dedicated login Chrome |
 | `GET` | `/api/stats` · `/api/usage` | Pool state (in-flight, cooldowns, stateful hit rate) / usage, cost and latency |
 | `GET` | `/api/logs` · `/api/logs/stream` | Logs as JSON / SSE |
 | `GET` / `POST` | `/api/settings` | Read or update settings (`null` resets a key) |
@@ -557,7 +596,7 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `GET` / `POST` | `/api/update` | Check the latest GitHub release / download, verify and install it, then restart |
 
 > [!IMPORTANT]
-> `/` and `/api/*` only answer **loopback**, even when the port is exposed. `/v1/*` answers anyone, so set `DS_API_KEY` before exposing it. A reverse proxy on the same machine makes every request look like loopback, so never proxy the dashboard publicly.
+> `/` and `/api/*` only answer **loopback**, even when the port is exposed. A request that arrives from loopback but carries reverse-proxy or tunnel headers (`cf-connecting-ip`, `x-forwarded-for`, `forwarded`, …) counts as external, so the dashboard stays private behind a tunnel too. `/v1/*` answers external requests only when `DS_API_KEY` is set.
 
 ---
 
@@ -627,22 +666,40 @@ Only what the program prints or returns comes back into the context. Through wha
 
 ## Cloudflare Worker fan-out (optional)
 
-`worker/ds-proxy.js` round-robins clients across several whalegate instances (different IPs or VPSes), with light rate limiting and an optional KV-backed cursor.
+`worker/ds-proxy.js` gives several whalegate instances (different machines or VPSes) one public address. It checks the client's token, spreads requests round-robin, and moves on to the next instance when one fails or has no usable account (`429`/`5xx`, including `503 accounts_logged_out`). If every instance fails, the client gets the last instance's real error rather than a generic `502`.
 
 ```mermaid
 flowchart LR
     C[Clients] -->|Bearer WORKER_TOKEN| W["Cloudflare Worker"]
-    W --> H1["whalegate #1 (VPS A)"]
-    W --> H2["whalegate #2 (VPS B)"]
+    W -->|Bearer UPSTREAM_TOKEN| H1["whalegate #1"]
+    W -->|Bearer UPSTREAM_TOKEN| H2["whalegate #2"]
     W --> H3["whalegate #n"]
 ```
 
+The client's `WORKER_TOKEN` never reaches an instance. The Worker sends its own `UPSTREAM_TOKEN` (the instances' `DS_API_KEY`) instead. Only `/v1/chat/completions`, `/v1/search/messages` and `/v1/models` are forwarded. The admin UI and `/api/*` are never reachable through the Worker.
+
+### 1. Make each instance reachable and lock it
+
+Cloudflare needs a public `https://` address for every instance, for example a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) to `http://127.0.0.1:8790`. Set `DS_API_KEY` on every instance first.
+
+> A tunnel or reverse proxy on the same machine makes requests arrive from `127.0.0.1`. whalegate recognises the headers these proxies add (`cf-connecting-ip`, `x-forwarded-for`, `forwarded`, …) and treats such requests as external: the dashboard and `/api/*` answer `403`, and `/v1/*` answers `403` until `DS_API_KEY` is set. Your account tokens are never exposed through the tunnel.
+
+### 2. Create a Cloudflare API token
+
+Cloudflare dashboard → **My Profile → API Tokens → Create Token → "Edit Cloudflare Workers"** template. Limit it to your account. The script needs no other permission.
+
+### 3. Deploy
+
 ```bash
-cd worker
-npx wrangler deploy
-npx wrangler secret put UPSTREAMS      # ["https://wg1.example","https://wg2.example"]
-npx wrangler secret put WORKER_TOKEN   # bearer token clients must send
+CLOUDFLARE_API_TOKEN=<token from step 2> \
+WG_UPSTREAMS=https://wg1.example.com,https://wg2.example.com \
+WG_UPSTREAM_TOKEN=<the DS_API_KEY set on the instances> \
+./worker/deploy.sh
 ```
+
+The script checks the token, deploys the Worker, sets the secrets, then tests the deployed address: `/health` answers, `/v1/models` is refused without a token, `/api/accounts` is blocked, and `/v1/models` with the token reaches an instance. It prints the `base_url` for clients. The client token is generated on the first run and kept in `~/.whalegate/worker-token` (readable only by you); pass `WG_WORKER_TOKEN` to choose your own. Set `CLOUDFLARE_ACCOUNT_ID` if the token can see more than one account. Run it again any time to change the instance list.
+
+The Worker's tests run without a Cloudflare account: `node --test worker/ds-proxy.test.mjs`.
 
 ---
 
