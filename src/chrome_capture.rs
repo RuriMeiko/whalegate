@@ -200,6 +200,10 @@ pub async fn watch_login_tab(ws_url: String, timeout_secs: u64, port: u16, fp_se
         if tokio::time::Instant::now() >= deadline {
             bail!("hết {}s mà chưa login xong trong tab", timeout_secs);
         }
+        // user tự đóng cửa sổ: dừng canh ngay, không giữ khoá login thêm tới hết 10 phút
+        if reqwest::get(format!("{}/json/version", cdp_http(port))).await.is_err() {
+            bail!("cửa sổ đăng nhập đã bị đóng trước khi login xong");
+        }
         // 1) thử tab watch trước
         if let Ok((token, cookies, device)) = read_session_from_page(&ws_url).await {
             if let Ok(s) = verify_and_build(token, cookies, device, Some(fp_seed)).await {
@@ -326,6 +330,41 @@ pub fn account_profile_dir(seed: &str) -> String {
     format!("{}/profiles/{}", crate::server::data_dir(), seed)
 }
 
+/// Biến môi trường màn hình cho Chrome có cửa sổ. Dịch vụ systemd thường khởi động trước phiên đồ hoạ nên tiến trình
+/// không có DISPLAY/WAYLAND_DISPLAY (Chrome mở cửa sổ sẽ thoát ngay); lấy lại từ systemd user — phiên đồ hoạ import
+/// chúng vào đó khi đăng nhập — không được thì dò socket Wayland/X11. Đã có sẵn trong môi trường thì không đụng.
+fn gui_env() -> Vec<(String, String)> {
+    if !cfg!(target_os = "linux") { return Vec::new(); }
+    let has = |k: &str| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
+    if has("DISPLAY") || has("WAYLAND_DISPLAY") { return Vec::new(); }
+    let mut out: Vec<(String, String)> = Vec::new();
+    if let Ok(o) = std::process::Command::new("systemctl").args(["--user", "show-environment"]).output() {
+        for l in String::from_utf8_lossy(&o.stdout).lines() {
+            if let Some((k, v)) = l.split_once('=') {
+                if matches!(k, "DISPLAY" | "WAYLAND_DISPLAY" | "XAUTHORITY" | "XDG_SESSION_TYPE") && !v.is_empty() {
+                    out.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    }
+    if !out.iter().any(|(k, _)| k == "DISPLAY" || k == "WAYLAND_DISPLAY") {
+        let rt = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+        if !rt.is_empty() && std::path::Path::new(&rt).join("wayland-0").exists() {
+            out.push(("WAYLAND_DISPLAY".into(), "wayland-0".into()));
+        }
+        if let Some(n) = (0..10).find(|n| std::path::Path::new(&format!("/tmp/.X11-unix/X{}", n)).exists()) {
+            out.push(("DISPLAY".into(), format!(":{}", n)));
+        }
+    }
+    out
+}
+
+/// Không có màn hình nào để mở cửa sổ (máy chủ không giao diện).
+fn gui_env_missing() -> bool {
+    let has = |k: &str| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
+    !has("DISPLAY") && !has("WAYLAND_DISPLAY") && !gui_env().iter().any(|(k, _)| k == "DISPLAY" || k == "WAYLAND_DISPLAY")
+}
+
 /// Mở Chrome riêng cho acc (profile riêng, cổng CDP login), áp vân tay lên MỌI tab/iframe mở ra
 /// (UA + client hints, múi giờ, canvas/WebGL/audio/màn hình/phần cứng) rồi đưa tab đầu tới `start_url`.
 /// Trả (browser, ws url của tab đầu).
@@ -340,7 +379,12 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
     if headless {
         // headless "new" là Chrome đầy đủ; UA "HeadlessChrome" bị vân tay ghi đè trên mọi tab
         cmd.arg("--headless=new");
+    } else {
+        for (k, v) in gui_env() { cmd.env(k, v); }
     }
+    // stderr của Chrome vào file trong profile: Chrome chết lúc khởi động thì lý do nằm ở đây
+    let err_log = std::path::Path::new(&profile).join("chrome-stderr.log");
+    let stderr = std::fs::File::create(&err_log).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null());
     let mut child = cmd
         .arg(format!("--remote-debugging-port={}", port))
         .arg(format!("--user-data-dir={}", profile))
@@ -351,20 +395,33 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
         .arg("--disable-features=Translate")
         .arg("about:blank")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr)
         .spawn()
         .context(format!("không spawn được Chrome ({})", bin))?;
     let mut ready = false;
+    let mut exited = None;
     for _ in 0..40 {
         if let Ok(resp) = reqwest::get(format!("{}/json/version", cdp_http(port))).await {
             if resp.status().is_success() { ready = true; break; }
         }
+        // Chrome thoát luôn (thiếu màn hình, profile bị khoá…) thì báo ngay, không đợi đủ 20s
+        if let Ok(Some(st)) = child.try_wait() { exited = Some(st); break; }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     if !ready {
         let _ = child.kill();
         let _ = child.wait();
-        bail!("Chrome của acc mở rồi nhưng CDP :{} không sẵn sàng sau 20s", port);
+        let tail: Vec<String> = std::fs::read_to_string(&err_log).unwrap_or_default().lines()
+            .filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
+        let tail = tail[tail.len().saturating_sub(4)..].join(" | ");
+        let why = match exited {
+            Some(st) => format!("Chrome thoát ngay khi khởi động ({})", st),
+            None => format!("CDP :{} không sẵn sàng sau 20s", port),
+        };
+        let hint = if !headless && cfg!(target_os = "linux") && gui_env_missing() {
+            " — không tìm thấy màn hình (DISPLAY/WAYLAND_DISPLAY) để mở cửa sổ; dùng cách dán token"
+        } else { "" };
+        bail!("{}{}{}", why, if tail.is_empty() { String::new() } else { format!(": {}", tail) }, hint);
     }
 
     let ws = browser_ws_url(port).await?;

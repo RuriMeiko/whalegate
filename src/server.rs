@@ -2626,19 +2626,30 @@ async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
     {
         let mut watching = st.login_watching.lk();
         if *watching {
-            return Json(json!({"ok": false, "error": "đang canh 1 tab login — đợi login xong hoặc 10 phút nữa thử lại"}));
+            return Json(json!({"ok": false, "error": "đang có một cửa sổ đăng nhập mở — đăng nhập xong hoặc đóng cửa sổ đó rồi thử lại"}));
         }
         *watching = true;
     }
+    // Mở Chrome NGAY trong request để lỗi (thiếu màn hình, Chrome chết…) hiện lên dashboard thay vì chỉ nằm trong log.
+    // Mỗi acc mới = một "máy" mới: seed riêng → profile Chrome riêng + vân tay riêng.
+    let seed = crate::fingerprint::new_seed();
+    let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
+    crate::elog!("[login-flow] vân tay mới: {} {} cores={} gpu={}", fp.user_agent(), fp.screen.0, fp.cores, fp.gpu_renderer);
+    let (browser, ws_url) = match crate::chrome_capture::launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", false).await {
+        Ok(x) => x,
+        Err(e) => {
+            *st.login_watching.lk() = false;
+            crate::elog!("[login-flow] lỗi: {:#}", e);
+            return Json(json!({"ok": false, "error": format!("không mở được Chrome: {:#}", e)}));
+        }
+    };
+    crate::elog!("[login-flow] Chrome riêng của acc đã mở (cổng {})", browser.port);
     let st2 = st.clone();
     tokio::spawn(async move {
-        let res = login_flow(st2.clone()).await;
-        {
-            let mut watching = st2.login_watching.lk();
-            *watching = false;
-        }
+        let res = login_flow(st2.clone(), seed, browser, ws_url).await;
+        *st2.login_watching.lk() = false;
         if let Err(e) = res {
-            crate::elog!("[login-flow] lỗi: {}", e);
+            crate::elog!("[login-flow] lỗi: {:#}", e);
         }
     });
     Json(json!({
@@ -2710,16 +2721,8 @@ async fn device_refresh_loop(st: Arc<AppState>) {
     }
 }
 
-async fn login_flow(st: Arc<AppState>) -> Result<()> {
-    // FLOW CŨ (user thích): mở tab DS trong Chrome chính (CDP 9333) → canh → tự tắt tab.
-    // Chrome chính = profile real user → không dính lỗi device environment.
-    // Mỗi acc mới = một "máy" mới: seed riêng → profile Chrome riêng + vân tay riêng (UA, canvas, WebGL, màn hình…)
-    let seed = crate::fingerprint::new_seed();
-    let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
-    crate::elog!("[login-flow] vân tay mới: {} {} cores={} gpu={}", fp.user_agent(), fp.screen.0, fp.cores, fp.gpu_renderer);
-    let (browser, ws_url) = crate::chrome_capture::launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", false).await?;
-    crate::elog!("[login-flow] Chrome riêng của acc đã mở (cổng {})", browser.port);
-
+/// Canh cửa sổ login đã mở tới khi đăng nhập xong (tối đa 10 phút), tắt Chrome (giữ profile), lưu acc.
+async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capture::AccountBrowser, ws_url: String) -> Result<()> {
     // canh login tới 10 phút, xong thì tắt Chrome (giữ profile)
     let res = crate::chrome_capture::watch_login_tab(ws_url, 600, browser.port, &seed).await;
     browser.close();
