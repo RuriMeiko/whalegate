@@ -24,7 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 # Tự cập nhật: giải nén bản release tải từ GitHub (tar.gz cho unix, zip cho Windows)
 flate2 = "1"
 tar = "0.4"
-[target.'cfg(windows)'.dependencies]
+# zip: giải nén bản release Windows, và đóng gói tiện ích trình duyệt cho dashboard tải về
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Deploy chạy target/release: PoW (Keccak) và parse DSML hưởng lợi trực tiếp từ LTO + 1 codegen unit.

@@ -196,15 +196,26 @@ systemctl --user daemon-reload && systemctl --user enable --now whalegate
 
 Accounts are stored in `~/.whalegate/accounts.json`, which you can override with `DS_ACCOUNTS_PATH`. Upgrading from ds-harness moves `~/.ds-harness` there automatically. That file holds **live session tokens**: never commit or share it.
 
-Every account is one "machine" to DeepSeek: a TLS/HTTP2 fingerprint (a real Chrome/Edge build emulated by wreq), a user agent, a device id, cookies, a timezone and languages. All of these stay fixed for the life of the account, because a live session suddenly showing up on a different machine is exactly what gets flagged. There are three ways to add an account, and they differ in *which* machine the account lives on.
+Every account is one "machine" to DeepSeek: a TLS/HTTP2 fingerprint (a real Chrome/Edge build emulated by wreq), a user agent, a device id, cookies, a timezone and languages. All of these stay fixed for the life of the account, because a live session suddenly showing up on a different machine is exactly what gets flagged. There are four ways to add an account (tabs in **+ Thêm**), and they differ in *which* machine the account lives on.
 
 | | Machine the account uses | Cookie refresh |
 |---|---|---|
-| **Bookmarklet** | Your own browser: its UA, screen, GPU, timezone, languages and device id | Click the bookmarklet again on a DeepSeek tab |
+| **Extension** | Your own browser, with every cookie including HttpOnly ones | Click the extension again on a DeepSeek tab |
+| **Bookmarklet** | Your own browser, without HttpOnly cookies (`ds_session_id`) | Click the bookmarklet again on a DeepSeek tab |
 | **Chrome login** | A new dedicated Chrome with its own generated fingerprint and profile | Automatic, every `DS_DEVICE_REFRESH_HOURS` (default 6h) |
 | **Paste a token** | Derived from the token (fixed, but not a real browser) | None |
 
-### Option 1: bookmarklet (recommended)
+### Option 1: browser extension (recommended)
+
+The extension does what the bookmarklet does, and also reads HttpOnly cookies such as `ds_session_id`. A page's own JavaScript can never read those, but an extension with the `cookies` permission can, just as CDP does for Chrome login.
+
+1. In **+ Thêm → Tiện ích**, click **Tải tiện ích** and unzip it. The download already points at the dashboard you opened it from.
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the unzipped `whalegate-extension` folder.
+3. On a logged-in `chat.deepseek.com` tab, click the whalegate icon. The account is added (or refreshed, if it is already in the pool), and the result shows on the DeepSeek tab.
+
+The extension can read cookies only on `chat.deepseek.com` and talk only to the dashboard's host. It sends the token, device id, cookies and browser profile straight to `/api/accounts`, the same request the bookmarklet makes.
+
+### Option 2: bookmarklet
 
 ```mermaid
 sequenceDiagram
@@ -229,9 +240,9 @@ sequenceDiagram
 
 The bundle never touches the URL, browser history or the network: it goes tab-to-tab with `postMessage`, and the dashboard only accepts it from the `chat.deepseek.com` tab that opened it, so another site cannot push an account into your pool. The account then uses your browser's own machine: the closest wreq Chrome/Edge build to your browser version (a browser newer than the table snaps the whole fingerprint to the nearest build), your OS, your device id, and your timezone and languages in `x-client-timezone-offset` / `Accept-Language`. The gateway never opens a separate Chrome for these accounts. Cookies DeepSeek sets on responses are kept automatically, but the WAF cookie (`aws-waf-token`) can only be renewed by a real browser. To refresh it, click the bookmarklet again on a DeepSeek tab: an account that is already in the pool is updated in place (cookies merged, device and browser profile refreshed) instead of being added twice. If you signed in again and got a new token, the same click swaps the new token into the existing account.
 
-If the bookmarklet can't run, the same collector is available under **Dán thủ công**: copy the command, run it in the DevTools console of the DeepSeek tab, and paste the result.
+If the bookmarklet can't run, the same collector is available under **Dán token**: copy the console command, run it in the DevTools console of the DeepSeek tab, and paste the result.
 
-### Option 2: Chrome login
+### Option 3: Chrome login
 
 ```mermaid
 flowchart LR
@@ -247,9 +258,9 @@ flowchart LR
 - Under systemd the gateway picks up `DISPLAY` / `WAYLAND_DISPLAY` from the user session so the window can open.
 - If the same DeepSeek user logs in again, the existing account's token is replaced rather than duplicated. The account moves to the new Chrome device, and any bookmarklet profile it had is dropped.
 - The **thiết bị** button on an account refreshes its device cookies right away.
-- **Quét tab Chrome** captures every already-logged-in `chat.deepseek.com` tab from your main Chrome. Start Chrome with `--remote-debugging-port=9333` first.
+- **Quét Chrome chính** (in the Chrome riêng tab) captures every already-logged-in `chat.deepseek.com` tab from your main Chrome. Start Chrome with `--remote-debugging-port=9333` first.
 
-### Option 3: paste a token
+### Option 4: paste a token
 
 On a logged-in `chat.deepseek.com` tab, open DevTools → Console and run:
 
@@ -257,7 +268,7 @@ On a logged-in `chat.deepseek.com` tab, open DevTools → Console and run:
 copy(localStorage.userToken)
 ```
 
-Paste the result into the box under **Dán thủ công**. Any of these shapes is accepted: `{"value":"…","__version":"0"}`, a quoted string, `Bearer …`, or the bare token. The token is verified before it is saved, and cookies are optional. You can also add one through the API, optionally with a `browser` profile (the bookmarklet's fields: `user_agent`, `cores`, `memory_gb`, `screen`, `avail`, `dpr`, `tz`, `tz_offset`, `langs`, `gpu_vendor`, `gpu_renderer`, `device_id`):
+Paste the result into **+ Thêm → Dán token**. Any of these shapes is accepted: `{"value":"…","__version":"0"}`, a quoted string, `Bearer …`, or the bare token. The token is verified before it is saved, and cookies are optional. You can also add one through the API, optionally with a `browser` profile (the bookmarklet's fields: `user_agent`, `cores`, `memory_gb`, `screen`, `avail`, `dpr`, `tz`, `tz_offset`, `langs`, `gpu_vendor`, `gpu_renderer`, `device_id`):
 
 ```bash
 curl -X POST http://127.0.0.1:8790/api/accounts \

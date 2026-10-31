@@ -108,14 +108,22 @@
   .cmd code { border: 0; padding: 0; font-size: 12.5px; }
   .cmd span { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; }
   .cmd.done span { color: var(--ok); }
-  /* bookmarklet: kéo lên thanh bookmark, nên phải trông như một nút cầm được */
-  .cmd.bm { cursor: grab; text-decoration: none; }
+  /* bookmarklet: kéo lên thanh bookmark, nên phải trông như một nút cầm được (là thẻ <a>, đừng để màu link) */
+  .cmd.bm { cursor: grab; text-decoration: none; color: var(--ink); border: 1px dashed var(--ink); margin: 0; }
   .cmd.bm:active { cursor: grabbing; }
-  .cmd.bm span { color: var(--ink); }
-  .lead { margin: 0 0 10px; }
-  details#advAdd { margin: 4px 0 0; }
-  details#advAdd summary { cursor: pointer; font: 12px/1.6 var(--mono); color: var(--mute); margin-bottom: 8px; }
-  details#advAdd[open] summary { color: var(--ink); }
+  /* hộp thêm acc: mỗi cách một tab, một dòng hướng dẫn + một hành động */
+  .tabs { display: flex; border-bottom: 1px solid var(--ink); }
+  .tabs button { flex: 1; border: 0; border-right: 1px solid var(--hair); background: none; padding: 9px 6px; font: 12px/1 var(--mono); color: var(--mute); cursor: pointer; }
+  .tabs button:last-child { border-right: 0; }
+  .tabs button[aria-selected="true"] { color: var(--bg); background: var(--ink); }
+  .dlg section p { color: var(--mute); }
+  .dlg section .btns { flex-wrap: wrap; align-items: center; }
+  .dlg section .btns input { flex: 1 1 140px; min-width: 0; }
+  .dlg section textarea { margin-bottom: 10px; }
+  .steps { margin: 0; padding-left: 18px; font: 13px/1.5 var(--sans); }
+  .steps li { margin: 0 0 10px; }
+  .steps li:last-child { margin: 0; }
+  .steps .btn { margin-right: 6px; }
   .fl { display: block; font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; margin: 12px 0 6px; }
   .fl:first-child { margin-top: 0; }
   .fl small { text-transform: none; letter-spacing: 0; }
@@ -221,7 +229,7 @@
   </div>
 
   <div id="authBar" role="alert">
-    <span class="t"><span id="authTxt"></span><small>Web DeepSeek không có cách gia hạn token đã bị huỷ. Acc thêm bằng bookmarklet: đăng nhập lại trên trình duyệt đó rồi bấm bookmarklet. Acc đăng nhập qua Chrome: bấm "đăng nhập lại" trên acc. Acc dán token: bấm "sửa" và dán token mới.</small></span>
+    <span class="t"><span id="authTxt"></span><small>Đăng nhập lại: nút trên acc, hoặc bấm lại tiện ích/bookmarklet trên tab DeepSeek.</small></span>
     <button class="sm ghost" onclick="hideAuthBar()" aria-label="Ẩn">×</button>
   </div>
 
@@ -256,26 +264,32 @@
 <div id="addModal" class="modal" onclick="if(event.target===this)closeAdd()">
   <div class="dlg">
     <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeAdd()">×</button></div>
-    <div class="inner">
-      <p class="lead">Kéo nút này lên thanh bookmark <b>một lần</b>. Sau đó, khi đang ở tab đã đăng nhập chat.deepseek.com, bấm bookmark đó là xong — không cần F12, không phải copy gì.</p>
-      <a class="cmd bm" id="bmLink" href="#" onclick="return false" draggable="true" title="Kéo lên thanh bookmark"><code>Thêm vào whalegate</code><span>kéo lên đây</span></a>
-      <p class="sub" id="bmWhere"></p>
-      <p class="sub">Bookmarklet gom token, device id, cookie đọc được, UA, màn hình, múi giờ, ngôn ngữ, GPU, rồi mở tab dashboard và chuyển thẳng dữ liệu sang tab đó (postMessage). Dữ liệu <b>không nằm trong URL</b>, không vào lịch sử, không đi qua mạng; dashboard chỉ nhận từ đúng tab chat.deepseek.com đã mở nó.</p>
-      <details id="advAdd">
-        <summary>Dán thủ công (dự phòng)</summary>
-        <p>Nếu bookmarklet không dùng được: mở tab đã đăng nhập chat.deepseek.com → F12 → Console, dán lệnh dưới rồi chạy, sau đó dán kết quả vào ô.</p>
-        <button class="cmd" id="cmdCopy" onclick="copyCmd()" title="Bấm để copy"><code>copy(await (…)())</code><span>copy</span></button>
-        <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder='{"token":"…","browser":{…}} hoặc token trần'></textarea>
-      </details>
-      <div class="btns" style="margin-top:10px"><input type="text" id="lblIn" style="flex:1;min-width:0" placeholder="nhãn (tuỳ chọn)" aria-label="Nhãn" autocomplete="off"><button class="solid" id="btnAdd" onclick="addManual()">Thêm</button></div>
-      <div class="alt">
-        <p>Hoặc đăng nhập trong một cửa sổ Chrome riêng (vân tay riêng); đăng nhập xong cửa sổ tự đóng.</p>
-        <button id="btnLogin" onclick="loginStart()">Đăng nhập qua Chrome</button>
-      </div>
+    <div class="tabs" role="tablist" aria-label="Cách thêm">
+      <button role="tab" data-t="ext" onclick="addTab('ext')">Tiện ích</button>
+      <button role="tab" data-t="bm" onclick="addTab('bm')">Bookmarklet</button>
+      <button role="tab" data-t="chrome" onclick="addTab('chrome')">Chrome riêng</button>
+      <button role="tab" data-t="paste" onclick="addTab('paste')">Dán token</button>
     </div>
-    <div class="foot">
-      <button class="ghost sm" id="btnScan" onclick="captureAll()">Quét tab Chrome</button>
-      <span class="hint">acc đang đăng nhập trong Chrome chính</span>
+    <div class="inner">
+      <section data-p="ext">
+        <p>Đủ mọi cookie, kể cả HttpOnly. Cài một lần, sau đó bấm biểu tượng whalegate trên tab chat.deepseek.com.</p>
+        <ol class="steps">
+          <li><a class="btn" href="/api/extension.zip" download>Tải tiện ích</a> rồi giải nén</li>
+          <li><code>chrome://extensions</code> → bật Developer mode → Load unpacked → chọn thư mục vừa giải nén</li>
+        </ol>
+      </section>
+      <section data-p="bm" hidden>
+        <p>Kéo lên thanh bookmark một lần, sau đó bấm trên tab chat.deepseek.com. Không lấy được cookie HttpOnly.</p>
+        <a class="cmd bm" id="bmLink" href="#" onclick="return false" draggable="true"><code>Thêm vào whalegate</code><span>kéo lên bookmark</span></a>
+      </section>
+      <section data-p="chrome" hidden>
+        <p>Mở cửa sổ Chrome có vân tay riêng. Đăng nhập xong cửa sổ tự đóng.</p>
+        <div class="btns"><button class="ghost" id="btnScan" onclick="captureAll()" title="Lấy các tab chat.deepseek.com đang đăng nhập trong Chrome chính (cần mở Chrome với --remote-debugging-port=9333)">Quét Chrome chính</button><button class="solid" id="btnLogin" onclick="loginStart()">Đăng nhập qua Chrome</button></div>
+      </section>
+      <section data-p="paste" hidden>
+        <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder="giá trị localStorage.userToken, hoặc kết quả lệnh console"></textarea>
+        <div class="btns"><button class="ghost sm" id="cmdCopy" onclick="copyCmd()" title="Lệnh chạy trong Console của tab chat.deepseek.com, gom token kèm hồ sơ trình duyệt">copy lệnh console</button><span class="sp"></span><input type="text" id="lblIn" placeholder="nhãn (tuỳ chọn)" aria-label="Nhãn" autocomplete="off"><button class="solid" id="btnAdd" onclick="addManual()">Thêm</button></div>
+      </section>
     </div>
   </div>
 </div>
@@ -488,7 +502,20 @@ function ask(title, text, okLabel, danger) {
 function askDone(v) { if (!ASK) return; const r = ASK; ASK = null; closeModal('cfmModal'); r(v); }
 
 /* ---- tài khoản ---- */
-function openAdd() { openModal('addModal'); refreshBookmarklet(); }
+function openAdd(tab) {
+  let t = tab;
+  if (!t) { try { t = localStorage.getItem('wg.addTab'); } catch (e) {} }
+  addTab(t || 'ext');
+  openModal('addModal'); refreshBookmarklet();
+}
+/// Hộp thêm acc: một tab cho mỗi cách; nhớ tab dùng lần trước.
+function addTab(t) {
+  if (!document.querySelector('#addModal [data-p="' + t + '"]')) t = 'ext';
+  document.querySelectorAll('#addModal [data-t]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.t === t)));
+  document.querySelectorAll('#addModal [data-p]').forEach((p) => { p.hidden = p.dataset.p !== t; });
+  try { localStorage.setItem('wg.addTab', t); } catch (e) {}
+  if (t === 'paste') setTimeout(() => $('tokIn').focus(), 60);
+}
 function closeAdd() { closeModal('addModal'); }
 
 const DS_ORIGIN = 'https://chat.deepseek.com';
@@ -562,7 +589,7 @@ function refreshBookmarklet() {
   const a = $('bmLink');
   if (!a) return;
   a.setAttribute('href', bookmarkletCode());
-  $('bmWhere').textContent = 'Bookmarklet trỏ về ' + location.host + ' — nếu whalegate chạy ở máy khác, hãy mở dashboard bằng địa chỉ của máy đó rồi kéo lại nút này.';
+  a.title = 'Kéo lên thanh bookmark · gửi về ' + location.host;
 }
 
 async function copyCmd() {
@@ -759,18 +786,13 @@ function accItem(a, perAcc) {
   // acc có thiết bị riêng (login qua Chrome): ghi lần làm mới cookie gần nhất
   const dev = a.device && a.device_refreshed_at ? ' · làm mới ' + ago(a.device_refreshed_at) : '';
   // acc thêm bằng bookmarklet: "máy" là trình duyệt gốc của user, không mở Chrome riêng
-  const bm = a.browser ? ' · trình duyệt gốc' : '';
+  const bm = a.browser ? (a.auth_dead_at ? ' · bấm lại tiện ích/bookmarklet trên tab DeepSeek' : ' · trình duyệt gốc') : '';
   const dead = a.auth_dead_at ? ' · mất token ' + ago(a.auth_dead_at) : '';
   more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}${dev}${bm}${dead}`), el('span', 'sp'), sw);
   const mk = (t, cls, fn) => { const b = el('button', 'sm ' + cls, t); b.onclick = fn; return b; };
   if (a.device && !a.auth_dead_at) { const b = mk('thiết bị', '', () => device(a)); b.title = 'Làm mới cookie thiết bị ngay (Chrome nền của acc)'; more.append(b); }
   // DS đã đăng xuất acc: acc Chrome/dán token → mở lại Chrome riêng của nó để bạn tự đăng nhập; acc bookmarklet → làm trên trình duyệt gốc
   if (a.auth_dead_at && !a.browser) { const b = mk('đăng nhập lại', 'solid', () => reloginAcc(a)); b.title = 'Mở Chrome riêng của acc này (giữ vân tay và phiên Google cũ) để bạn đăng nhập lại; xong tự thay token vào acc'; more.append(b); }
-  if (a.browser) {
-    const b = el('span', 'sub', a.auth_dead_at ? 'đăng nhập lại trên trình duyệt gốc rồi bấm bookmarklet' : 'vân tay từ trình duyệt của bạn');
-    b.title = 'Acc này thêm bằng bookmarklet: giữ UA, màn hình, múi giờ, ngôn ngữ, GPU và device id của chính trình duyệt gốc. Muốn làm mới cookie (hoặc đã đăng nhập lại) thì bấm bookmarklet trên tab chat.deepseek.com của trình duyệt đó.';
-    more.append(b);
-  }
   more.append(mk('sửa', '', () => openEdit(a)), mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label)), mk('xoá', 'del', () => del(a.id, a.label)));
   box.append(hd, more);
   return box;
@@ -838,8 +860,8 @@ function renderAuthBar(p) {
   const burst = p.logged_out_last_burst || 0;
   $('authTxt').innerHTML = '';
   $('authTxt').append(el('b', null, `DeepSeek đã đăng xuất ${n} acc`), burst >= 3
-    ? ` — ${burst} acc mất token cùng lúc quanh ${at}: DS huỷ session hàng loạt phía server, không phải lỗi từng acc.`
-    : ` — lần gần nhất ${at}. Các acc này đã được rút khỏi pool.`);
+    ? ` · ${burst} acc cùng lúc lúc ${at} (DS huỷ hàng loạt)`
+    : ` · lần gần nhất ${at}`);
   bar.classList.add('show');
 }
 function hideAuthBar() {
@@ -1336,7 +1358,7 @@ document.addEventListener('keydown', (e) => {
   history.replaceState(null, '', location.pathname + location.search);
   const src = window.opener;
   if (!src) return say('Tab này phải do bookmarklet mở từ chat.deepseek.com', 'err');
-  openAdd();
+  openAdd('bm');
   const t = say('Đang nhận dữ liệu từ chat.deepseek.com…', 'wait');
   let got = false;
   const done = () => { got = true; window.removeEventListener('message', onMsg); clearInterval(ping); if (t) t.remove(); };
@@ -1348,7 +1370,7 @@ document.addEventListener('keydown', (e) => {
     const w = say('Đang thêm tài khoản…', 'wait');
     addPayload(d, '')
       .then((res) => { if (w) w.remove(); say(addedText(res, true), 'ok'); closeAdd(); loadStats(); })
-      .catch((err) => { if (w) w.remove(); say(err.message, 'err'); $('advAdd').open = true; $('tokIn').value = JSON.stringify(d, null, 1); });
+      .catch((err) => { if (w) w.remove(); say(err.message, 'err'); addTab('paste'); $('tokIn').value = JSON.stringify(d, null, 1); });
   };
   window.addEventListener('message', onMsg);
   // tab gốc có thể đăng ký listener chậm hơn lúc tab này tải xong: gửi lại vài lần

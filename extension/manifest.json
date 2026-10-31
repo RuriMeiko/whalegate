@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "whalegate",
+  "version": "1.0.0",
+  "description": "Thêm tài khoản DeepSeek đang đăng nhập vào whalegate, đủ cả cookie HttpOnly.",
+  "action": { "default_title": "Thêm vào whalegate (bấm trên tab chat.deepseek.com)" },
+  "background": { "service_worker": "background.js" },
+  "permissions": ["cookies", "scripting", "activeTab"],
+  "host_permissions": ["https://chat.deepseek.com/*", "__WG_HOST_PATTERN__"]
+}

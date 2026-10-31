@@ -2762,6 +2762,41 @@ async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
     start_login(st, crate::fingerprint::new_seed()).await
 }
 
+/// Tiện ích trình duyệt (`extension/`) nén sẵn để "Load unpacked": đọc được cả cookie HttpOnly mà bookmarklet
+/// không đọc được. Địa chỉ dashboard lấy từ chính request tải về (giống bookmarklet), nên tiện ích gửi đúng về đây.
+async fn api_extension_zip(headers: axum::http::HeaderMap) -> Response {
+    let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("127.0.0.1:8790");
+    match extension_zip(host) {
+        Ok(bytes) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "application/zip"),
+                (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"whalegate-extension.zip\""),
+            ],
+            bytes,
+        ).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": format!("{:#}", e)}))).into_response(),
+    }
+}
+
+fn extension_zip(host: &str) -> Result<Vec<u8>> {
+    use std::io::Write;
+    // host đi thẳng vào manifest và JS: chỉ nhận host[:port] hợp lệ
+    if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)) {
+        anyhow::bail!("Host không hợp lệ: {}", host);
+    }
+    // match pattern của Chrome không mang cổng: http://127.0.0.1/* phủ mọi cổng của máy đó
+    let hostname = if host.starts_with('[') { host.split(']').next().map(|h| format!("{}]", h)).unwrap_or_default() } else { host.split(':').next().unwrap_or(host).to_string() };
+    let manifest = include_str!("../extension/manifest.json").replace("__WG_HOST_PATTERN__", &format!("http://{}/*", hostname));
+    let background = include_str!("../extension/background.js").replace("__WG_ORIGIN__", &format!("http://{}", host));
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, body) in [("manifest.json", manifest), ("background.js", background)] {
+        z.start_file(format!("whalegate-extension/{}", name), opt)?;
+        z.write_all(body.as_bytes())?;
+    }
+    Ok(z.finish()?.into_inner())
+}
+
 /// Đăng nhập lại acc DS đã đăng xuất, mở đúng Chrome riêng của nó (profile `profiles/<seed>`, còn phiên Google)
 /// với đúng vân tay cũ. Người dùng tự bấm đăng nhập trong cửa sổ — whalegate không tự điền gì. Đăng nhập xong,
 /// `login_flow` nhận ra cùng người dùng qua uid và thay token vào chính acc này.
@@ -2772,7 +2807,7 @@ async fn api_account_relogin(
     let acc = st.store.read().await.accounts.iter().find(|a| a.id == id).map(|a| (a.fp_seed.clone(), a.browser.is_some(), a.label.clone()));
     let Some((seed, has_browser, label)) = acc else { return Json(json!({"ok": false, "error": "không tìm thấy tài khoản"})) };
     if has_browser {
-        return Json(json!({"ok": false, "error": "acc này thêm bằng bookmarklet: đăng nhập lại trên trình duyệt đó rồi bấm bookmarklet trên tab chat.deepseek.com"}));
+        return Json(json!({"ok": false, "error": "acc này dùng trình duyệt gốc: đăng nhập lại trên trình duyệt đó rồi bấm tiện ích/bookmarklet trên tab chat.deepseek.com"}));
     }
     // acc dán token chưa từng có Chrome riêng: mở một máy mới — session cũ đã chết nên không có gì để "giữ máy"
     let seed = seed
@@ -2829,7 +2864,7 @@ async fn give_device(st: &Arc<AppState>, id: &str) -> Result<String> {
     // Acc thêm bằng bookmarklet đang sống trên đúng trình duyệt của user: dựng Chrome riêng cho nó là tự tạo
     // một "máy" khác (UA/GPU/device id khác) → đúng thứ dễ bị đánh dấu. Cookie của nó do chính user làm mới.
     if has_browser {
-        anyhow::bail!("tài khoản này dùng trình duyệt gốc (bookmarklet) — không tự làm mới thiết bị; bấm bookmarklet trên tab chat.deepseek.com của trình duyệt đó để làm mới");
+        anyhow::bail!("tài khoản này dùng trình duyệt gốc — không tự làm mới thiết bị; bấm tiện ích/bookmarklet trên tab chat.deepseek.com của trình duyệt đó để làm mới");
     }
     let seed = seed.ok_or_else(|| anyhow::anyhow!("tài khoản này không có thiết bị riêng (chỉ acc đăng nhập qua Chrome mới làm mới được)"))?;
     let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
@@ -3169,6 +3204,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/accounts/{id}/reset", post(api_reset_account))
         .route("/api/accounts/{id}/device", post(api_account_device))
         .route("/api/accounts/{id}/relogin", post(api_account_relogin))
+        .route("/api/extension.zip", get(api_extension_zip))
         .route("/api/capture", post(api_capture_from_chrome))
         .route("/api/login_start", post(api_login_start))
         .route("/api/stats", get(api_stats))
@@ -3905,5 +3941,31 @@ mod proxy_guard_tests {
             h.insert(k, axum::http::HeaderValue::from_static("1.2.3.4"));
             assert!(is_proxied(&h), "{k}");
         }
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    #[test]
+    fn extension_zip_points_at_the_dashboard() {
+        let bytes = extension_zip("127.0.0.1:8790").unwrap();
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut read = |n: &str| { let mut s = String::new(); std::io::Read::read_to_string(&mut z.by_name(n).unwrap(), &mut s).unwrap(); s };
+        let m: Value = serde_json::from_str(&read("whalegate-extension/manifest.json")).unwrap();
+        assert_eq!(m["host_permissions"][1], "http://127.0.0.1/*");
+        assert!(m["permissions"].as_array().unwrap().iter().any(|p| p == "cookies"));
+        let bg = read("whalegate-extension/background.js");
+        assert!(bg.contains(r#"const WHALEGATE = "http://127.0.0.1:8790";"#));
+        assert!(!bg.contains("__WG_"));
+        // host lạ (chèn ký tự vào JS/manifest) bị từ chối
+        assert!(extension_zip("evil\";alert(1)//").is_err());
+        assert!(extension_zip("").is_err());
+        let v6 = extension_zip("[::1]:8790").unwrap();
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(v6)).unwrap();
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("whalegate-extension/manifest.json").unwrap(), &mut s).unwrap();
+        assert!(s.contains("http://[::1]/*"));
     }
 }
