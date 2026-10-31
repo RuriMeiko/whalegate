@@ -233,3 +233,23 @@ mod tests {
         assert_eq!(build_prefix("abc", 1792655686557), "abc_1792655686557_");
     }
 }
+
+#[cfg(test)]
+mod live_challenge_tests {
+    use super::*;
+
+    /// Challenge thật lấy từ chat.deepseek.com (2026-10-31, web 2.7.0, difficulty 144000, DeepSeekHashV1):
+    /// solver phải tìm được nonce mà hash khớp, tức thuật toán PoW của DS chưa đổi.
+    #[test]
+    fn solves_real_challenges_from_web_2_7_0() {
+        for (challenge, salt, expire_at) in [
+            ("7e3e3a2f349700b8b454c0ba61d52731d8803e21d6d3a4cc08d02ab40ba40433", "ad32a19bf8f2386ac041", 1793415347125u64),
+            ("2de4b68fc313d4cceda6c7801eba4132041aa53dff32455ad3c3fbd99386eff9", "e058bd8cc54abdb9889e", 1793415347252u64),
+        ] {
+            let n = solve_pow(challenge, salt, expire_at, 144000).expect("không giải được challenge thật");
+            let h = deepseek_hash_v1(format!("{}{}", build_prefix(salt, expire_at), n).as_bytes());
+            assert_eq!(hex(&h), challenge);
+            println!("nonce={n}");
+        }
+    }
+}
