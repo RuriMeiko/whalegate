@@ -626,7 +626,7 @@ function ago(ts) {
   const s = Math.max(0, Date.now() / 1000 - ts);
   return s < 3600 ? Math.round(s / 60) + ' phút trước' : s < 86400 ? Math.round(s / 3600) + ' giờ trước' : Math.round(s / 86400) + ' ngày trước';
 }
-async function relogin(a) {
+async function reloginAcc(a) {
   try {
     const d = await post('/api/accounts/' + a.id + '/relogin');
     if (!d.ok) return say(d.error, 'err');
@@ -735,10 +735,10 @@ async function bulk(kind) {
 
 let OPEN_ACC = null;
 function accItem(a, perAcc) {
-  const relogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
+  const needsRelogin = a.fail_streak >= 3 && /error|throttled/.test(a.last_status || '');
   let kind = '', text = 'sẵn sàng';
   if (a.auth_dead_at) { kind = 'bad'; text = 'DS đã đăng xuất'; }
-  else if (relogin) { kind = 'bad'; text = 'cần đăng nhập lại'; }
+  else if (needsRelogin) { kind = 'bad'; text = 'cần đăng nhập lại'; }
   else if (a.cooldown_left_secs > 0) { kind = 'warn'; text = `nghỉ ${a.cooldown_left_secs}s`; }
   else if (!/ok/.test(a.last_status || '')) { kind = 'bad'; text = a.last_status || 'lỗi'; }
   else if (a.in_flight > 0) { kind = 'run'; text = `đang chạy ${a.in_flight}/${perAcc}`; }
@@ -765,7 +765,7 @@ function accItem(a, perAcc) {
   const mk = (t, cls, fn) => { const b = el('button', 'sm ' + cls, t); b.onclick = fn; return b; };
   if (a.device && !a.auth_dead_at) { const b = mk('thiết bị', '', () => device(a)); b.title = 'Làm mới cookie thiết bị ngay (Chrome nền của acc)'; more.append(b); }
   // DS đã đăng xuất acc: acc Chrome/dán token → mở lại Chrome riêng của nó để bạn tự đăng nhập; acc bookmarklet → làm trên trình duyệt gốc
-  if (a.auth_dead_at && !a.browser) { const b = mk('đăng nhập lại', 'solid', () => relogin(a)); b.title = 'Mở Chrome riêng của acc này (giữ vân tay và phiên Google cũ) để bạn đăng nhập lại; xong tự thay token vào acc'; more.append(b); }
+  if (a.auth_dead_at && !a.browser) { const b = mk('đăng nhập lại', 'solid', () => reloginAcc(a)); b.title = 'Mở Chrome riêng của acc này (giữ vân tay và phiên Google cũ) để bạn đăng nhập lại; xong tự thay token vào acc'; more.append(b); }
   if (a.browser) {
     const b = el('span', 'sub', a.auth_dead_at ? 'đăng nhập lại trên trình duyệt gốc rồi bấm bookmarklet' : 'vân tay từ trình duyệt của bạn');
     b.title = 'Acc này thêm bằng bookmarklet: giữ UA, màn hình, múi giờ, ngôn ngữ, GPU và device id của chính trình duyệt gốc. Muốn làm mới cookie (hoặc đã đăng nhập lại) thì bấm bookmarklet trên tab chat.deepseek.com của trình duyệt đó.';
