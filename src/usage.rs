@@ -141,9 +141,10 @@ pub fn spawn_background() {
 // ---------- bảng giá live ----------
 
 async fn fetch_pricing() -> anyhow::Result<Pricing> {
-    let html = reqwest::Client::builder()
+    // trang giá công khai: đi bằng một trình duyệt giả lập cố định (không gắn với acc nào), không còn UA Chrome tự khai
+    let html = wreq::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/155.0.0.0 Safari/537.36")
+        .emulation(crate::fingerprint::Fingerprint::from_seed("whalegate-pricing").emulation())
         .build()?
         .get(PRICING_URL).send().await?.error_for_status()?.text().await?;
     parse_pricing(&html, now_secs()).ok_or_else(|| anyhow::anyhow!("không đọc được bảng giá"))

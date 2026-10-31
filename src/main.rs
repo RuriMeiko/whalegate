@@ -3,6 +3,7 @@
 mod logbuf;
 mod chat;
 mod client;
+mod fingerprint;
 mod chrome_capture;
 mod pow;
 mod server;
