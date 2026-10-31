@@ -2189,7 +2189,7 @@ dependencies = [
 
 [[package]]
 name = "whalegate"
-version = "0.5.21"
+version = "0.5.22"
 dependencies = [
  "anyhow",
  "async-stream",
