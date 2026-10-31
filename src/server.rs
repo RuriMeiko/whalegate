@@ -2938,7 +2938,7 @@ fn adopt_chrome_device(a: &mut Account, session: &crate::chrome_capture::Capture
 async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capture::AccountBrowser, ws_url: String) -> Result<()> {
     // canh login tới 10 phút, xong thì tắt Chrome (giữ profile)
     let res = crate::chrome_capture::watch_login_tab(ws_url, 600, browser.port, &seed).await;
-    browser.close();
+    browser.close().await;
 
     let session = res?;
     crate::elog!("[login-flow] captured: {:?}", session.email);

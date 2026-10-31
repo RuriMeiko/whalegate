@@ -1047,7 +1047,9 @@ mod header_tests {
 mod fingerprint_tests {
     use super::*;
 
+    /// Gọi tls.peet.ws thật (cần mạng): `cargo test profile_is_stable -- --ignored --nocapture`
     #[test]
+    #[ignore]
     fn profile_is_stable_per_token_and_varies_across_tokens() {
         let ua = |t: &str| {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

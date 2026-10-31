@@ -258,7 +258,7 @@ flowchart LR
 - Under systemd the gateway picks up `DISPLAY` / `WAYLAND_DISPLAY` from the user session so the window can open.
 - If the same DeepSeek user logs in again, the existing account's token is replaced rather than duplicated. The account moves to the new Chrome device, and any bookmarklet profile it had is dropped.
 - The **thiết bị** button on an account refreshes its device cookies right away.
-- **Quét Chrome chính** (in the Chrome riêng tab) captures every already-logged-in `chat.deepseek.com` tab from your main Chrome. Start Chrome with `--remote-debugging-port=9333` first.
+- **Quét Chrome chính** (in the Chrome riêng tab) captures every logged-in `chat.deepseek.com` tab from a Chrome started with `--remote-debugging-port=9333`. Since Chrome 136 that flag is ignored for the default profile, so it only works with a separate `--user-data-dir`; for your everyday Chrome, use the extension instead.
 
 ### Option 4: paste a token
 
@@ -755,7 +755,7 @@ The `DeepSeekHashV1` PoW is SHA3-256 without round 0 of keccak-f, ported 1:1 fro
 - Tool calls arrive in one chunk when the model finishes the block, not as streamed argument deltas.
 - Sampling controls (`temperature`, `top_p`, `max_tokens`, `stop`, `response_format`) have no web equivalent.
 - No embeddings endpoint.
-- Chrome/CDP login is tested on Linux. macOS and Windows builds find Chrome in its standard locations (or `DS_CHROME_BIN`), but are less exercised.
+- Chrome login is tested on Linux, macOS and Windows in CI (`.github/workflows/ci.yml`): find Chrome, open it with the account's fingerprint, close it cleanly, reopen the same profile with its cookies intact. whalegate finds Chrome in the standard locations of each OS (`/Applications` and `~/Applications` on macOS; `%ProgramFiles%`, `%LOCALAPPDATA%` and the registry's App Paths on Windows), then falls back to Chromium, Edge or Brave. Set `DS_CHROME_BIN` to pick another browser.
 - Release binaries aren't code-signed, so macOS Gatekeeper and Windows SmartScreen may ask once.
 
 ---

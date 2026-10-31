@@ -284,7 +284,7 @@
       </section>
       <section data-p="chrome" hidden>
         <p>Mở cửa sổ Chrome có vân tay riêng. Đăng nhập xong cửa sổ tự đóng.</p>
-        <div class="btns"><button class="ghost" id="btnScan" onclick="captureAll()" title="Lấy các tab chat.deepseek.com đang đăng nhập trong Chrome chính (cần mở Chrome với --remote-debugging-port=9333)">Quét Chrome chính</button><button class="solid" id="btnLogin" onclick="loginStart()">Đăng nhập qua Chrome</button></div>
+        <div class="btns"><button class="ghost" id="btnScan" onclick="captureAll()" title="Lấy các tab chat.deepseek.com đang đăng nhập từ một Chrome mở với --remote-debugging-port=9333. Từ Chrome 136 cờ này bị bỏ qua ở profile mặc định (cần thêm --user-data-dir riêng); với Chrome hằng ngày hãy dùng tab Tiện ích.">Quét Chrome chính</button><button class="solid" id="btnLogin" onclick="loginStart()">Đăng nhập qua Chrome</button></div>
       </section>
       <section data-p="paste" hidden>
         <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder="giá trị localStorage.userToken, hoặc kết quả lệnh console"></textarea>

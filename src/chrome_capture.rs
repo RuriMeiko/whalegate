@@ -43,41 +43,89 @@ fn pick_cdp_port() -> Result<u16> {
     bail!("không tìm được cổng CDP trống trong 40000–60000")
 }
 
-/// Tìm binary Chrome trên máy: DS_CHROME_BIN → đường dẫn cài mặc định (macOS/Windows) → tên lệnh trong PATH.
+/// Tìm binary Chrome trên máy: DS_CHROME_BIN → chỗ cài mặc định của từng hệ → (Linux/macOS) tên lệnh trong PATH.
+/// Ưu tiên Chrome, rồi mới tới Chromium/Edge/Brave (cùng nhân Chromium, CDP như nhau).
 fn find_chrome_binary() -> Result<String> {
     if let Ok(bin) = std::env::var("DS_CHROME_BIN") {
         if !bin.trim().is_empty() { return Ok(bin); }
     }
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    let installed = [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
-        "/Applications/Chromium.app/Contents/MacOS/Chromium".to_string(),
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_string(),
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe".to_string(),
-        format!(r"{}\Google\Chrome\Application\chrome.exe", local),
-    ];
-    if let Some(p) = installed.iter().find(|p| std::path::Path::new(p.as_str()).is_file()) {
-        return Ok(p.clone());
+    if let Some(p) = chrome_candidates().into_iter().find(|p| std::path::Path::new(p).is_file()) {
+        return Ok(p);
     }
-    for bin in [
-        "google-chrome-stable",
-        "google-chrome",
-        "chromium-browser",
-        "chromium",
-        "chrome",
-    ] {
-        let ok = std::process::Command::new(bin)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            return Ok(bin.to_string());
+    #[cfg(windows)]
+    if let Some(p) = chrome_from_registry() {
+        return Ok(p);
+    }
+    // Windows không dò PATH: `chrome.exe --version` trên Windows không in phiên bản mà MỞ CỬA SỔ trình duyệt
+    if !cfg!(windows) {
+        for bin in ["google-chrome-stable", "google-chrome", "chromium-browser", "chromium", "microsoft-edge", "brave-browser"] {
+            let ok = std::process::Command::new(bin)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return Ok(bin.to_string());
+            }
         }
     }
-    bail!("không tìm thấy Chrome/Chromium trên máy — cài google-chrome hoặc đặt DS_CHROME_BIN")
+    bail!("không tìm thấy Chrome/Chromium/Edge trên máy — cài Google Chrome hoặc đặt DS_CHROME_BIN")
+}
+
+/// Đường dẫn cài đặt mặc định, theo thứ tự ưu tiên, cho hệ đang chạy.
+fn chrome_candidates() -> Vec<String> {
+    let mut out = Vec::new();
+    if cfg!(target_os = "macos") {
+        // cài cho mọi người (/Applications) hoặc chỉ cho user (~/Applications); binary nằm trong .app cùng tên
+        let home = std::env::var("HOME").unwrap_or_default();
+        for app in ["Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser"] {
+            for root in ["/Applications".to_string(), format!("{}/Applications", home)] {
+                out.push(format!("{}/{}.app/Contents/MacOS/{}", root, app, app));
+            }
+        }
+    } else if cfg!(windows) {
+        // theo biến môi trường chứ không cố định ổ C: (Windows cài ở ổ khác, hoặc Chrome cài riêng cho user ở LOCALAPPDATA)
+        let roots: Vec<String> = ["PROGRAMFILES", "PROGRAMFILES(X86)", "ProgramW6432", "LOCALAPPDATA"].iter()
+            .filter_map(|k| std::env::var(k).ok()).filter(|v| !v.is_empty()).collect();
+        for rel in [r"Google\Chrome\Application\chrome.exe", r"Chromium\Application\chrome.exe",
+                    r"Microsoft\Edge\Application\msedge.exe", r"BraveSoftware\Brave-Browser\Application\brave.exe"] {
+            for root in &roots {
+                let p = format!(r"{}\{}", root.trim_end_matches('\\'), rel);
+                if !out.contains(&p) { out.push(p); }
+            }
+        }
+    }
+    out
+}
+
+/// Chrome tự đăng ký đường dẫn ở `App Paths` khi cài (kể cả cài vào chỗ lạ) — đọc bằng `reg query`, không mở cửa sổ.
+#[cfg(windows)]
+fn chrome_from_registry() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    for exe in ["chrome.exe", "msedge.exe"] {
+        for hive in ["HKCU", "HKLM"] {
+            let key = format!(r"{}\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{}", hive, exe);
+            let Ok(o) = std::process::Command::new("reg").args(["query", &key, "/ve"]).creation_flags(CREATE_NO_WINDOW).output() else { continue };
+            if let Some(p) = parse_reg_default(&String::from_utf8_lossy(&o.stdout)) {
+                if std::path::Path::new(&p).is_file() { return Some(p); }
+            }
+        }
+    }
+    None
+}
+
+/// Giá trị mặc định trong output `reg query … /ve`: dòng `    (Default)    REG_SZ    C:\…\chrome.exe`
+/// (tên "(Default)" đổi theo ngôn ngữ Windows, nên chỉ dựa vào REG_SZ / REG_EXPAND_SZ).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_reg_default(out: &str) -> Option<String> {
+    out.lines().find_map(|l| {
+        let (_, v) = l.split_once("REG_SZ").or_else(|| l.split_once("REG_EXPAND_SZ"))?;
+        let v = v.trim().trim_matches('"');
+        (!v.is_empty()).then(|| v.to_string())
+    })
 }
 
 struct CdpConn {
@@ -317,11 +365,25 @@ fn browser_slot() -> std::sync::Arc<tokio::sync::Mutex<()>> {
 }
 
 impl AccountBrowser {
-    /// Tắt Chrome, GIỮ profile (cookie/localStorage/IndexedDB của acc nằm ở đó).
-    pub fn close(mut self) {
+    /// Tắt Chrome, GIỮ profile (cookie/localStorage/IndexedDB của acc nằm ở đó). Xin Chrome tự đóng qua CDP
+    /// `Browser.close` để nó kịp ghi cookie/phiên Google xuống profile — kill ngang (nhất là TerminateProcess trên
+    /// Windows) có thể mất phần chưa ghi, mà profile này còn dùng lại cho "đăng nhập lại" và làm mới thiết bị.
+    /// Trả true nếu Chrome tự đóng (không phải kill).
+    pub async fn close(mut self) -> bool {
         self.injector.abort();
+        if let Ok(Ok(ws)) = tokio::time::timeout(std::time::Duration::from_secs(2), browser_ws_url(self.port)).await {
+            if let Ok(Ok(mut c)) = tokio::time::timeout(std::time::Duration::from_secs(2), CdpConn::connect(&ws)).await {
+                // Chrome đóng kết nối ngay khi nhận lệnh, nên lỗi "connection closed" ở đây là bình thường
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), c.call("Browser.close", json!({}))).await;
+            }
+        }
+        for _ in 0..30 {
+            if let Ok(Some(_)) = self.child.try_wait() { return true; }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        false
     }
 }
 
@@ -435,7 +497,7 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
     });
     let browser = AccountBrowser { child, port, injector, _slot: slot };
     if tokio::time::timeout(std::time::Duration::from_secs(15), ready_rx).await.map_err(|_| ()).and_then(|r| r.map_err(|_| ())).is_err() {
-        browser.close();
+        browser.close().await;
         bail!("không áp được vân tay lên tab đầu trong 15s");
     }
 
@@ -449,7 +511,7 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
         }
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
-    browser.close();
+    browser.close().await;
     bail!("tab {} không xuất hiện sau khi áp vân tay", host)
 }
 
@@ -539,7 +601,7 @@ pub async fn materialize_device(fp: &crate::fingerprint::Fingerprint, token: &st
         let (cookies, device) = last.context("không đọc được phiên từ trang sau 30s")?;
         verify_and_build(token.to_string(), cookies, device, Some(&fp.seed)).await
     }.await;
-    browser.close();
+    browser.close().await;
     res
 }
 
@@ -564,7 +626,7 @@ mod live_tests {
                ts:Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)})})()"#;
             let r = c.call("Runtime.evaluate", json!({"expression": js, "returnByValue": true})).await.unwrap();
             println!("{seed}: {}\n  expect ua={} gpu={} sec-ch-ua={}", r["result"]["value"], fp.user_agent(), fp.gpu_renderer, fp.sec_ch_ua());
-            b.close();
+            b.close().await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
@@ -582,7 +644,7 @@ mod live_tests {
         let r = c.call("Runtime.evaluate", json!({"expression": js, "returnByValue": true})).await.unwrap();
         let rows: Vec<Vec<String>> = serde_json::from_str(r["result"]["value"].as_str().unwrap()).unwrap();
         for r in &rows { println!("ROW {} | {} | {} | {}", r[0], r[1], r[2], r[3]); }
-        b.close();
+        b.close().await;
     }
 
     /// WebGL params + font trong Chrome có vân tay: `cargo test live_gl_fonts -- --ignored --nocapture`
@@ -602,7 +664,7 @@ mod live_tests {
                 visible:fonts.filter(f=>w(f)!==base),check:fonts.filter(f=>document.fonts.check('16px "'+f+'"'))})})()"#;
             let r = c.call("Runtime.evaluate", json!({"expression": js, "returnByValue": true})).await.unwrap();
             println!("{seed} os={:?}: {}", fp.os, r["result"]["value"]);
-            b.close();
+            b.close().await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
@@ -618,7 +680,7 @@ mod live_tests {
         let js = r#"fetch('/api/all',{method:'POST',credentials:'include',headers:{'authorization':'Bearer x','content-type':'application/json','x-client-platform':'web','x-client-version':'2.7.0','x-client-locale':'vi','x-client-bundle-id':'com.deepseek.chat','x-client-timezone-offset':'25200','x-device-model':'','x-device-id':'d','x-ds-pow-response':'p'},body:'{}'}).then(r=>r.json()).then(j=>JSON.stringify(j.http2.sent_frames.filter(f=>f.headers).flatMap(f=>f.headers.map(h=>h.split(': ')[0]))))"#;
         let r = c.call("Runtime.evaluate", json!({"expression": js, "returnByValue": true, "awaitPromise": true})).await.unwrap();
         println!("CHROME_ORDER {}", r["result"]["value"]);
-        b.close();
+        b.close().await;
     }
 
     /// Token → thiết bị (headless), dùng acc đầu trong store, profile tạm rồi xoá: `cargo test live_materialize -- --ignored --nocapture`
@@ -636,5 +698,84 @@ mod live_tests {
             Err(e) => println!("MAT err {}s {e:#}", t.elapsed().as_secs()),
         }
         let _ = std::fs::remove_dir_all(account_profile_dir("live-mat"));
+    }
+}
+
+#[cfg(test)]
+mod os_tests {
+    use super::*;
+
+    #[test]
+    fn reg_query_default_value_any_locale() {
+        let en = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe\r\n    (Default)    REG_SZ    C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\r\n";
+        assert_eq!(parse_reg_default(en).as_deref(), Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe"));
+        // Windows tiếng Việt: tên giá trị mặc định khác, chỉ dựa vào REG_SZ
+        let vi = "    (Mặc định)    REG_SZ    D:\\Apps\\Chrome\\chrome.exe\r\n";
+        assert_eq!(parse_reg_default(vi).as_deref(), Some(r"D:\Apps\Chrome\chrome.exe"));
+        let quoted = "    (Default)    REG_EXPAND_SZ    \"C:\\x\\msedge.exe\"\r\n";
+        assert_eq!(parse_reg_default(quoted).as_deref(), Some(r"C:\x\msedge.exe"));
+        assert_eq!(parse_reg_default("ERROR: The system was unable to find the specified registry key or value."), None);
+    }
+
+    #[test]
+    fn candidates_match_this_os() {
+        let c = chrome_candidates();
+        if cfg!(target_os = "macos") {
+            assert_eq!(c[0], "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+            assert!(c.iter().any(|p| p.ends_with("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") && !p.starts_with("/Applications")), "thiếu ~/Applications");
+            assert!(c.iter().any(|p| p.contains("Microsoft Edge.app")));
+        } else if cfg!(windows) {
+            let pf = std::env::var("PROGRAMFILES").unwrap();
+            assert_eq!(c[0], format!(r"{}\Google\Chrome\Application\chrome.exe", pf.trim_end_matches('\\')));
+            assert!(c.iter().all(|p| !p.starts_with('\\')), "biến môi trường rỗng không được sinh đường dẫn tương đối: {c:?}");
+            assert!(c.iter().any(|p| p.ends_with("msedge.exe")));
+        } else {
+            assert!(c.is_empty(), "Linux dò PATH, không có đường dẫn cố định");
+        }
+    }
+
+    /// Chrome thật trên hệ đang chạy (CI chạy trên Linux/macOS/Windows):
+    /// `cargo test chrome_os_ -- --ignored --nocapture`, thêm WG_TEST_HEADED=1 để thử cả cửa sổ thật.
+    /// Tìm Chrome → mở với vân tay → vân tay có trên tab → đặt cookie → tắt êm → mở lại cùng profile → cookie còn.
+    #[tokio::test]
+    #[ignore]
+    async fn chrome_os_launch_fingerprint_close_reopen() {
+        println!("Chrome: {}", find_chrome_binary().expect("không tìm thấy Chrome"));
+        let mut modes = vec![true];
+        if std::env::var("WG_TEST_HEADED").map(|v| v == "1").unwrap_or(false) { modes.push(false); }
+        for headless in modes {
+            let seed = format!("ci-os-{}", if headless { "headless" } else { "headed" });
+            let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
+            let _ = std::fs::remove_dir_all(account_profile_dir(&seed));
+            let mark = uuid::Uuid::new_v4().simple().to_string();
+
+            let (b, ws) = launch_account_chrome(&fp, "https://example.com/", headless).await.expect("mở Chrome");
+            let mut c = CdpConn::connect(&ws).await.unwrap();
+            let mut seen = Value::Null;
+            for _ in 0..30 {
+                let r = c.call("Runtime.evaluate", json!({"expression": "JSON.stringify({ua:navigator.userAgent,cores:navigator.hardwareConcurrency,w:screen.width,href:location.href,ready:document.readyState})", "returnByValue": true})).await.unwrap();
+                seen = serde_json::from_str(r["result"]["value"].as_str().unwrap_or("null")).unwrap_or(Value::Null);
+                if seen["href"].as_str().unwrap_or("").starts_with("https://example.com") && seen["ready"] == "complete" { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            println!("[{}] tab: {}", if headless { "headless" } else { "headed" }, seen);
+            assert_eq!(seen["ua"], fp.user_agent(), "UA chưa được áp");
+            assert_eq!(seen["cores"], fp.cores);
+            assert_eq!(seen["w"], fp.screen.0);
+            c.call("Runtime.evaluate", json!({"expression": format!("document.cookie='wgci={mark}; max-age=3600; path=/'; document.cookie")})).await.unwrap();
+            let t = std::time::Instant::now();
+            let graceful = b.close().await;
+            println!("  đóng {} sau {}ms", if graceful { "êm (Browser.close)" } else { "bằng kill" }, t.elapsed().as_millis());
+            assert!(graceful, "Chrome không tự đóng — phải kill");
+
+            let (b, ws) = launch_account_chrome(&fp, "https://example.com/", headless).await.expect("mở lại Chrome");
+            let mut c = CdpConn::connect(&ws).await.unwrap();
+            let ck = c.call("Network.getCookies", json!({"urls": ["https://example.com/"]})).await.unwrap();
+            let kept = ck["cookies"].as_array().unwrap().iter().any(|k| k["name"] == "wgci" && k["value"] == mark.as_str());
+            b.close().await;
+            let _ = std::fs::remove_dir_all(account_profile_dir(&seed));
+            assert!(kept, "cookie không còn sau khi mở lại profile: {}", ck);
+            println!("  cookie còn sau khi mở lại profile ✓");
+        }
     }
 }
