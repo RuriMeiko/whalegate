@@ -166,7 +166,7 @@ Installer options are environment variables: `WHALEGATE_VERSION=v0.4.0`, `WHALEG
 
 ### Build from source
 
-Requires Rust ≥ 1.75.
+Requires Rust ≥ 1.85, plus `cmake` and `clang` (wreq builds BoringSSL; on Windows also NASM).
 
 ```bash
 git clone https://github.com/RuriMeiko/whalegate.git ~/whalegate
