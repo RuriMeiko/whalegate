@@ -159,11 +159,7 @@ fn repair_note(raw: &str, why: &str) -> String {
 
 /// Lưu mẫu response lỗi (parse trượt / call sai schema) vào ~/.whalegate/samples.jsonl để biến thành test sau này.
 fn save_sample(kind: &str, raw: &str) {
-    use std::io::Write;
-    let path = std::path::Path::new(&creds_dir()).join("samples.jsonl");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{}", json!({"t": now(), "kind": kind, "raw": raw}));
-    }
+    crate::logbuf::append_jsonl("samples.jsonl", json!({"t": now(), "kind": kind, "raw": raw}).to_string(), None);
 }
 
 /// Ước lượng token theo loại ký tự (đã đo trên tokenizer của DS web: Anh ~4,1 ký tự/token, code ~2,5, tiếng Việt ~1,9).
@@ -424,14 +420,7 @@ async fn trace_dispatch(st: &Arc<AppState>, kind: &str, acc_id: &str, attempt: u
         err.map(|e| format!(" LỖI {}", e)).unwrap_or_default());
     let line = json!({"t": now(), "kind": kind, "acc": acc_id, "label": label, "attempt": attempt, "mode": mode, "sid": sid,
         "images": images, "chars": prompt.chars().count(), "thinking": thinking, "search": search, "err": err, "tail": tail});
-    let path = std::path::Path::new(&creds_dir()).join("trace.jsonl");
-    if std::fs::metadata(&path).map(|m| m.len() > 20 * 1024 * 1024).unwrap_or(false) {
-        let _ = std::fs::rename(&path, path.with_extension("jsonl.1"));
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        use std::io::Write;
-        let _ = writeln!(f, "{}", line);
-    }
+    crate::logbuf::append_jsonl("trace.jsonl", line.to_string(), Some(20 * 1024 * 1024));
 }
 
 fn too_many(msg: &str) -> ApiErr {

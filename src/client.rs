@@ -783,12 +783,8 @@ pub async fn chat_stream(
         crate::elog!("[ds-timing] first_byte={}ms total={}ms bytes={} sse_chars={}", first_byte_ms.unwrap_or(0), t0.elapsed().as_millis(), total_bytes, sse_chars);
         if !has_content {
             crate::elog!("[ds-stream] stream không có fragment RESPONSE nào (nghi throttle/rỗng)");
-            use std::io::Write;
-            let path = std::path::Path::new(&crate::server::creds_dir()).join("samples.jsonl");
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                let _ = writeln!(f, "{}", json!({"t": t, "kind": "no-response", "raw": raw_head}));
-            }
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            crate::logbuf::append_jsonl("samples.jsonl", json!({"t": t, "kind": "no-response", "raw": raw_head}).to_string(), None);
         }
         if let Some(r) = truncated { let _ = tx.send(StreamEv::Truncated(r)); }
         let _ = tx.send(StreamEv::Done);

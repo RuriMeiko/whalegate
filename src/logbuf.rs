@@ -79,3 +79,69 @@ mod tests {
         assert!(since(0, 1)[0].line.chars().count() <= MAX_LINE + 1);
     }
 }
+
+/// Ghi một dòng JSONL vào `<thư mục dữ liệu>/<file>` mà không chặn luồng gọi: một thread ghi riêng nhận qua channel
+/// (giữ đúng thứ tự dòng, I/O đĩa không nằm trên runtime async). `rotate_at`: file vượt cỡ này (byte) thì đổi tên
+/// thành `<file>.1` (giữ một bản cũ) trước khi ghi tiếp.
+pub fn append_jsonl(file: &'static str, line: String, rotate_at: Option<u64>) {
+    use std::sync::mpsc::{channel, Sender};
+    static W: OnceLock<Mutex<Sender<(&'static str, String, Option<u64>)>>> = OnceLock::new();
+    let w = W.get_or_init(|| {
+        let (tx, rx) = channel::<(&'static str, String, Option<u64>)>();
+        std::thread::Builder::new()
+            .name("jsonl-writer".into())
+            .spawn(move || {
+                use std::io::Write;
+                for (file, line, rotate_at) in rx {
+                    let path = std::path::Path::new(&crate::server::creds_dir()).join(file);
+                    if let Some(max) = rotate_at {
+                        if std::fs::metadata(&path).map(|m| m.len() > max).unwrap_or(false) {
+                            let _ = std::fs::rename(&path, path.with_extension(format!("{}.1", path.extension().and_then(|e| e.to_str()).unwrap_or(""))));
+                        }
+                    }
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                        let _ = f.write_all(format!("{}\n", line).as_bytes());
+                    }
+                }
+            })
+            .expect("spawn jsonl writer thread");
+        Mutex::new(tx)
+    });
+    let _ = w.lock().unwrap_or_else(|e| e.into_inner()).send((file, line, rotate_at));
+}
+
+#[cfg(test)]
+mod jsonl_tests {
+    use super::*;
+
+    fn wait_for(path: &std::path::Path, lines: usize) -> Vec<String> {
+        for _ in 0..200 {
+            let v: Vec<String> = std::fs::read_to_string(path).unwrap_or_default().lines().map(|l| l.to_string()).collect();
+            if v.len() >= lines { return v; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("writer thread không ghi đủ {} dòng vào {}", lines, path.display());
+    }
+
+    #[test]
+    fn append_jsonl_keeps_order_and_rotates() {
+        let dir = std::path::PathBuf::from(crate::server::creds_dir());
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("order-test.jsonl");
+        let _ = std::fs::remove_file(&p);
+        for i in 0..50 { append_jsonl("order-test.jsonl", format!("{{\"i\":{}}}", i), None); }
+        let got = wait_for(&p, 50);
+        assert_eq!(got, (0..50).map(|i| format!("{{\"i\":{}}}", i)).collect::<Vec<_>>());
+
+        // vượt 10 byte → bản cũ thành .jsonl.1, file mới chỉ còn dòng vừa ghi
+        append_jsonl("order-test.jsonl", "{\"after\":1}".into(), Some(10));
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            got = std::fs::read_to_string(&p).unwrap_or_default().lines().map(|l| l.to_string()).collect();
+            if got.first().map(|l| l.contains("after")).unwrap_or(false) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(got, vec!["{\"after\":1}".to_string()]);
+        assert_eq!(std::fs::read_to_string(dir.join("order-test.jsonl.1")).unwrap().lines().count(), 50);
+    }
+}
