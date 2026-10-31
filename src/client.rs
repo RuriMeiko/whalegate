@@ -70,9 +70,8 @@ pub enum StreamEv {
 
 #[derive(Clone)]
 pub struct DsClient {
-    http: reqwest::Client,
+    http: wreq::Client,
     token: String,
-    cookies: String,
     /// ổn định theo từng acc (web thật giữ 1 device id cố định / trình duyệt)
     device_id: String,
 }
@@ -122,18 +121,167 @@ pub fn is_file_upload_rejection(code: &str) -> bool {
     matches!(code, "50404" | "50403" | "50405" | "40011" | "40012" | "UNSAFE" | "CONTENT_EMPTY")
 }
 
+/// Giá trị `x-hif-leim` / `x-hif-dliq` web lấy từ hif-*.deepseek.com/query (không token) rồi cache theo `x-hif-ttl`
+/// (mặc định 600s); web gắn chúng vào mọi request SSE (`addSSEHeader`) nên bản thiếu chúng khác hẳn trình duyệt.
+/// Body của /chat/completion đúng thứ tự key và đủ trường như web gửi (serde_json::json! sẽ xếp key theo alphabet).
+#[derive(serde::Serialize)]
+struct CompletionBody<'a> {
+    chat_session_id: &'a str,
+    parent_message_id: Option<i64>,
+    model_type: &'static str,
+    prompt: &'a str,
+    ref_file_ids: &'a [String],
+    thinking_enabled: bool,
+    search_enabled: bool,
+    action: Option<()>,
+    preempt: bool,
+}
+
+impl<'a> CompletionBody<'a> {
+    fn new(sid: &'a str, parent: Option<i64>, prompt: &'a str, refs: &'a [String], thinking: bool, search: bool) -> Self {
+        Self { chat_session_id: sid, parent_message_id: parent, model_type: "default", prompt, ref_file_ids: refs, thinking_enabled: thinking, search_enabled: search, action: None, preempt: false }
+    }
+    fn into_body(self) -> Vec<u8> { serde_json::to_vec(&self).unwrap_or_default() }
+}
+
+struct Slot { client: wreq::Client, jar: std::sync::Arc<wreq::cookie::Jar>, seeded: std::sync::Mutex<std::collections::HashMap<String, String>> }
+
+fn slot_pool() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Slot>>> {
+    static POOL: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Slot>>>> = std::sync::OnceLock::new();
+    POOL.get_or_init(Default::default)
+}
+
+/// Cookie hiện có trong jar của acc (gồm cả những cái DS vừa đặt qua Set-Cookie) để ghi lại vào store.
+pub fn jar_snapshot(token: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let slot = slot_pool().lock().unwrap_or_else(|e| e.into_inner()).get(token).cloned()?;
+    let m: std::collections::BTreeMap<String, String> = slot.jar.get_all().map(|c| (c.name().to_string(), c.value().to_string())).collect();
+    if m.is_empty() { None } else { Some(m) }
+}
+
+/// Một giá trị HIF: còn hiệu lực tới `until`; lỗi thì thử lại theo backoff 1s,2s,4s… tối đa 600s như poller của web.
+struct HifSlot {
+    value: Option<String>,
+    until: std::time::Instant,
+    retry_at: std::time::Instant,
+    fails: u32,
+}
+
+impl HifSlot {
+    fn empty() -> Self {
+        let now = std::time::Instant::now();
+        Self { value: None, until: now, retry_at: now, fails: 0 }
+    }
+    fn due(&self) -> bool {
+        let now = std::time::Instant::now();
+        (self.value.is_none() || now >= self.until) && now >= self.retry_at
+    }
+    fn ok(&mut self, v: String, ttl: std::time::Duration) {
+        let now = std::time::Instant::now();
+        self.value = Some(v);
+        self.until = now + ttl;
+        self.retry_at = now;
+        self.fails = 0;
+    }
+    fn fail(&mut self) {
+        // web chỉ gửi giá trị còn hiệu lực: hết hạn mà chưa làm mới được thì bỏ
+        if std::time::Instant::now() >= self.until { self.value = None; }
+        self.fails = self.fails.saturating_add(1);
+        let secs = (1u64 << self.fails.min(10)).min(600);
+        self.retry_at = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    }
+    fn current(&self) -> Option<String> {
+        if std::time::Instant::now() < self.until { self.value.clone() } else { None }
+    }
+}
+
+struct HifEntry { leim: HifSlot, dliq: HifSlot }
+
+fn hif_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, HifEntry>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, HifEntry>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
 impl DsClient {
+    /// Lấy một giá trị HIF đúng như poller của web: preflight CORS (OPTIONS — server không đặt max-age nên lần nào cũng
+    /// có), rồi GET không token kèm bộ header x-client-*, qua đúng client (đúng vân tay TLS) của acc. Timeout 3s như web.
+    async fn fetch_hif(&self, host: &str) -> Option<(String, std::time::Duration)> {
+        let url = format!("https://{}.deepseek.com/query", host);
+        let t3 = std::time::Duration::from_secs(3);
+        let _ = self.http
+            .request(wreq::Method::OPTIONS, &url)
+            .header("accept", "*/*")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "x-client-bundle-id,x-client-locale,x-client-platform,x-client-timezone-offset,x-client-version")
+            .header("origin", "https://chat.deepseek.com")
+            .header("referer", "https://chat.deepseek.com/")
+            .header("accept-language", "vi,en-US;q=0.9,en;q=0.8")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "same-site")
+            .timeout(t3)
+            .send().await.ok()?;
+        let resp = self.http
+            .get(&url)
+            .header("accept", "*/*")
+            .header("accept-language", "vi,en-US;q=0.9,en;q=0.8")
+            .header("origin", "https://chat.deepseek.com")
+            .header("referer", "https://chat.deepseek.com/")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "same-site")
+            .header("x-client-bundle-id", "com.deepseek.chat")
+            .header("x-client-locale", "vi")
+            .header("x-client-platform", "web")
+            .header("x-client-timezone-offset", tz_offset_secs())
+            .header("x-client-version", "2.7.0")
+            .timeout(t3)
+            .send().await.ok()?;
+        let ttl = resp.headers().get("x-hif-ttl").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(600);
+        let v: Value = resp.json().await.ok()?;
+        if v["data"]["biz_code"].as_i64() != Some(0) { return None; }
+        let value = v["data"]["biz_data"]["value"].as_str()?.to_string();
+        Some((value, std::time::Duration::from_secs(ttl.max(30))))
+    }
+
+    /// Làm tươi HIF của acc: mỗi giá trị theo hạn và backoff riêng. hif-dliq nằm trên CDN khác hif-leim và có mạng/DNS
+    /// không với tới được (Chrome báo ERR_NAME_NOT_RESOLVED) — khi đó web không gắn x-hif-dliq, ta cũng bỏ qua rồi thử lại.
+    async fn ensure_hif(&self) {
+        let (need_l, need_d) = {
+            let mut c = hif_cache().lock().unwrap_or_else(|e| e.into_inner());
+            let e = c.entry(self.token.clone()).or_insert_with(|| HifEntry { leim: HifSlot::empty(), dliq: HifSlot::empty() });
+            (e.leim.due(), e.dliq.due())
+        };
+        if !need_l && !need_d { return; }
+        let (l, d) = tokio::join!(async { if need_l { Some(self.fetch_hif("hif-leim").await) } else { None } },
+                                  async { if need_d { Some(self.fetch_hif("hif-dliq").await) } else { None } });
+        let mut c = hif_cache().lock().unwrap_or_else(|e| e.into_inner());
+        let e = c.entry(self.token.clone()).or_insert_with(|| HifEntry { leim: HifSlot::empty(), dliq: HifSlot::empty() });
+        if let Some(r) = l { match r { Some((v, ttl)) => e.leim.ok(v, ttl), None => e.leim.fail() } }
+        if let Some(r) = d { match r { Some((v, ttl)) => e.dliq.ok(v, ttl), None => e.dliq.fail() } }
+    }
+
+    /// Thêm `x-hif-leim` / `x-hif-dliq` vào request SSE (chỉ cái nào đang còn hiệu lực, như web).
+    async fn with_hif(&self, rb: wreq::RequestBuilder) -> wreq::RequestBuilder {
+        self.ensure_hif().await;
+        let (l, d) = hif_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&self.token).map(|h| (h.leim.current(), h.dliq.current())).unwrap_or((None, None));
+        let rb = match l { Some(v) => rb.header("x-hif-leim", v), None => rb };
+        match d { Some(v) => rb.header("x-hif-dliq", v), None => rb }
+    }
+
     pub fn new(token: String, cookies: String) -> Result<Self> {
-        // Một reqwest::Client (connection pool) cho mỗi acc: tái dùng TCP/TLS/HTTP2 giữa các request thay vì
-        // bắt tay lại mỗi lần, và mỗi acc vẫn có kết nối riêng như một trình duyệt riêng.
-        static POOL: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>>> = std::sync::OnceLock::new();
-        let pool = POOL.get_or_init(Default::default);
+        // Một wreq::Client (connection pool + cookie jar) cho mỗi acc: tái dùng TCP/TLS/HTTP2 giữa các request thay vì
+        // bắt tay lại mỗi lần, và mỗi acc vẫn có kết nối + cookie riêng như một trình duyệt riêng.
+        let pool = slot_pool();
         let cached = pool.lock().unwrap_or_else(|e| e.into_inner()).get(&token).cloned();
-        let http = match cached {
+        let slot = match cached {
             Some(c) => c,
             None => {
-                let c = reqwest::Client::builder()
-                    .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
+                let jar = std::sync::Arc::new(wreq::cookie::Jar::default());
+                let client = wreq::Client::builder()
+                    // Dấu vân tay mạng của acc: TLS/HTTP2/UA/sec-ch-ua đều do emulation đặt, khớp một bản trình duyệt thật
+                    .emulation(crate::fingerprint::Fingerprint::for_token(&token).emulation())
+                    // Jar nhận Set-Cookie của DS (ds_session_id, WAF…) và tự gửi lại như trình duyệt
+                    .cookie_provider(jar.clone())
                     // Chặn treo vô hạn: DS chập chờn mà không có timeout thì request giữ Lease mãi → cạn pool.
                     // KHÔNG dùng `.timeout()` toàn cục: nó tính cả thời gian đọc body, sẽ giết stream chat dài.
                     // `connect_timeout` chặn lúc bắt tay TCP/TLS; `read_timeout` chặn từng lần đọc socket
@@ -142,27 +290,42 @@ impl DsClient {
                     .read_timeout(std::time::Duration::from_secs(read_timeout_secs()))
                     .pool_idle_timeout(std::time::Duration::from_secs(60))
                     .build()?;
-                pool.lock().unwrap_or_else(|e| e.into_inner()).insert(token.clone(), c.clone());
-                c
+                let slot = std::sync::Arc::new(Slot { client, jar, seeded: Default::default() });
+                pool.lock().unwrap_or_else(|e| e.into_inner()).insert(token.clone(), slot.clone());
+                slot
             }
         };
-        let device_id = device_id_for(&token);
-        Ok(Self { http, token, cookies, device_id })
+        // Nạp cookie từ store vào jar chỉ khi giá trị store ĐỔI so với lần nạp trước (Chrome vừa làm mới):
+        // nếu không đổi thì giữ bản trong jar, có thể đã được Set-Cookie của DS cập nhật mới hơn.
+        {
+            let url: wreq::Uri = "https://chat.deepseek.com/".parse().expect("static url");
+            let mut seeded = slot.seeded.lock().unwrap_or_else(|e| e.into_inner());
+            for kv in cookies.split(';') {
+                let Some((k, v)) = kv.trim().split_once('=') else { continue };
+                if k.is_empty() || seeded.get(k).map(|old| old == v).unwrap_or(false) { continue; }
+                slot.jar.add(format!("{}={}; Path=/; Secure", k, v), &url);
+                seeded.insert(k.to_string(), v.to_string());
+            }
+        }
+        let http = slot.client.clone();
+        let device_id = crate::fingerprint::device_for(&token).unwrap_or_else(|| device_id_for(&crate::fingerprint::seed_for(&token)));
+        Ok(Self { http, token, device_id })
     }
 
-    fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    fn req(&self, method: wreq::Method, path: &str) -> wreq::RequestBuilder {
+        self.req_to(method, format!("{}{}", DEEPSEEK_API, path))
+    }
+
+    /// Bộ header của một call API web; tách URL ra để test soi được request đi ra dây.
+    fn req_to(&self, method: wreq::Method, url: String) -> wreq::RequestBuilder {
         self.http
-            .request(method, format!("{}{}", DEEPSEEK_API, path))
+            .request(method, url)
             .header("authorization", format!("Bearer {}", self.token))
-            .header("cookie", &self.cookies)
             .header("origin", "https://chat.deepseek.com")
             .header("referer", "https://chat.deepseek.com/")
             // Bộ header web thật (2.7.0) gửi kèm mọi call /api/v0 — thiếu là dấu hiệu "không phải trình duyệt"
             .header("accept", "*/*")
             .header("accept-language", "vi,en-US;q=0.9,en;q=0.8")
-            .header("sec-ch-ua", "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
-            .header("sec-ch-ua-mobile", "?0")
-            .header("sec-ch-ua-platform", "\"Linux\"")
             .header("sec-fetch-dest", "empty")
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-origin")
@@ -177,7 +340,7 @@ impl DsClient {
 
     pub async fn users_current(&self) -> Result<Value> {
         let v: Value = self
-            .req(reqwest::Method::GET, "/users/current")
+            .req(wreq::Method::GET, "/users/current")
             .send()
             .await?
             .json()
@@ -187,7 +350,7 @@ impl DsClient {
 
     pub async fn create_session(&self) -> Result<String> {
         let v: Value = self
-            .req(reqwest::Method::POST, "/chat_session/create")
+            .req(wreq::Method::POST, "/chat_session/create")
             .json(&json!({}))
             .send()
             .await?
@@ -203,7 +366,7 @@ impl DsClient {
     /// Xoá session web (best-effort — endpoint chưa kiểm chứng trên mọi phiên bản web).
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let v: Value = self
-            .req(reqwest::Method::POST, "/chat_session/delete")
+            .req(wreq::Method::POST, "/chat_session/delete")
             .json(&json!({ "chat_session_id": session_id }))
             .send()
             .await?
@@ -225,7 +388,7 @@ impl DsClient {
 
     async fn fetch_pow_challenge_for(&self, target_path: &str) -> Result<Value> {
         let v: Value = self
-            .req(reqwest::Method::POST, "/chat/create_pow_challenge")
+            .req(wreq::Method::POST, "/chat/create_pow_challenge")
             .json(&json!({ "target_path": target_path }))
             .send()
             .await?
@@ -293,12 +456,12 @@ impl DsClient {
     pub async fn upload_file(&self, bytes: Vec<u8>, filename: &str, mime: &str) -> Result<String> {
         let pow = self.pow_header("/api/v0/file/upload_file").await?;
         let size = bytes.len();
-        let part = reqwest::multipart::Part::bytes(bytes)
+        let part = wreq::multipart::Part::bytes(bytes)
             .file_name(filename.to_string())
             .mime_str(mime)?;
-        let form = reqwest::multipart::Form::new().part("file", part);
+        let form = wreq::multipart::Form::new().part("file", part);
         let v: Value = self
-            .req(reqwest::Method::POST, "/file/upload_file")
+            .req(wreq::Method::POST, "/file/upload_file")
             .header("x-ds-pow-response", pow)
             .header("x-file-size", size.to_string())
             .header("x-model-type", "default")
@@ -322,7 +485,7 @@ impl DsClient {
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let f: Value = self
-                .req(reqwest::Method::GET, &format!("/file/fetch_files?file_ids={}", id))
+                .req(wreq::Method::GET, &format!("/file/fetch_files?file_ids={}", id))
                 .send().await?.json().await?;
             let st = f["data"]["biz_data"]["files"][0]["status"].as_str().unwrap_or("");
             match st {
@@ -383,17 +546,12 @@ impl DsClient {
             difficulty, answer, solve_ms
         );
 
-        let resp = self
-            .req(reqwest::Method::POST, "/chat/completion")
-            .header("x-ds-pow-response", pow_header)
-            .json(&json!({
-                "chat_session_id": sid,
-                "parent_message_id": parent_message_id,
-                "ref_file_ids": [],
-                "thinking_enabled": thinking,
-                "search_enabled": search,
-                "prompt": prompt,
-            }))
+        let rb = self.with_hif(self.req(wreq::Method::POST, "/chat/completion").header("x-ds-pow-response", pow_header)).await;
+        let resp = rb
+            // web gửi completion từ trang của chính session đó
+            .header("referer", format!("https://chat.deepseek.com/a/chat/s/{}", sid))
+            .header("content-type", "application/json")
+            .body(CompletionBody::new(&sid, parent_message_id, prompt, &[], thinking, search).into_body())
             .send()
             .await?;
 
@@ -457,20 +615,11 @@ pub async fn chat_stream(
 
     let pow_header = self.completion_pow().await?;
 
-    let resp = self
-        .req(reqwest::Method::POST, "/chat/completion")
-        .header("x-ds-pow-response", pow_header)
-        .json(&json!({
-            "chat_session_id": sid,
-            "parent_message_id": parent_message_id,
-            "model_type": "default",
-            "ref_file_ids": ref_file_ids,
-            "thinking_enabled": thinking,
-            "search_enabled": search,
-            "action": null,
-            "preempt": false,
-            "prompt": prompt,
-        }))
+    let rb = self.with_hif(self.req(wreq::Method::POST, "/chat/completion").header("x-ds-pow-response", pow_header)).await;
+    let resp = rb
+        .header("referer", format!("https://chat.deepseek.com/a/chat/s/{}", sid))
+        .header("content-type", "application/json")
+        .body(CompletionBody::new(&sid, parent_message_id, prompt, ref_file_ids, thinking, search).into_body())
         .send()
         .await?;
 
@@ -861,5 +1010,138 @@ mod header_tests {
         assert_ne!(a, super::device_id_for("tok-b"));
         assert_eq!(a.len(), 36);
         assert_eq!(a.matches('-').count(), 4);
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn profile_is_stable_per_token_and_varies_across_tokens() {
+        let ua = |t: &str| {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async {
+                let c = wreq::Client::builder().emulation(crate::fingerprint::Fingerprint::for_token(t).emulation()).build().unwrap();
+                c.get("https://tls.peet.ws/api/all").send().await.unwrap().text().await.unwrap()
+            })
+        };
+        let v: Value = serde_json::from_str(&ua("tok-a")).unwrap();
+        let v2: Value = serde_json::from_str(&ua("tok-a")).unwrap();
+        assert_eq!(v["tls"]["ja4"], v2["tls"]["ja4"]);
+        for t in ["tok-a", "tok-b", "tok-c", "tok-d"] {
+            let v: Value = serde_json::from_str(&ua(t)).unwrap();
+            println!("{t}: {} | ja4={} | h2={}", v["http2"]["sent_frames"][0].is_object(), v["tls"]["ja4"], v["http2"]["akamai_fingerprint_hash"]);
+            println!("   {} {}", v["user_agent"], v["http2"]["sent_frames"].as_array().map(|f| f.len()).unwrap_or(0));
+        }
+    }
+
+    /// So request thật với Chrome: `cargo test wire_ -- --ignored --nocapture`
+    #[test]
+    fn completion_body_matches_web_key_order() {
+        let b = String::from_utf8(CompletionBody::new("s", None, "hi", &[], false, true).into_body()).unwrap();
+        assert_eq!(b, r#"{"chat_session_id":"s","parent_message_id":null,"model_type":"default","prompt":"hi","ref_file_ids":[],"thinking_enabled":false,"search_enabled":true,"action":null,"preempt":false}"#);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn wire_request_as_seen_by_server() {
+        let c = DsClient::new("tok-wire".into(), "a=b".into()).unwrap();
+        let v: Value = c.req_to(wreq::Method::POST, "https://tls.peet.ws/api/all".into())
+            .header("x-ds-pow-response", "AAAA")
+            .json(&json!({"chat_session_id":"x","prompt":"hi"}))
+            .send().await.unwrap().json().await.unwrap();
+        println!("ua={}", v["user_agent"]);
+        println!("ja4={}", v["tls"]["ja4"]);
+        println!("h2={}", v["http2"]["akamai_fingerprint"]);
+        println!("headers={}", v["http2"]["sent_frames"].as_array().unwrap().iter().filter_map(|f| f["headers"].as_array()).flatten().map(|h| h.as_str().unwrap_or("").split(": ").next().unwrap_or("").to_string()).collect::<Vec<_>>().join(","));
+        println!("priority_frame={}", v["http2"]["sent_frames"].as_array().unwrap().iter().map(|f| f["frame_type"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join(","));
+    }
+
+    /// Chat thật qua client mới bằng acc đầu tiên trong store: `cargo test live_chat -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_chat_with_first_account() {
+        let raw = std::fs::read_to_string(format!("{}/.whalegate/accounts.json", std::env::var("HOME").unwrap())).unwrap();
+        let st: Value = serde_json::from_str(&raw).unwrap();
+        let a = &st["accounts"][0];
+        let cookies = a["cookies"].as_object().unwrap().iter().map(|(k, v)| format!("{}={}", k, v.as_str().unwrap_or(""))).collect::<Vec<_>>().join("; ");
+        let c = DsClient::new(a["token"].as_str().unwrap().to_string(), cookies).unwrap();
+        let ms = |t: std::time::Instant| t.elapsed().as_millis();
+        for round in 1..=3 {
+            let t = std::time::Instant::now();
+            c.users_current().await.unwrap();
+            let t_user = ms(t);
+            let t = std::time::Instant::now();
+            c.ensure_hif().await;
+            let t_hif = ms(t);
+            let t = std::time::Instant::now();
+            let sid = c.create_session().await.unwrap();
+            let t_sess = ms(t);
+            let t = std::time::Instant::now();
+            let pow = c.completion_pow().await.unwrap();
+            let t_pow = ms(t);
+            drop(pow);
+            let t = std::time::Instant::now();
+            let (sid2, mut rx) = c.chat_stream("ping, trả lời đúng 1 chữ: ok", Some(&sid), None, false, false, &[]).await.unwrap();
+            let t_head = ms(t);
+            let mut text = String::new();
+            let mut first = None;
+            while let Some(ev) = rx.recv().await {
+                match ev { StreamEv::Response(t2) => { first.get_or_insert(ms(t)); text.push_str(&t2) }, StreamEv::Done => break, _ => {} }
+            }
+            println!("round{round}: users/current={t_user}ms hif={t_hif}ms create_session={t_sess}ms pow={t_pow}ms completion_headers={t_head}ms first_token={:?}ms total={}ms reply={:?}", first, ms(t), text);
+            let _ = c.delete_session(&sid2).await;
+        }
+    }
+
+    /// HTTP thuần (không Chrome) vào các trang soi TLS/HTTP2: `cargo test wire_sites -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn wire_sites() {
+        for seed in ["tok-site-1", "tok-site-2"] {
+            let fp = crate::fingerprint::Fingerprint::for_token(seed);
+            let c = wreq::Client::builder().emulation(fp.emulation()).build().unwrap();
+            let b: Value = c.get("https://tls.browserleaks.com/json").send().await.unwrap().json().await.unwrap();
+            println!("{seed} want_ua={} \n  browserleaks: ja3n={} ja4={} akamai={} ua={}", fp.user_agent(), b["ja3n_hash"], b["ja4"], b["akamai_hash"], b["user_agent"]);
+            let p: Value = c.get("https://tls.peet.ws/api/all").send().await.unwrap().json().await.unwrap();
+            println!("  peet: ja4={} h2={} http={}", p["tls"]["ja4"], p["http2"]["akamai_fingerprint_hash"], p["http_version"]);
+        }
+    }
+
+    /// Server có ép x-hif-* không: `cargo test live_hif -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_hif_enforcement() {
+        let raw = std::fs::read_to_string(format!("{}/.whalegate/accounts.json", std::env::var("HOME").unwrap())).unwrap();
+        let st: Value = serde_json::from_str(&raw).unwrap();
+        let a = &st["accounts"][0];
+        let cookies = a["cookies"].as_object().unwrap().iter().map(|(k, v)| format!("{}={}", k, v.as_str().unwrap_or(""))).collect::<Vec<_>>().join("; ");
+        let tok = a["token"].as_str().unwrap().to_string();
+        let c = DsClient::new(tok.clone(), cookies).unwrap();
+        for (name, leim, dliq) in [("đúng", None, None), ("không có", Some(None), Some(None)), ("sai (rác)", Some(Some("AAAA=.BBBB")), Some(Some("CCCC=.DDDD")))] {
+            {
+                let mut m = hif_cache().lock().unwrap();
+                m.remove(&tok);
+                if let (Some(l), Some(d)) = (leim, dliq) {
+                    let mut e = HifEntry { leim: HifSlot::empty(), dliq: HifSlot::empty() };
+                    if let Some(x) = l { e.leim.ok(x.to_string(), std::time::Duration::from_secs(600)); }
+                    if let Some(x) = d { e.dliq.ok(x.to_string(), std::time::Duration::from_secs(600)); }
+                    e.leim.retry_at += std::time::Duration::from_secs(600);
+                    e.dliq.retry_at += std::time::Duration::from_secs(600);
+                    m.insert(tok.clone(), e);
+                }
+            }
+            let t = std::time::Instant::now();
+            match c.chat_stream("trả lời đúng 1 chữ: ok", None, None, false, false, &[]).await {
+                Ok((sid, mut rx)) => {
+                    let mut text = String::new();
+                    while let Some(ev) = rx.recv().await { match ev { StreamEv::Response(t) => text.push_str(&t), StreamEv::Done => break, _ => {} } }
+                    println!("HIF {name}: OK reply={:?} {}ms", text, t.elapsed().as_millis());
+                    let _ = c.delete_session(&sid).await;
+                }
+                Err(e) => println!("HIF {name}: LỖI {}", format!("{e:#}").chars().take(300).collect::<String>()),
+            }
+        }
     }
 }
