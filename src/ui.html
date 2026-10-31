@@ -167,6 +167,9 @@
   .toast span { flex: 1; word-break: break-word; } .toast b { cursor: pointer; font-weight: 400; color: var(--mute); padding: 0 4px; }
 
   /* banner cập nhật */
+  /* phiên bản đang chạy, cạnh tên — nhỏ và mờ để không tranh với tiêu đề */
+  h1 .ver { margin-left: 8px; font: 400 11px/1 var(--mono); color: var(--mute); text-decoration: none; letter-spacing: .02em; }
+  h1 .ver:hover { color: var(--ink); text-decoration: underline; }
   #updBar { display: none; align-items: center; gap: 10px; border: 1px solid var(--ink); background: #ddd3b9; padding: 9px 12px; margin: 0 0 14px; font: 12px/1.4 var(--mono); flex-wrap: wrap; }
   #updBar.show { display: flex; }
   #updBar .t { flex: 1; min-width: 180px; }
@@ -213,7 +216,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>whalegate<span class="sl">/rust</span></h1>
+    <h1>whalegate<span class="sl">/rust</span><a class="ver" href="https://github.com/RuriMeiko/whalegate/releases/tag/v__WG_VERSION__" target="_blank" rel="noopener noreferrer" title="Phiên bản đang chạy — ghi chú phát hành">v__WG_VERSION__</a></h1>
     <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
     <button class="sm" onclick="openLog()">log</button>
     <button class="sm" onclick="openDsh()">dsh</button>
@@ -860,7 +863,7 @@ function renderAuthBar(p) {
   const burst = p.logged_out_last_burst || 0;
   $('authTxt').innerHTML = '';
   $('authTxt').append(el('b', null, `DeepSeek đã đăng xuất ${n} acc`), burst >= 3
-    ? ` · ${burst} acc cùng lúc lúc ${at} (DS huỷ hàng loạt)`
+    ? ` · ${burst} acc cùng lúc (${at}, DS huỷ hàng loạt)`
     : ` · lần gần nhất ${at}`);
   bar.classList.add('show');
 }

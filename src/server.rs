@@ -587,7 +587,13 @@ async fn api_usage() -> Json<Value> {
 }
 
 async fn index() -> Html<&'static str> {
-    Html(include_str!("ui.html"))
+    Html(index_html())
+}
+
+/// ui.html kèm phiên bản đang chạy (thay `__WG_VERSION__` một lần, giữ lại cho mọi lần tải trang).
+fn index_html() -> &'static str {
+    static HTML: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HTML.get_or_init(|| include_str!("ui.html").replace("__WG_VERSION__", env!("CARGO_PKG_VERSION")))
 }
 
 #[derive(Deserialize)]
@@ -4007,5 +4013,17 @@ mod extension_tests {
         let mut s = String::new();
         std::io::Read::read_to_string(&mut z.by_name("whalegate-extension/manifest.json").unwrap(), &mut s).unwrap();
         assert!(s.contains("http://[::1]/*"));
+    }
+}
+
+#[cfg(test)]
+mod version_ui_tests {
+    #[test]
+    fn dashboard_shows_running_version() {
+        let html = super::index_html();
+        assert!(!html.contains("__WG_VERSION__"), "còn chỗ trống chưa thay");
+        let v = env!("CARGO_PKG_VERSION");
+        assert!(html.contains(&format!(">v{}</a>", v)));
+        assert!(html.contains(&format!("/releases/tag/v{}", v)));
     }
 }
