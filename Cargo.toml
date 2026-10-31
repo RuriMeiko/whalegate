@@ -6,7 +6,10 @@ edition = "2021"
 [dependencies]
 async-stream = "0.3"
 # "cookies" không dùng: cookie truyền tay qua header (mỗi acc một bộ cookie riêng)
-reqwest = { version = "0.12", features = ["json", "stream", "http2", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "multipart", "rustls-tls", "charset"] }
+# Giả lập trình duyệt: TLS (BoringSSL như Chrome) + HTTP/2 + header đúng từng phiên bản, mỗi acc một profile
+wreq = { version = "6.0.0-rc.31", features = ["json", "multipart", "stream", "gzip", "brotli", "zstd", "deflate", "cookies"] }
+wreq-util = "3.0.0-rc.14"
 # Chỉ bật feature thực dùng — "full" kéo cả signal/process/net-unix... làm build chậm
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "io-util"] }
 tokio-tungstenite = "0.24"
@@ -18,16 +21,11 @@ base64 = "0.22"
 futures = "0.3"
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
-# Chỉ bản release đóng gói (CI) bật: nhúng OpenSSL tĩnh → binary Linux musl chạy được trên mọi distro.
-openssl = { version = "0.10", optional = true, features = ["vendored"] }
 # Tự cập nhật: giải nén bản release tải từ GitHub (tar.gz cho unix, zip cho Windows)
 flate2 = "1"
 tar = "0.4"
 [target.'cfg(windows)'.dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
-
-[features]
-vendored-openssl = ["dep:openssl"]
 
 # Deploy chạy target/release: PoW (Keccak) và parse DSML hưởng lợi trực tiếp từ LTO + 1 codegen unit.
 # Không dùng panic=abort: một panic trong 1 request chỉ được giết task đó, không kéo sập cả proxy (mọi acc/phiên).

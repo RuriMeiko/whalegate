@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux: fully static (musl + vendored OpenSSL) → runs on any distro
+          # Linux: fully static (musl + BoringSSL của wreq, rustls cho reqwest) → runs on any distro
           - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, tool: cross }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04, tool: cross }
           - { target: aarch64-apple-darwin, os: macos-14, tool: cargo }
@@ -34,6 +34,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # wreq nhúng BoringSSL: cần cmake + (trên Windows) NASM + LLVM/clang cho bindgen.
+      # Linux build trong container của cross → xem Cross.toml (pre-build cài cmake/clang).
+      - name: Install build deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake
+
+      - name: Install build deps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm cmake llvm -y --no-progress --installargs 'ADD_CMAKE_TO_PATH=System'
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "C:\Program Files\CMake\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       - name: Install cross
         if: matrix.tool == 'cross'
         uses: taiki-e/install-action@v2
@@ -42,7 +57,7 @@ jobs:
 
       - name: Build (cross, static)
         if: matrix.tool == 'cross'
-        run: cross build --release --locked --target ${{ matrix.target }} --features vendored-openssl
+        run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Build
         if: matrix.tool == 'cargo'
