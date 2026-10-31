@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="880" viewBox="0 0 1180 880" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+<marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#16a34a"/></marker>
+<marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+</defs>
+<rect width="1180" height="880" fill="#f8fafc"/>
+<text x="24" y="38" font-size="21" font-weight="700" fill="#0f172a">whalegate — luồng proxy đầu ra hiện tại</text>
+<text x="24" y="62" font-size="13" fill="#64748b">Mỗi VÂN TAY (không phải token) được ghim một proxy → ra DeepSeek bằng một IP riêng</text>
+<rect x="24" y="92" width="252" height="240" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="40" y="118" font-size="13" font-weight="700" fill="#0f172a">1. Client gọi gateway</text>
+<text x="40" y="142" font-size="11.5" fill="#475569">POST /v1/chat/completions</text>
+<text x="40" y="162" font-size="11.5" fill="#475569">GET /v1/models</text>
+<text x="40" y="196" font-size="11.5" fill="#94a3b8">Server chọn acc trong pool</text>
+<text x="40" y="214" font-size="11.5" fill="#94a3b8">→ DsClient::new(token, cookies)</text>
+<rect x="40" y="232" width="220" height="80" rx="8" fill="#f1f5f9" stroke="#e2e8f0"/>
+<text x="52" y="252" font-size="11" font-weight="600" fill="#334155">Điểm vào duy nhất</text>
+<text x="52" y="270" font-size="10.5" fill="#64748b">src/client.rs:333  DsClient::new</text>
+<text x="52" y="288" font-size="10.5" fill="#64748b">mọi request ra DS đều qua đây</text>
+<text x="52" y="304" font-size="10.5" fill="#64748b">→ không có đường vòng</text>
+<line x1="276" y1="212" x2="316" y2="212" stroke="#64748b" stroke-width="1.6" marker-end="url(#a)"/>
+<rect x="320" y="92" width="300" height="330" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="336" y="118" font-size="13" font-weight="700" fill="#0f172a">2. Chọn proxy (ghim theo vân tay)</text>
+<rect x="336" y="134" width="268" height="42" rx="7" fill="#eff6ff" stroke="#bfdbfe"/>
+<text x="346" y="152" font-size="10.8" fill="#1e40af" font-weight="600">proxypool::snapshot()</text>
+<text x="346" y="168" font-size="10.2" fill="#3b82f6">đọc DS_PROXY_MODE + LIST + file mỗi lần gọi</text>
+<rect x="336" y="188" width="268" height="40" rx="7" fill="#f0fdf4" stroke="#bbf7d0"/>
+<text x="346" y="205" font-size="10.8" fill="#166534" font-weight="600">seed_for(token) → fp_seed</text>
+<text x="346" y="220" font-size="10.2" fill="#16a34a">khoá ghim là vân tay, KHÔNG phải token</text>
+<rect x="336" y="240" width="268" height="44" rx="7" fill="#fefce8" stroke="#fde68a"/>
+<text x="346" y="257" font-size="10.8" fill="#854d0e" font-weight="600">proxy_for(fp_seed, pool)</text>
+<text x="346" y="273" font-size="10.2" fill="#a16207">đã ghim → trả ngay; chưa → chọn ít tải nhất</text>
+<rect x="336" y="298" width="268" height="40" rx="7" fill="#fdf2f8" stroke="#fbcfe8"/>
+<text x="346" y="315" font-size="10.8" fill="#9d174d" font-weight="600">proxy-bindings.json</text>
+<text x="346" y="330" font-size="10.2" fill="#be185d">ghi xuống đĩa → sống qua restart</text>
+<text x="336" y="362" font-size="10.2" fill="#64748b">entry.to_wreq() → wreq::Proxy</text>
+<text x="336" y="380" font-size="10.2" fill="#64748b">http | https | socks5 | socks5h</text>
+<text x="336" y="398" font-size="10.2" fill="#94a3b8">socks5h: proxy tự phân giải DNS</text>
+<line x1="620" y1="212" x2="660" y2="212" stroke="#64748b" stroke-width="1.6" marker-end="url(#a)"/>
+<rect x="664" y="92" width="240" height="330" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="680" y="118" font-size="13" font-weight="700" fill="#0f172a">3. Cổng chế độ</text>
+<rect x="680" y="134" width="208" height="58" rx="7" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="690" y="152" font-size="10.8" font-weight="700" fill="#334155">off</text>
+<text x="690" y="168" font-size="10.2" fill="#64748b">đi thẳng, không ghim</text>
+<text x="690" y="183" font-size="10.2" fill="#64748b">không tạo file ghim</text>
+<rect x="680" y="200" width="208" height="76" rx="7" fill="#fefce8" stroke="#fde68a"/>
+<text x="690" y="218" font-size="10.8" font-weight="700" fill="#854d0e">auto</text>
+<text x="690" y="234" font-size="10.2" fill="#a16207">có proxy → dùng</text>
+<text x="690" y="249" font-size="10.2" fill="#a16207">pool rỗng → đi thẳng + log</text>
+<text x="690" y="266" font-size="9.8" fill="#ca8a04">⚠ chết giữa phiên = lộ IP thật</text>
+<rect x="680" y="284" width="208" height="76" rx="7" fill="#fef2f2" stroke="#fecaca"/>
+<text x="690" y="302" font-size="10.8" font-weight="700" fill="#991b1b">strict</text>
+<text x="690" y="318" font-size="10.2" fill="#b91c1c">không có proxy → BÁO LỖI</text>
+<text x="690" y="333" font-size="10.2" fill="#b91c1c">thà fail còn hơn lộ IP</text>
+<text x="690" y="350" font-size="9.8" fill="#dc2626">✓ fail-closed</text>
+<line x1="904" y1="212" x2="944" y2="212" stroke="#16a34a" stroke-width="1.8" marker-end="url(#ag)"/>
+<rect x="948" y="92" width="208" height="330" rx="12" fill="#ffffff" stroke="#bbf7d0"/>
+<text x="964" y="118" font-size="13" font-weight="700" fill="#0f172a">4. Ra Internet</text>
+<rect x="964" y="134" width="176" height="54" rx="7" fill="#f0fdf4" stroke="#bbf7d0"/>
+<text x="974" y="152" font-size="10.8" font-weight="600" fill="#166534">wreq::Client</text>
+<text x="974" y="168" font-size="10.2" fill="#16a34a">TLS/HTTP2 giả Chrome</text>
+<text x="974" y="182" font-size="10.2" fill="#16a34a">+ .proxy(p)</text>
+<rect x="964" y="200" width="176" height="46" rx="7" fill="#ecfeff" stroke="#a5f3fc"/>
+<text x="974" y="218" font-size="10.8" font-weight="600" fill="#155e75">Proxy của vân tay</text>
+<text x="974" y="234" font-size="10.2" fill="#0891b2">IP riêng #1</text>
+<rect x="964" y="258" width="176" height="46" rx="7" fill="#ecfeff" stroke="#a5f3fc"/>
+<text x="974" y="276" font-size="10.8" font-weight="600" fill="#155e75">Proxy khác</text>
+<text x="974" y="292" font-size="10.2" fill="#0891b2">IP riêng #2</text>
+<rect x="964" y="316" width="176" height="46" rx="7" fill="#faf5ff" stroke="#e9d5ff"/>
+<text x="974" y="334" font-size="10.8" font-weight="600" fill="#6b21a8">chat.deepseek.com</text>
+<text x="974" y="350" font-size="10.2" fill="#9333ea">DS chỉ thấy IP proxy</text>
+<line x1="1052" y1="188" x2="1052" y2="198" stroke="#16a34a" stroke-width="1.5" marker-end="url(#ag)"/>
+<line x1="1052" y1="246" x2="1052" y2="256" stroke="#0891b2" stroke-width="1.5" marker-end="url(#a)"/>
+<line x1="1052" y1="304" x2="1052" y2="314" stroke="#9333ea" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="24" y="452" width="552" height="196" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="40" y="478" font-size="13" font-weight="700" fill="#0f172a">Bảng ghim (proxy-bindings.json)</text>
+<text x="40" y="500" font-size="11" fill="#64748b">Đơn vị ghim là VÂN TAY. Token đổi (xoá/thêm lại acc) → IP không đổi.</text>
+<rect x="40" y="514" width="520" height="26" rx="5" fill="#f1f5f9"/>
+<text x="52" y="532" font-size="10.8" font-weight="700" fill="#475569">fp_seed</text>
+<text x="330" y="532" font-size="10.8" font-weight="700" fill="#475569">proxy</text>
+<rect x="40" y="540" width="520" height="24" rx="4" fill="#f8fafc"/>
+<text x="52" y="556" font-size="10.6" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#334155">probe-seed-abc</text>
+<text x="330" y="556" font-size="10.6" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#0f766e">socks5h://127.0.0.1:11080</text>
+<rect x="40" y="568" width="520" height="24" rx="4" fill="#ffffff"/>
+<text x="52" y="584" font-size="10.6" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#334155">8f2c…a1</text>
+<text x="330" y="584" font-size="10.6" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#0f766e">http://203.0.113.7:8080</text>
+<rect x="40" y="596" width="520" height="24" rx="4" fill="#f8fafc"/>
+<text x="52" y="612" font-size="10.6" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#334155">d41e…9b</text>
+<text x="330" y="612" font-size="10.6" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#0f766e">socks5h://198.51.100.4:1080</text>
+<text x="40" y="640" font-size="10.4" fill="#94a3b8">Phân bổ: vân tay mới nhận proxy ít vân tay nhất → chia đều, không dồn dòng đầu</text>
+<rect x="600" y="452" width="556" height="196" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="616" y="478" font-size="13" font-weight="700" fill="#0f172a">Cache client &amp; vô hiệu hoá</text>
+<text x="616" y="500" font-size="11" fill="#64748b">Slot cache theo token, nhưng nhớ proxy đã dùng để phát hiện ghim đổi.</text>
+<rect x="616" y="514" width="524" height="54" rx="7" fill="#eff6ff" stroke="#bfdbfe"/>
+<text x="628" y="532" font-size="10.6" fill="#1e40af" font-weight="600">cache.filter(|s| s.proxy == want_proxy)</text>
+<text x="628" y="550" font-size="10.2" fill="#3b82f6">ghim đổi → client cũ bị bỏ, dựng lại theo IP mới (client.rs:341)</text>
+<rect x="616" y="578" width="524" height="54" rx="7" fill="#fef2f2" stroke="#fecaca"/>
+<text x="628" y="596" font-size="10.6" fill="#991b1b" font-weight="600">forget_all()</text>
+<text x="628" y="614" font-size="10.2" fill="#b91c1c">POST /api/proxy (đổi danh sách) → mọi client dựng lại, ghim mới có hiệu lực</text>
+<rect x="24" y="676" width="1132" height="170" rx="12" fill="#0f172a"/>
+<text x="44" y="704" font-size="13" font-weight="700" fill="#f8fafc">Đã kiểm chứng bằng kết nối thật (SOCKS5 cục bộ)</text>
+<text x="44" y="732" font-size="11.4" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#4ade80">$ DS_PROXY_MODE=strict DS_PROXY_LIST=socks5h://127.0.0.1:11080 whalegate whoami</text>
+<text x="44" y="754" font-size="11.4" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#94a3b8">[proxy] vân tay probe-se → socks5h://127.0.0.1:11080</text>
+<text x="44" y="776" font-size="11.4" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#94a3b8">{"code": 40003, "msg": "Authorization Failed (invalid token)"}</text>
+<text x="44" y="800" font-size="11.4" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#fbbf24">CONNECT chat.deepseek.com:443   ← log của SOCKS5: traffic ĐI QUA proxy</text>
+<text x="44" y="826" font-size="10.8" fill="#64748b">strict + proxy chết → SOCKS error: tcp connect error (không lộ IP thật) · strict + pool rỗng → báo lỗi rõ · off → không tạo file ghim</text>
+</svg>

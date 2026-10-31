@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum Kind { Bool, Int, Choice }
+pub enum Kind { Bool, Int, Choice, Text }
 
 pub struct Def {
     pub key: &'static str,
@@ -57,6 +57,9 @@ pub static DEFS: &[Def] = &[
     n("DS_COOLDOWN", "Pool", "10", 0, 600, "giây", "Nghỉ sau khi chạm burst"),
     // mạng
     shown(n("DS_TZ_OFFSET", "Mạng", "25200", -43200, 50400, "giây", "Lệch múi giờ gửi cho web và tính ngày (UTC+7 = 25200)"), "Múi giờ", "Giây lệch UTC · +7 = 25200"),
+    // proxy đầu ra: mỗi vân tay (mỗi acc) đi ra DS qua một IP khác
+    Def { key: "DS_PROXY_MODE", group: "Proxy", kind: Kind::Choice, default: "off", min: 0, max: 0, choices: &["off", "auto", "strict"], unit: "", label: "IP đầu ra", hint: "off = đi thẳng · auto = có proxy thì dùng, chết thì đi thẳng · strict = proxy chết thì báo lỗi, không lộ IP thật", show: true, live: true },
+    Def { key: "DS_PROXY_LIST", group: "Proxy", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Danh sách proxy", hint: "Mỗi dòng một proxy: scheme://[user:pass@]host:port (http | https | socks5 | socks5h)", show: true, live: true },
     restart(n("DS_READ_TIMEOUT_SECS", "Mạng", "120", 30, 900, "giây", "Timeout mỗi lần đọc socket (cần restart)")),
     b("DS_DEBUG_SSE", "Mạng", "0", "Ghi SSE thô vào /tmp/ds_debug_sse.log (chỉ để gỡ lỗi)"),
 ];
@@ -88,6 +91,12 @@ fn validate(d: &Def, v: &str) -> Result<String, String> {
             Ok(x.to_string())
         }
         Kind::Choice => if d.choices.contains(&v) { Ok(v.to_string()) } else { Err(format!("một trong: {}", d.choices.join(", "))) },
+        // văn bản tự do (danh sách proxy nhiều dòng): giữ nguyên, chỉ chặn NUL và độ dài vô lý
+        Kind::Text => {
+            if v.contains('\0') { return Err("chứa ký tự NUL".into()); }
+            if v.len() > 64 * 1024 { return Err("quá 64KB".into()); }
+            Ok(v.to_string())
+        }
     }
 }
 
@@ -133,7 +142,7 @@ pub fn snapshot() -> Value {
         let from_env = std::env::var(d.key).is_ok();
         json!({
             "key": d.key, "group": d.group, "label": d.label, "hint": d.hint, "unit": d.unit, "live": d.live,
-            "kind": match d.kind { Kind::Bool => "bool", Kind::Int => "int", Kind::Choice => "choice" },
+            "kind": match d.kind { Kind::Bool => "bool", Kind::Int => "int", Kind::Choice => "choice", Kind::Text => "text" },
             "min": d.min, "max": d.max, "choices": d.choices, "default": d.default,
             "value": get(d.key), "overridden": ov.contains_key(d.key), "env": from_env,
         })
@@ -155,12 +164,17 @@ mod tests {
         assert_eq!(validate(ttl, " 600 ").unwrap(), "600");
         let e = find("DS_DEFAULT_EFFORT").unwrap();
         assert!(validate(e, "auto").is_ok() && validate(e, "high").is_err());
+        // danh sách proxy: văn bản nhiều dòng giữ nguyên, chỉ chặn NUL/quá dài
+        let p = find("DS_PROXY_LIST").unwrap();
+        assert_eq!(validate(p, "http://u:p@1.2.3.4:8080\nsocks5h://[::1]:1080").unwrap(),
+                   "http://u:p@1.2.3.4:8080\nsocks5h://[::1]:1080");
+        assert!(validate(p, "a\0b").is_err());
     }
 
     #[test]
     fn only_verified_settings_are_exposed() {
         let shown: Vec<&str> = DEFS.iter().filter(|d| d.show).map(|d| d.key).collect();
-        assert_eq!(shown, ["DS_STATEFUL", "DS_POW_PREFETCH", "DS_DEFAULT_EFFORT", "DS_CONTEXT_TOKENS", "DS_PROMPT_MAX_CHARS", "DS_MAX_CONC_PER_ACC", "DS_HOURLY_LIMIT", "DS_DEVICE_REFRESH_HOURS", "DS_TZ_OFFSET"]);
+        assert_eq!(shown, ["DS_STATEFUL", "DS_POW_PREFETCH", "DS_DEFAULT_EFFORT", "DS_CONTEXT_TOKENS", "DS_PROMPT_MAX_CHARS", "DS_MAX_CONC_PER_ACC", "DS_HOURLY_LIMIT", "DS_DEVICE_REFRESH_HOURS", "DS_TZ_OFFSET", "DS_PROXY_MODE", "DS_PROXY_LIST"]);
         assert!(set("DS_BURST_LIMIT", Some("5")).is_err(), "mục ẩn không được đặt qua API");
     }
 

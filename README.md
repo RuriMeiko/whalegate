@@ -29,6 +29,7 @@
 - [Reasoning effort](#reasoning-effort)
 - [Stateful conversations](#stateful-conversations)
 - [Account pool & failover](#account-pool--failover)
+- [Egress IP per account (proxies)](#egress-ip-per-account-proxies)
 - [Dashboard](#dashboard)
 - [Moving accounts between machines](#moving-accounts-between-machines)
 - [Updating](#updating)
@@ -504,6 +505,32 @@ stateDiagram-v2
 
 ---
 
+## Egress IP per account (proxies)
+
+DeepSeek sees an account as an `(IP, fingerprint)` pair. When several accounts leave from one IP they look like one person, so whalegate can route each account through a different proxy.
+
+The binding is **per fingerprint seed, not per token**: two accounts that are the same "machine" (same fingerprint) always share one IP, and two different machines never share one. Bindings live in `~/.whalegate/proxy-bindings.json`, so an account keeps its IP across restarts, and keeps it even if you delete and re-add it.
+
+```
+DS_PROXY_MODE=strict
+DS_PROXY_LIST='socks5h://user:pass@203.0.113.7:1080
+http://198.51.100.4:8080'
+```
+
+Or put the same lines in `~/.whalegate/proxies.txt`, or paste them into **Settings → Proxy** on the dashboard (the list is validated line by line; one bad line rejects the whole save, so you never end up with half your accounts silently going direct).
+
+How a proxy is assigned:
+
+1. First time a fingerprint is seen, it gets the proxy currently carrying the fewest fingerprints — so the pool spreads evenly instead of piling everyone onto the first entry.
+2. That binding is written to disk. Later requests from the same fingerprint always use it.
+3. If the bound proxy disappears from the list, the binding is dropped and a new one is chosen instead of leaving the account stuck.
+
+Modes: `off` (direct, default) · `auto` (use a proxy when one is configured; log and go direct if the pool is broken) · `strict` (refuse to start the request when no proxy is usable — for when a leaked real IP is worse than a failed call).
+
+Use `socks5h` rather than `socks5` when you can: it lets the proxy resolve DNS, so the name lookup for `chat.deepseek.com` doesn't happen on your machine either.
+
+`GET /api/proxy` shows the current pool and every binding; `POST /api/proxy` replaces the list; `POST /api/proxy/unbind` with `{"fingerprint":"…"}` releases one binding so that account gets a different IP next time.
+
 ## Dashboard
 
 Open `http://127.0.0.1:8790/`. It is loopback-only.
@@ -571,6 +598,9 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | ⚙️ `DS_PROMPT_MAX_CHARS` | `1822000` | Over budget: trim old tool results first, then drop the oldest turns |
 | ⚙️ `DS_MAX_CONC_PER_ACC` | `2` | In-flight requests per account. More than 2 tends to get rate-limited |
 | ⚙️ `DS_TZ_OFFSET` | `25200` | Timezone offset in seconds sent to the web app and used for daily stats |
+| ⚙️ `DS_PROXY_MODE` | `off` | Egress IP per account: `off` direct · `auto` use proxies when available, fall back to direct · `strict` fail instead of leaking the real IP |
+| ⚙️ `DS_PROXY_LIST` | – | Proxy list, one per line: `scheme://[user:pass@]host:port` with `http`, `https`, `socks5` or `socks5h` |
+| `DS_PROXY_FILE` | `~/.whalegate/proxies.txt` | Proxy list file (same format, `#` comments allowed) |
 | `DS_CONV_TTL` | `1800` | Delete idle web conversations after this many seconds |
 | `DS_CONV_MAX_CHARS` | `1200000` | Maximum size of one stateful conversation |
 | `DS_SESSION_ROTATE` | `30` | Turns on a shared (tool-less) session before rotating |
@@ -602,6 +632,8 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `GET` | `/api/stats` · `/api/usage` | Pool state (in-flight, cooldowns, stateful hit rate) / usage, cost and latency |
 | `GET` | `/api/logs` · `/api/logs/stream` | Logs as JSON / SSE |
 | `GET` / `POST` | `/api/settings` | Read or update settings (`null` resets a key) |
+| `GET` / `POST` | `/api/proxy` | Egress proxy pool and fingerprint→proxy bindings / replace the list (`{"list": "…"}`) |
+| `POST` | `/api/proxy/unbind` | Release one binding (`{"fingerprint": "…"}`) so that account gets a new IP |
 | `GET` / `POST` | `/api/dsh` | dsh status (lists every profile found) / write the dsh config (`{"preset": "ptc"\|"standard", "profiles": ["desktop","web"]}`; omit `profiles` or set `"all": true` for every profile) |
 | `GET` / `POST` | `/api/restart` | Status / `{"mode": "idle" \| "now" \| "cancel"}` |
 | `GET` | `/api/accounts/export` | Download the whole pool as a JSON bundle (contains tokens — treat as a secret) |

@@ -143,7 +143,59 @@ impl<'a> CompletionBody<'a> {
     fn into_body(self) -> Vec<u8> { serde_json::to_vec(&self).unwrap_or_default() }
 }
 
-struct Slot { client: wreq::Client, jar: std::sync::Arc<wreq::cookie::Jar>, seeded: std::sync::Mutex<std::collections::HashMap<String, String>> }
+/// Chọn proxy đầu ra cho token này, dựa trên vân tay của acc.
+///
+/// Chế độ:
+///   off    → không proxy, không bao giờ chạm file ghim
+///   auto   → có proxy thì dùng; pool rỗng thì đi thẳng (có log)
+///   strict → pool rỗng/sai cấu hình thì BÁO LỖI: thà acc không chạy được còn hơn chạy với IP thật
+///
+/// Trả (proxy để gắn vào client, chuỗi gốc để so cache).
+fn pick_proxy(token: &str) -> Result<(Option<wreq::Proxy>, Option<String>)> {
+    let pool = crate::proxypool::snapshot();
+    if pool.mode == crate::proxypool::Mode::Off {
+        return Ok((None, None));
+    }
+    if !pool.problems.is_empty() {
+        for p in &pool.problems {
+            crate::elog!("[proxy] cấu hình lỗi: {}", p);
+        }
+    }
+    // ghim theo SEED của vân tay, không theo token: acc bị xoá rồi thêm lại (token mới) vẫn giữ nguyên IP
+    let fp_seed = crate::fingerprint::seed_for(token);
+    let entry = crate::proxypool::proxy_for(&fp_seed, &pool);
+    let Some(entry) = entry else {
+        return match pool.mode {
+            crate::proxypool::Mode::Strict => Err(anyhow::anyhow!(
+                "chế độ proxy=strict nhưng không có proxy nào dùng được ({})",
+                if pool.problems.is_empty() { "danh sách rỗng".to_string() } else { pool.problems.join("; ") }
+            )),
+            _ => {
+                crate::elog!("[proxy] acc {} không có proxy — đi thẳng (chế độ auto)", &fp_seed[..8.min(fp_seed.len())]);
+                Ok((None, None))
+            }
+        };
+    };
+    crate::elog!("[proxy] vân tay {} → {}", &fp_seed[..8.min(fp_seed.len())], entry.masked());
+    let p = entry.to_wreq()?;
+    Ok((Some(p), Some(entry.raw)))
+}
+
+/// Dựng client mới cho token: chọn proxy (ghim theo vân tay) rồi trả (Proxy, chuỗi gốc).
+/// Tách khỏi `pick_proxy` để chỗ cache và chỗ build dùng CÙNG một quyết định.
+fn resolve_proxy(token: &str) -> Result<(Option<wreq::Proxy>, Option<String>)> {
+    pick_proxy(token)
+}
+
+struct Slot {
+    client: wreq::Client,
+    jar: std::sync::Arc<wreq::cookie::Jar>,
+    seeded: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// proxy đầu ra đã dùng để dựng client này (None = đi thẳng). Khoá pool là token, nên phải
+    /// nhớ proxy để phát hiện ghim đổi mà dựng lại — nếu không, đổi proxy cho acc sẽ không có tác dụng
+    /// cho tới khi restart.
+    proxy: Option<String>,
+}
 
 fn slot_pool() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Slot>>> {
     static POOL: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Slot>>>> = std::sync::OnceLock::new();
@@ -153,6 +205,12 @@ fn slot_pool() -> &'static std::sync::Mutex<std::collections::HashMap<String, st
 /// Bỏ client (kết nối + jar) đã dựng cho token: vân tay của token vừa đổi/gỡ thì lần sau phải dựng lại theo vân tay mới.
 pub fn forget(token: &str) {
     slot_pool().lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+}
+
+/// Bỏ TẤT CẢ client đã dựng. Dùng khi cấu hình proxy đổi (danh sách/mode): mọi client cũ đang đi
+/// theo quyết định cũ, phải dựng lại thì ghim mới mới có hiệu lực.
+pub fn forget_all() {
+    slot_pool().lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// Cookie hiện có trong jar của acc (gồm cả những cái DS vừa đặt qua Set-Cookie) để ghi lại vào store.
@@ -276,12 +334,19 @@ impl DsClient {
         // Một wreq::Client (connection pool + cookie jar) cho mỗi acc: tái dùng TCP/TLS/HTTP2 giữa các request thay vì
         // bắt tay lại mỗi lần, và mỗi acc vẫn có kết nối + cookie riêng như một trình duyệt riêng.
         let pool = slot_pool();
+        // Cache theo token, nhưng proxy thì ghim theo VÂN TAY: nếu ghim đổi (đổi danh sách proxy,
+        // xoá file ghim, đổi mode) thì client cũ đang đi sai IP — phải dựng lại.
+        let want_proxy = pick_proxy(&token)?.1;
         let cached = pool.lock().unwrap_or_else(|e| e.into_inner()).get(&token).cloned();
+        let cached = cached.filter(|s| s.proxy == want_proxy);
         let slot = match cached {
             Some(c) => c,
             None => {
                 let jar = std::sync::Arc::new(wreq::cookie::Jar::default());
-                let client = wreq::Client::builder()
+                // IP đầu ra của acc: ghim theo VÂN TAY (không theo token) — hai acc cùng "máy" phải cùng IP,
+                // hai acc khác máy phải khác IP. Xem src/proxypool.rs.
+                let (proxy, proxy_raw) = resolve_proxy(&token)?;
+                let mut builder = wreq::Client::builder()
                     // Dấu vân tay mạng của acc: TLS/HTTP2/UA/sec-ch-ua đều do emulation đặt, khớp một bản trình duyệt thật
                     .emulation(crate::fingerprint::Fingerprint::for_token(&token).emulation())
                     // Jar nhận Set-Cookie của DS (ds_session_id, WAF…) và tự gửi lại như trình duyệt
@@ -292,9 +357,12 @@ impl DsClient {
                     // (gồm cả lúc chờ header) nên stream vẫn sống miễn DS gửi byte đều đặn.
                     .connect_timeout(std::time::Duration::from_secs(15))
                     .read_timeout(std::time::Duration::from_secs(read_timeout_secs()))
-                    .pool_idle_timeout(std::time::Duration::from_secs(60))
-                    .build()?;
-                let slot = std::sync::Arc::new(Slot { client, jar, seeded: Default::default() });
+                    .pool_idle_timeout(std::time::Duration::from_secs(60));
+                if let Some(p) = proxy {
+                    builder = builder.proxy(p);
+                }
+                let client = builder.build()?;
+                let slot = std::sync::Arc::new(Slot { client, jar, seeded: Default::default(), proxy: proxy_raw });
                 pool.lock().unwrap_or_else(|e| e.into_inner()).insert(token.clone(), slot.clone());
                 slot
             }

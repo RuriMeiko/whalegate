@@ -229,6 +229,14 @@ impl Creds {
 
 pub fn load_creds() -> Result<Creds> {
     let store: Store = serde_json::from_str(&std::fs::read_to_string(creds_path())?)?;
+    // Bind vân tay của MỌI acc trước khi dựng client: client phân giải proxy/vân tay qua
+    // fingerprint::seed_for(token), mà hàm đó chỉ biết seed nếu đã bind. Thiếu bước này thì acc
+    // thêm bằng bookmarklet bị coi là "máy" khác (seed = token) → ghim proxy sai và emulation sai.
+    for a in &store.accounts {
+        crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+        crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+        crate::fingerprint::bind_profile(&a.token, a.browser.clone());
+    }
     let acc = store
         .accounts
         .first()
@@ -274,6 +282,10 @@ pub(crate) async fn load_store() -> Store {
 
 /// Ghi store xuống đĩa NGUYÊN TỬ: ghi file tạm cùng thư mục rồi `rename` (rename trên cùng
 /// filesystem là atomic) → crash/đầy đĩa giữa chừng không bao giờ để lại accounts.json cụt.
+pub(crate) async fn write_store_atomic_pub(store: &Store) -> Result<()> {
+    write_store_atomic(store).await
+}
+
 async fn write_store_atomic(store: &Store) -> Result<()> {
     let path = std::path::PathBuf::from(creds_path());
     let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -2677,6 +2689,57 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
+// ---------- proxy đầu ra (mỗi vân tay một IP) ----------
+
+/// Trạng thái pool + bảng ghim: dashboard hiện đúng cái đang có hiệu lực, kèm lỗi cấu hình
+/// (một dòng proxy sai định dạng phải nhìn thấy được, không im lặng bỏ qua).
+async fn api_proxy_get() -> Json<Value> {
+    let pool = crate::proxypool::snapshot();
+    let bindings: Vec<Value> = crate::proxypool::snapshot_bindings()
+        .into_iter()
+        .map(|(fp, raw)| {
+            let masked = crate::proxypool::ProxyEntry::parse(&raw).map(|e| e.masked()).unwrap_or(raw);
+            json!({"fingerprint": fp, "proxy": masked})
+        })
+        .collect();
+    Json(json!({
+        "mode": pool.mode.as_str(),
+        "entries": pool.entries.iter().map(|e| e.masked()).collect::<Vec<_>>(),
+        "count": pool.entries.len(),
+        "problems": pool.problems,
+        "bindings": bindings,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ProxySetReq {
+    /// mỗi dòng một proxy; ghi đè toàn bộ danh sách
+    list: String,
+}
+
+/// Ghi đè danh sách proxy. Chỉ ghi khi MỌI dòng hợp lệ — trả lỗi từng dòng để sửa.
+async fn api_proxy_set(Json(r): Json<ProxySetReq>) -> (StatusCode, Json<Value>) {
+    match crate::proxypool::write_file(&r.list) {
+        Ok(n) => {
+            // danh sách đổi → client cũ có thể đang ghim proxy không còn tồn tại: bỏ hết client đã dựng
+            // để lần request sau dựng lại theo ghim mới
+            crate::client::forget_all();
+            crate::elog!("[proxy] đã ghi {} proxy", n);
+            (StatusCode::OK, Json(json!({"ok": true, "count": n})))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": format!("{:#}", e)}))),
+    }
+}
+
+#[derive(Deserialize)]
+struct ProxyUnbindReq { fingerprint: String }
+
+/// Bỏ ghim của một vân tay → lần dùng sau sẽ được cấp proxy khác (đổi IP của acc đó).
+async fn api_proxy_unbind(Json(r): Json<ProxyUnbindReq>) -> Json<Value> {
+    crate::proxypool::unbind(&r.fingerprint);
+    Json(json!({"ok": true}))
+}
+
 async fn api_models() -> Json<Value> {
     // MỘT model duy nhất; mức suy nghĩ chọn bằng `reasoning_effort`: "none" = Nhanh (flash), còn lại ("max"…) = DeepThink.
     Json(json!({
@@ -3252,6 +3315,8 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/extension.zip", get(api_extension_zip))
         .route("/api/capture", post(api_capture_from_chrome))
         .route("/api/login_start", post(api_login_start))
+        .route("/api/proxy", get(api_proxy_get).post(api_proxy_set))
+        .route("/api/proxy/unbind", post(api_proxy_unbind))
         .route("/api/stats", get(api_stats))
         .route("/api/usage", get(api_usage))
         .route("/api/logs", get(api_logs))

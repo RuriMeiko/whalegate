@@ -143,6 +143,8 @@
   .row input[type=number] { text-align: right; } .row select { padding: 0 8px; }
   .ctl { display: grid; grid-template-columns: 124px 52px 32px; gap: 6px; align-items: center; flex: none; }
   .ctl > input, .ctl > select, .ctl > .seg2 { width: 100%; height: 34px; }
+.ctl:has(> textarea) { grid-template-columns: 1fr 32px; }
+.ctl > textarea { width: 100%; grid-column: 1; font: inherit; font-size: 12px; line-height: 1.5; resize: vertical; padding: 6px 8px; border-radius: 8px; }
   .ctl .u { white-space: nowrap; }
   .seg2 { display: flex; border: 1px solid var(--ink); }
   .seg2 button { border: 0; padding: 0; font-size: 11px; flex: 1; height: 100%; }
@@ -946,6 +948,16 @@ function cfgRow(c) {
     sel.value = v;
     sel.onchange = () => cfgSet(c.key, sel.value);
     ctl.append(sel);
+  } else if (c.kind === 'text') {
+    // văn bản nhiều dòng (danh sách proxy). Không trim khi gõ để giữ được dòng trống giữa chừng;
+    // giá trị gửi đi vẫn được server kiểm tra từng dòng.
+    const ta = el('textarea');
+    ta.rows = Math.min(8, Math.max(2, v.split('\n').length));
+    ta.value = v;
+    ta.spellcheck = false;
+    ta.setAttribute('aria-label', c.label || c.key);
+    ta.oninput = () => cfgSet(c.key, ta.value);
+    ctl.append(ta);
   } else {
     const inp = el('input'); inp.type = 'number'; inp.min = c.min; inp.max = c.max; inp.step = 1;
     inp.value = v; inp.setAttribute('aria-label', c.label || c.key);

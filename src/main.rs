@@ -6,6 +6,7 @@ mod client;
 mod fingerprint;
 mod chrome_capture;
 mod pow;
+mod proxypool;
 mod server;
 mod settings;
 mod setup_dsh;

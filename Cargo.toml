@@ -8,7 +8,8 @@ async-stream = "0.3"
 # "cookies" không dùng: cookie truyền tay qua header (mỗi acc một bộ cookie riêng)
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "multipart", "rustls-tls", "charset"] }
 # Giả lập trình duyệt: TLS (BoringSSL như Chrome) + HTTP/2 + header đúng từng phiên bản, mỗi acc một profile
-wreq = { version = "6.0.0-rc.31", features = ["json", "multipart", "stream", "gzip", "brotli", "zstd", "deflate", "cookies"] }
+# "socks": proxy đầu ra socks5/socks5h (mỗi acc một IP khác) — xem src/proxypool.rs
+wreq = { version = "6.0.0-rc.31", features = ["json", "multipart", "stream", "gzip", "brotli", "zstd", "deflate", "cookies", "socks"] }
 wreq-util = "3.0.0-rc.14"
 # Chỉ bật feature thực dùng — "full" kéo cả signal/process/net-unix... làm build chậm
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "io-util"] }
