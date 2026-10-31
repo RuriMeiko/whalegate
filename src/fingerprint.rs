@@ -170,6 +170,7 @@ impl Fingerprint {
         list
     }
 
+    #[cfg(test)]
     pub fn sec_ch_ua(&self) -> String {
         self.brands(false).iter().map(|(b, v)| format!("\"{}\";v=\"{}\"", b, v)).collect::<Vec<_>>().join(", ")
     }

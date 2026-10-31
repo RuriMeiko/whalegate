@@ -1,9 +1,8 @@
-// Capture DeepSeek session qua CDP (port 9333) — Chrome của user.
-// Flow login acc mới (1 nút):
-//   mở tab DS sign_in (tab thường, profile chính) → user login kiểu gì cũng được
-//   → server CANH đúng tab đó (poll 2s) → thấy token → verify → lưu → TỰ TẮT TAB.
-//   Không cần bấm quét tabs.
-// Fallback máy không có CDP: dán JSON {token, cookies} thủ công.
+// Chrome và DeepSeek qua CDP.
+// - Chrome riêng của từng acc (profile + vân tay riêng, cổng CDP ngẫu nhiên):
+//   * login: mở cửa sổ sign_in → user login kiểu gì cũng được → canh 1s/lần → thấy token → verify → lưu → tắt ngay.
+//   * dán token: mở nền (headless), ghi token vào localStorage → DeepSeek sinh cookie + device id → lưu → tắt.
+// - Chrome chính của user (cổng 9333): quét tab đã login, làm mới cookie định kỳ.
 use anyhow::{bail, Context, Result};
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -27,26 +26,21 @@ fn cdp_http(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
-// Port CDP RIÊNG cho Chrome instance login (tránh đụng Chrome chính 9333)
-pub fn login_cdp_port() -> u16 {
-    static V: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("DS_LOGIN_CDP_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(9777)
-    })
-}
-
-fn login_cdp_http() -> String {
-    format!("http://127.0.0.1:{}", login_cdp_port())
-}
-
-/// Profile login CỐ ĐỊNH (tái dùng mỗi lần login, KHÔNG xoá sau khi dùng) —
-/// fingerprint ổn định qua các lần login để DS risk-engine không flag
-/// "Current device environment error". Xoá tay bằng env DS_RESET_LOGIN_PROFILE=1.
-pub fn login_profile_dir() -> String {
-    std::env::var("DS_LOGIN_PROFILE").unwrap_or_else(|_| format!("{}/login-profile", crate::server::data_dir()))
+/// Cổng CDP cho Chrome riêng của acc: mỗi lần mở chọn ngẫu nhiên một cổng trống trong 40000–60000 (tránh các cổng
+/// debug phổ biến như 9222/9333 mà tool khác hay dò). DS_LOGIN_CDP_PORT ép một cổng cố định nếu cần.
+fn pick_cdp_port() -> Result<u16> {
+    if let Some(p) = std::env::var("DS_LOGIN_CDP_PORT").ok().and_then(|v| v.parse().ok()) {
+        return Ok(p);
+    }
+    for _ in 0..50 {
+        let r = u16::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..2].try_into().unwrap_or([0, 0]));
+        let port = 40000 + r % 20000;
+        // bind thử rồi nhả: cổng trống thì Chrome lấy được ngay sau đó
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Ok(port);
+        }
+    }
+    bail!("không tìm được cổng CDP trống trong 40000–60000")
 }
 
 /// Tìm binary Chrome trên máy: DS_CHROME_BIN → đường dẫn cài mặc định (macOS/Windows) → tên lệnh trong PATH.
@@ -84,124 +78,6 @@ fn find_chrome_binary() -> Result<String> {
         }
     }
     bail!("không tìm thấy Chrome/Chromium trên máy — cài google-chrome hoặc đặt DS_CHROME_BIN")
-}
-
-/// SPAWN Chrome instance RIÊNG cho login: port CDP riêng (9777, config
-/// DS_LOGIN_CDP_PORT) để không đụng Chrome chính; profile CỐ ĐỊNH
-/// (~/.whalegate/login-profile) để fingerprint ổn định, tránh lỗi
-/// "Current device environment error" của DS risk-engine; mở thẳng trang sign_in DS.
-/// Trả (Child process, đường dẫn profile) — caller kill Chrome khi xong (GIỮ profile).
-pub async fn spawn_login_chrome() -> Result<(std::process::Child, String)> {
-    let bin = find_chrome_binary()?;
-    // reset profile nếu user yêu cầu
-    let profile = login_profile_dir();
-    if std::env::var("DS_RESET_LOGIN_PROFILE").as_deref() == Ok("1") {
-        let _ = std::fs::remove_dir_all(&profile);
-    }
-    let port = login_cdp_port();
-    let mut child = std::process::Command::new(&bin)
-        .arg(format!("--remote-debugging-port={}", port))
-        .arg(format!("--user-data-dir={}", profile))
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--disable-features=Translate")
-        .arg("https://chat.deepseek.com/sign_in")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context(format!("không spawn được Chrome ({})", bin))?;
-
-    // chờ CDP của instance mới sẵn sàng (tối đa 20s)
-    let mut ready = false;
-    for _ in 0..40 {
-        if let Ok(resp) = reqwest::get(format!("{}/json/version", login_cdp_http())).await {
-            if resp.status().is_success() {
-                ready = true;
-                break;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    if !ready {
-        let _ = child.kill();
-        let _ = std::fs::remove_dir_all(&profile);
-        bail!("Chrome login đã mở nhưng CDP :{} không sẵn sàng sau 20s", port);
-    }
-    Ok((child, profile))
-}
-
-// ---------- BUILD PROFILE: nuôi profile login giống real user ----------
-
-const WARMUP_SITES: &[&str] = &[
-    "https://www.wikipedia.org/",
-    "https://news.ycombinator.com/",
-    "https://www.bing.com/",
-];
-
-/// BUILD PROFILE (warm-up): mở Chrome login, dạo vài site phổ biến + vào trang DS
-/// đọc nội dung (như user lướt web), đợi đủ lâu để Chrome cache assets phổ biến
-/// (favicon, JS của các CDN), Google/DS set device-id cookies quan sát được
-/// (smidV2, ds_session_id), và lịch sử + IndexedDB của DS tạo nền fingerprint "đã dùng máy".
-/// Gọi 1 lần trước khi login acc đầu. Lần login sau dùng lại profile này.
-pub async fn build_profile(warmup_secs: u64) -> Result<String> {
-    let (mut child, profile) = spawn_login_chrome().await?;
-    // đảm bảo Chrome load xong trang sign_in trước khi dạo
-    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-
-    // dạo vài site phổ biến (mở tab, đợi, đóng) — tạo lịch sử browser thật
-    let mut conn = CdpConn::connect(&browser_ws_url_for_login().await?).await?;
-    for site in WARMUP_SITES {
-        let tgt = conn
-            .call(
-                "Target.createTarget",
-                json!({"url": site, "background": true}),
-            )
-            .await?;
-        let tab_id = tgt["targetId"].as_str().unwrap_or("").to_string();
-        // ở lại site 1 nhịp — như user đọc trang
-        tokio::time::sleep(std::time::Duration::from_secs(warmup_secs.max(3))).await;
-        if !tab_id.is_empty() {
-            let _ = conn
-                .call("Target.closeTarget", json!({"targetId": tab_id}))
-                .await;
-        }
-    }
-
-    // vào trang chính DS ở lại chút (để DS set device-id/fp cookies trước khi login)
-    let tgt = conn
-        .call(
-            "Target.createTarget",
-            json!({"url": "https://chat.deepseek.com/", "background": true}),
-        )
-        .await?;
-    let tab_id = tgt["targetId"].as_str().unwrap_or("").to_string();
-    tokio::time::sleep(std::time::Duration::from_secs(warmup_secs.max(3))).await;
-    if !tab_id.is_empty() {
-        let _ = conn
-            .call("Target.closeTarget", json!({"targetId": tab_id}))
-            .await;
-    }
-
-    // tắt Chrome, GIỮ profile
-    let _ = child.kill();
-    let _ = child.wait();
-    Ok(format!(
-        "profile warm xong: {} site + DS trang chính, tổng ~{}s — profile: {}",
-        WARMUP_SITES.len() + 1,
-        ((WARMUP_SITES.len() + 1) as u64) * warmup_secs.max(3),
-        profile
-    ))
-}
-
-async fn browser_ws_url_for_login() -> Result<String> {
-    let d: Value = reqwest::get(format!("{}/json/version", login_cdp_http()))
-        .await?
-        .json()
-        .await?;
-    Ok(d["webSocketDebuggerUrl"]
-        .as_str()
-        .context("no browser ws (login)")?
-        .to_string())
 }
 
 struct CdpConn {
@@ -314,7 +190,7 @@ async fn verify_and_build(
     Ok(CapturedSession { token, cookies, email, uid, fp_seed: fp_seed.map(|s| s.to_string()), device_id })
 }
 
-/// CANH 1 tab login: poll 2s/lần tới khi tab có token (login xong) hoặc hết giờ.
+/// CANH 1 tab login: poll 1s/lần tới khi tab có token (login xong) hoặc hết giờ.
 /// Verify token rồi trả session — caller tự đóng tab sau khi lưu.
 pub async fn watch_login_tab(ws_url: String, timeout_secs: u64, port: u16, fp_seed: &str) -> Result<CapturedSession> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
@@ -336,7 +212,8 @@ pub async fn watch_login_tab(ws_url: String, timeout_secs: u64, port: u16, fp_se
                 return Ok(s);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // 1s: login xong là thấy gần như ngay, caller tắt cửa sổ liền sau khi xác minh
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -425,6 +302,14 @@ pub struct AccountBrowser {
     child: std::process::Child,
     pub port: u16,
     injector: tokio::task::JoinHandle<()>,
+    // giữ khoá cổng CDP login tới khi đóng: login tay và làm mới nền xếp hàng thay vì giẫm lên nhau
+    _slot: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Chỉ một Chrome riêng của acc chạy tại một thời điểm (chung cổng CDP login).
+fn browser_slot() -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static S: std::sync::OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> = std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Arc::new(tokio::sync::Mutex::new(()))).clone()
 }
 
 impl AccountBrowser {
@@ -444,16 +329,19 @@ pub fn account_profile_dir(seed: &str) -> String {
 /// Mở Chrome riêng cho acc (profile riêng, cổng CDP login), áp vân tay lên MỌI tab/iframe mở ra
 /// (UA + client hints, múi giờ, canvas/WebGL/audio/màn hình/phần cứng) rồi đưa tab đầu tới `start_url`.
 /// Trả (browser, ws url của tab đầu).
-pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_url: &str) -> Result<(AccountBrowser, String)> {
-    let port = login_cdp_port();
-    if reqwest::get(format!("{}/json/version", cdp_http(port))).await.is_ok() {
-        bail!("đang có một phiên Chrome login khác chạy trên cổng {} — đóng nó rồi thử lại", port);
-    }
+pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_url: &str, headless: bool) -> Result<(AccountBrowser, String)> {
+    let slot = browser_slot().lock_owned().await;
+    let port = pick_cdp_port()?;
     let bin = find_chrome_binary()?;
     let profile = account_profile_dir(&fp.seed);
     std::fs::create_dir_all(&profile).ok();
     let (w, h) = fp.window_size();
-    let mut child = std::process::Command::new(&bin)
+    let mut cmd = std::process::Command::new(&bin);
+    if headless {
+        // headless "new" là Chrome đầy đủ; UA "HeadlessChrome" bị vân tay ghi đè trên mọi tab
+        cmd.arg("--headless=new");
+    }
+    let mut child = cmd
         .arg(format!("--remote-debugging-port={}", port))
         .arg(format!("--user-data-dir={}", profile))
         .arg(format!("--window-size={},{}", w, h))
@@ -488,7 +376,7 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
             crate::elog!("[fingerprint] injector dừng: {}", e);
         }
     });
-    let browser = AccountBrowser { child, port, injector };
+    let browser = AccountBrowser { child, port, injector, _slot: slot };
     if tokio::time::timeout(std::time::Duration::from_secs(15), ready_rx).await.map_err(|_| ()).and_then(|r| r.map_err(|_| ())).is_err() {
         browser.close();
         bail!("không áp được vân tay lên tab đầu trong 15s");
@@ -562,6 +450,42 @@ async fn run_injector(ws_url: String, fp: crate::fingerprint::Fingerprint, start
     Ok(())
 }
 
+/// Biến một token thành thiết bị đầy đủ: mở Chrome riêng của seed (nền), ghi token vào localStorage như web lưu,
+/// tải lại để DeepSeek sinh cookie thiết bị (smidV2, aws-waf-token, ds_session_id) và device id, rồi đọc ra.
+/// Dùng cho acc thêm bằng token, nâng cấp acc cũ lên thiết bị riêng, và làm mới cookie định kỳ.
+pub async fn materialize_device(fp: &crate::fingerprint::Fingerprint, token: &str) -> Result<CapturedSession> {
+    let (browser, ws) = launch_account_chrome(fp, "https://chat.deepseek.com/", true).await?;
+    let res = async {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let mut conn = CdpConn::connect(&ws).await?;
+        let stored = json!({"value": token, "__version": "0"}).to_string();
+        let set = format!(
+            "(() => {{ const cur = (() => {{ try {{ return JSON.parse(localStorage.getItem('userToken') || '{{}}').value }} catch (e) {{ return null }} }})(); \
+               if (cur === {tok}) return false; localStorage.setItem('userToken', {stored}); return true; }})()",
+            tok = serde_json::to_string(token)?, stored = serde_json::to_string(&stored)?);
+        let changed = conn.call("Runtime.evaluate", json!({"expression": set, "returnByValue": true})).await?;
+        if changed["result"]["value"].as_bool().unwrap_or(false) {
+            let _ = conn.call("Page.reload", json!({})).await;
+        }
+        // chờ trang chạy xong JS thiết bị: có smidV2 + ds_session_id thì đủ; WAF token có thể tới sau vài giây
+        let mut last = None;
+        for i in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if let Ok((t, cookies, device)) = read_session_from_page(&ws).await {
+                if t != token { bail!("trang không nhận token (đang có token khác)"); }
+                let full = cookies.contains_key("smidV2") && cookies.contains_key("ds_session_id")
+                    && (cookies.contains_key("aws-waf-token") || i >= 15);
+                last = Some((cookies, device));
+                if full { break; }
+            }
+        }
+        let (cookies, device) = last.context("không đọc được phiên từ trang sau 30s")?;
+        verify_and_build(token.to_string(), cookies, device, Some(&fp.seed)).await
+    }.await;
+    browser.close();
+    res
+}
+
 #[cfg(test)]
 mod live_tests {
     use super::*;
@@ -572,7 +496,7 @@ mod live_tests {
     async fn live_fp_applied_in_real_chrome() {
         for seed in ["live-a", "live-b"] {
             let fp = crate::fingerprint::Fingerprint::from_seed(seed);
-            let (b, ws) = launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in").await.unwrap();
+            let (b, ws) = launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", false).await.unwrap();
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             let mut c = CdpConn::connect(&ws).await.unwrap();
             let js = r#"(()=>{const c=document.createElement('canvas');c.width=200;c.height=50;const x=c.getContext('2d');x.font='16px Arial';x.fillText('whalegate',10,30);
@@ -593,7 +517,7 @@ mod live_tests {
     #[ignore]
     async fn live_bot_pages() {
         let fp = crate::fingerprint::Fingerprint::from_seed("live-a");
-        let (b, ws) = launch_account_chrome(&fp, "https://bot.sannysoft.com/").await.unwrap();
+        let (b, ws) = launch_account_chrome(&fp, "https://bot.sannysoft.com/", false).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
         let mut c = CdpConn::connect(&ws).await.unwrap();
         // mọi dòng: tên | kết quả | màu nền ô kết quả (đỏ/cam = fail/warn trên trang)
@@ -610,7 +534,7 @@ mod live_tests {
     async fn live_gl_fonts() {
         for seed in ["live-a", "live-b"] {
             let fp = crate::fingerprint::Fingerprint::from_seed(seed);
-            let (b, ws) = launch_account_chrome(&fp, "https://example.com/").await.unwrap();
+            let (b, ws) = launch_account_chrome(&fp, "https://example.com/", false).await.unwrap();
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             let mut c = CdpConn::connect(&ws).await.unwrap();
             let js = r#"(()=>{const g=document.createElement('canvas').getContext('webgl');
@@ -631,12 +555,29 @@ mod live_tests {
     #[ignore]
     async fn live_wire_order() {
         let fp = crate::fingerprint::Fingerprint::from_seed("live-a");
-        let (b, ws) = launch_account_chrome(&fp, "https://tls.peet.ws/").await.unwrap();
+        let (b, ws) = launch_account_chrome(&fp, "https://tls.peet.ws/", false).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let mut c = CdpConn::connect(&ws).await.unwrap();
         let js = r#"fetch('/api/all',{method:'POST',credentials:'include',headers:{'authorization':'Bearer x','content-type':'application/json','x-client-platform':'web','x-client-version':'2.7.0','x-client-locale':'vi','x-client-bundle-id':'com.deepseek.chat','x-client-timezone-offset':'25200','x-device-model':'','x-device-id':'d','x-ds-pow-response':'p'},body:'{}'}).then(r=>r.json()).then(j=>JSON.stringify(j.http2.sent_frames.filter(f=>f.headers).flatMap(f=>f.headers.map(h=>h.split(': ')[0]))))"#;
         let r = c.call("Runtime.evaluate", json!({"expression": js, "returnByValue": true, "awaitPromise": true})).await.unwrap();
         println!("CHROME_ORDER {}", r["result"]["value"]);
         b.close();
+    }
+
+    /// Token → thiết bị (headless), dùng acc đầu trong store, profile tạm rồi xoá: `cargo test live_materialize -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_materialize() {
+        let raw = std::fs::read_to_string(format!("{}/.whalegate/accounts.json", std::env::var("HOME").unwrap())).unwrap();
+        let st: Value = serde_json::from_str(&raw).unwrap();
+        let token = st["accounts"][0]["token"].as_str().unwrap().to_string();
+        let fp = crate::fingerprint::Fingerprint::from_seed("live-mat");
+        let t = std::time::Instant::now();
+        let r = materialize_device(&fp, &token).await;
+        match r {
+            Ok(s) => println!("MAT ok {}s cookies={:?} device={} email={}", t.elapsed().as_secs(), s.cookies.keys().collect::<Vec<_>>(), s.device_id.is_some(), s.email.is_some()),
+            Err(e) => println!("MAT err {}s {e:#}", t.elapsed().as_secs()),
+        }
+        let _ = std::fs::remove_dir_all(account_profile_dir("live-mat"));
     }
 }

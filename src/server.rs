@@ -88,6 +88,9 @@ pub struct Account {
     /// device id thật của Chrome riêng của acc (x-device-id); None = dẫn xuất từ seed
     #[serde(default)]
     pub device_id: Option<String>,
+    /// lần cuối lấy cookie thiết bị từ Chrome riêng của acc (unix giây)
+    #[serde(default)]
+    pub device_refreshed_at: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -641,6 +644,7 @@ async fn api_add_account(
         ds_uid: uid.clone(),
         fp_seed: None,
         device_id: None,
+        device_refreshed_at: None,
     };
     let id = acc.id.clone();
     store.accounts.push(acc);
@@ -665,6 +669,8 @@ async fn api_list_accounts(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "token_prefix": a.token.get(..8).unwrap_or("?"),
                 "pool_enabled": a.pool_enabled,
                 "uid": a.ds_uid,
+                "device": a.fp_seed.is_some(),
+                "device_refreshed_at": a.device_refreshed_at,
             })
         })
         .collect();
@@ -2495,6 +2501,8 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "last_status": a.last_status,
                 "pool_enabled": a.pool_enabled,
                 "uid": a.ds_uid,
+                "device": a.fp_seed.is_some(),
+                "device_refreshed_at": a.device_refreshed_at,
                 "dup": a.ds_uid.as_ref().is_some_and(|u| store.accounts.iter().filter(|b| b.ds_uid.as_ref() == Some(u)).count() > 1),
             })
         })
@@ -2585,6 +2593,7 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                             ds_uid: s.uid.clone(),
                             fp_seed: s.fp_seed.clone(),
                             device_id: s.device_id.clone(),
+                            device_refreshed_at: None,
                         };
                         emails.push(s.email.clone().unwrap_or_else(|| "unknown".into()));
                         store.accounts.push(acc);
@@ -2609,35 +2618,8 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
     out
 }
 
-// BUILD PROFILE: nuôi profile login giống real user (dạo web, cache, cookies nền)
-// Trả về ngay khi bắt đầu — chạy nền, UI hiện "đang build profile"
-async fn api_build_profile(State(st): State<Arc<AppState>>) -> Json<Value> {
-    {
-        let mut watching = st.login_watching.lk();
-        if *watching {
-            return Json(json!({"ok": false, "error": "đang canh login/build — đợi xong rồi thử"}));
-        }
-        *watching = true;
-    }
-    let st2 = st.clone();
-    tokio::spawn(async move {
-        // 6s/site — đủ để cache + cookies nền
-        let res = crate::chrome_capture::build_profile(6).await;
-        let mut watching = st2.login_watching.lk();
-        *watching = false;
-        match res {
-            Ok(msg) => crate::elog!("[build-profile] {}", msg),
-            Err(e) => crate::elog!("[build-profile] lỗi: {}", e),
-        }
-    });
-    Json(json!({
-        "ok": true,
-        "note": "đang build profile (dạo web thật + cache) — ~40s, xong sẽ báo trong log; sau đó bấm Login account mới"
-    }))
-}
-
-// LOGIN 1 NÚT: mở tab DS thường → user login kiểu gì cũng được → server canh tab
-// → thấy token → verify → LƯU → TỰ TẮT TAB. Không cần bấm gì thêm sau khi login.
+// LOGIN 1 NÚT: mở Chrome riêng của acc mới (profile + vân tay riêng) → user login kiểu gì cũng được → server canh tab
+// → thấy token → verify → LƯU → TẮT CHROME (giữ profile). Không cần bấm gì thêm sau khi login.
 // Chỉ 1 login đang canh tại 1 thời điểm (flag in-flight).
 async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
     // chặn double-start
@@ -2661,8 +2643,71 @@ async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
     });
     Json(json!({
         "ok": true,
-        "note": "tab DS đã mở — login trong đó, thấy login xong phần mềm TỰ lưu session + TỰ tắt tab"
+        "note": "đã mở cửa sổ Chrome riêng — login trong đó, login xong phần mềm tự lưu và tự đóng cửa sổ"
     }))
+}
+
+/// Làm mới cookie thiết bị của acc có thiết bị riêng (login qua Chrome riêng): mở lại đúng Chrome/profile/vân tay
+/// của acc ở chế độ nền, DeepSeek cấp cookie mới (WAF…), ghi vào acc. KHÔNG cấp thiết bị mới cho acc chưa có: một phiên
+/// đang sống bỗng xuất hiện trên máy khác (UA/OS/device id/smidV2 khác) là tín hiệu dễ bị đánh dấu.
+async fn give_device(st: &Arc<AppState>, id: &str) -> Result<String> {
+    let (token, seed) = {
+        let store = st.store.read().await;
+        let a = store.accounts.iter().find(|a| a.id == id).ok_or_else(|| anyhow::anyhow!("không tìm thấy tài khoản"))?;
+        (a.token.clone(), a.fp_seed.clone())
+    };
+    let seed = seed.ok_or_else(|| anyhow::anyhow!("tài khoản này không có thiết bị riêng (chỉ acc đăng nhập qua Chrome mới làm mới được)"))?;
+    let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
+    let s = crate::chrome_capture::materialize_device(&fp, &token).await?;
+    {
+        let mut store = st.store.write().await;
+        let a = store.accounts.iter_mut().find(|a| a.id == id).ok_or_else(|| anyhow::anyhow!("tài khoản đã bị xoá"))?;
+        if a.token != token { anyhow::bail!("token của acc đổi trong lúc dựng thiết bị — bỏ kết quả"); }
+        a.fp_seed = Some(seed);
+        a.device_id = s.device_id.clone();
+        a.cookies = s.cookies.clone();
+        a.device_refreshed_at = Some(now());
+        a.last_verified = Some(now());
+        crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+        crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+    }
+    mark_dirty(st);
+    flush_store(st).await;
+    Ok(fp.user_agent())
+}
+
+/// Nút "thiết bị" trên dashboard: làm mới cookie thiết bị của acc ngay.
+async fn api_account_device(
+    State(st): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<Value> {
+    match give_device(&st, &id).await {
+        Ok(ua) => Json(json!({"ok": true, "ua": ua})),
+        Err(e) => Json(json!({"ok": false, "error": format!("{:#}", e)})),
+    }
+}
+
+/// Làm mới cookie thiết bị (aws-waf-token hết hạn cần JS challenge trong trình duyệt) cho các acc có thiết bị riêng,
+/// lần lượt từng acc, mỗi DS_DEVICE_REFRESH_HOURS giờ. 0 = tắt.
+async fn device_refresh_loop(st: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        let hours = crate::settings::uint("DS_DEVICE_REFRESH_HOURS");
+        if hours == 0 { continue; }
+        let due: Vec<(String, String)> = {
+            let store = st.store.read().await;
+            store.accounts.iter()
+                .filter(|a| a.fp_seed.is_some() && a.device_refreshed_at.map(|t| now().saturating_sub(t) >= hours * 3600).unwrap_or(true))
+                .map(|a| (a.id.clone(), a.label.clone()))
+                .collect()
+        };
+        for (id, label) in due {
+            match give_device(&st, &id).await {
+                Ok(_) => crate::elog!("[device] đã làm mới cookie thiết bị: {}", label),
+                Err(e) => crate::elog!("[device] làm mới thiết bị {} lỗi: {:#}", label, e),
+            }
+        }
+    }
 }
 
 async fn login_flow(st: Arc<AppState>) -> Result<()> {
@@ -2672,7 +2717,7 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
     let seed = crate::fingerprint::new_seed();
     let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
     crate::elog!("[login-flow] vân tay mới: {} {} cores={} gpu={}", fp.user_agent(), fp.screen.0, fp.cores, fp.gpu_renderer);
-    let (browser, ws_url) = crate::chrome_capture::launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in").await?;
+    let (browser, ws_url) = crate::chrome_capture::launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", false).await?;
     crate::elog!("[login-flow] Chrome riêng của acc đã mở (cổng {})", browser.port);
 
     // canh login tới 10 phút, xong thì tắt Chrome (giữ profile)
@@ -2690,7 +2735,7 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
             a.last_verified = Some(now());
             a.last_status = Some("ok (re-login)".into());
             a.stats.reset();
-            if session.fp_seed.is_some() { a.fp_seed = session.fp_seed.clone(); a.device_id = session.device_id.clone(); }
+            if session.fp_seed.is_some() { a.fp_seed = session.fp_seed.clone(); a.device_id = session.device_id.clone(); a.device_refreshed_at = Some(now()); }
         } else if let Some(a) = session.uid.as_ref().and_then(|u| store.accounts.iter_mut().find(|a| a.ds_uid.as_deref() == Some(u.as_str()))) {
             // cùng người dùng đăng nhập lại (token mới): thay token thay vì thêm bản trùng
             // đổi token vẫn giữ nguyên vân tay: chốt seed vào acc (acc cũ: seed = token cũ) rồi gắn sang token mới
@@ -2703,7 +2748,7 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
             a.last_status = Some("ok (re-login)".into());
             a.stats.reset();
             a.thread_session_id = None;
-            if session.fp_seed.is_some() { a.fp_seed = session.fp_seed.clone(); a.device_id = session.device_id.clone(); }
+            if session.fp_seed.is_some() { a.fp_seed = session.fp_seed.clone(); a.device_id = session.device_id.clone(); a.device_refreshed_at = Some(now()); }
         } else {
             let acc = Account {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -2721,6 +2766,7 @@ async fn login_flow(st: Arc<AppState>) -> Result<()> {
                 ds_uid: session.uid.clone(),
                 fp_seed: session.fp_seed.clone(),
                 device_id: session.device_id.clone(),
+                device_refreshed_at: session.fp_seed.as_ref().map(|_| now()),
             };
             store.accounts.push(acc);
         }
@@ -2925,9 +2971,9 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/accounts/{id}/verify", post(api_verify_account))
         .route("/api/accounts/{id}/pool", post(api_toggle_pool))
         .route("/api/accounts/{id}/reset", post(api_reset_account))
+        .route("/api/accounts/{id}/device", post(api_account_device))
         .route("/api/capture", post(api_capture_from_chrome))
         .route("/api/login_start", post(api_login_start))
-        .route("/api/build_profile", post(api_build_profile))
         .route("/api/stats", get(api_stats))
         .route("/api/usage", get(api_usage))
         .route("/api/logs", get(api_logs))
@@ -2949,7 +2995,8 @@ pub async fn run(port: u16) -> Result<()> {
     tokio::spawn(backfill_uids(st.clone()));
     tokio::spawn(conv_sweeper(st.clone()));
     tokio::spawn(store_flusher(st.clone()));
-    tokio::spawn(auto_refresh_loop(st));
+    tokio::spawn(auto_refresh_loop(st.clone()));
+    tokio::spawn(device_refresh_loop(st));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     // thử lại vài giây: lúc tự khởi động lại trên Windows tiến trình cũ có thể chưa kịp nhả cổng

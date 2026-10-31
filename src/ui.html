@@ -77,6 +77,9 @@
   button.ghost.bad { color: var(--bad); } button.ghost.bad:hover:not(:disabled) { color: var(--bad); }
   .bar { display: inline-flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
   .acc .nm small { font: 11px/1 var(--mono); color: var(--mute); font-weight: 400; margin-left: 8px; }
+  .dlg .alt { margin-top: 16px; border-top: 1px solid var(--hair); padding-top: 12px; }
+  .dlg .alt p { color: var(--mute); font-size: 12px; margin-bottom: 10px; }
+  .dlg .foot .hint { color: var(--mute); }
   .acc .dupe { font: 11px/1 var(--mono); color: var(--bad); border: 1px solid var(--bad); padding: 3px 6px; white-space: nowrap; }
   .empty { color: var(--mute); font: 12px/1.4 var(--mono); padding: 6px 0; }
 
@@ -235,16 +238,18 @@
   <div class="dlg">
     <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeAdd()">×</button></div>
     <div class="inner">
-      <p>Mở tab đã đăng nhập chat.deepseek.com → F12 → Console, dán lệnh này rồi chạy, sau đó dán kết quả vào ô dưới:</p>
+      <p>Mở tab đã đăng nhập chat.deepseek.com → F12 → Console, dán lệnh này rồi chạy, sau đó dán kết quả vào ô dưới.</p>
       <button class="cmd" id="cmdCopy" onclick="copyCmd()" title="Bấm để copy"><code>copy(localStorage.userToken)</code><span>copy</span></button>
       <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder='{"value":"…"} hoặc token trần'></textarea>
       <div class="btns" style="margin-top:10px"><input type="text" id="lblIn" style="flex:1;min-width:0" placeholder="nhãn (tuỳ chọn)" aria-label="Nhãn" autocomplete="off"><button class="solid" id="btnAdd" onclick="addManual()">Thêm</button></div>
+      <div class="alt">
+        <p>Hoặc đăng nhập trong một cửa sổ Chrome riêng (vân tay riêng); đăng nhập xong cửa sổ tự đóng.</p>
+        <button id="btnLogin" onclick="loginStart()">Đăng nhập qua Chrome</button>
+      </div>
     </div>
     <div class="foot">
-      <button class="ghost sm" id="btnLogin" onclick="loginStart()">Đăng nhập qua Chrome</button>
       <button class="ghost sm" id="btnScan" onclick="captureAll()">Quét tab Chrome</button>
-      <span class="sp"></span>
-      <button class="ghost sm" id="btnBuild" onclick="buildProfile()">Build profile</button>
+      <span class="hint">acc đang đăng nhập trong Chrome chính</span>
     </div>
   </div>
 </div>
@@ -483,7 +488,7 @@ async function loginStart() {
   try {
     const d = await post('/api/login_start');
     if (!d.ok) return say(d.error, 'err');
-    say('Đã mở tab DeepSeek — đăng nhập trong đó, xong tự lưu.', 'ok'); closeAdd();
+    say('Đã mở cửa sổ Chrome riêng — đăng nhập trong đó, xong tự lưu và tự đóng.', 'ok'); closeAdd();
     const t = setInterval(loadStats, 2000); setTimeout(() => clearInterval(t), 660000);
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
@@ -495,11 +500,19 @@ async function captureAll() {
     say(`+${d.added} mới, ${d.refreshed} làm mới${d.email ? ' · ' + d.email : ''}`, 'ok'); closeAdd(); loadStats();
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
-async function buildProfile() {
-  if (!(await ask('Build profile?', 'Mở Chrome login riêng và dạo web ~40 giây để nuôi fingerprint. Chỉ cần làm một lần.', 'Build'))) return;
-  const b = $('btnBuild'); b.disabled = true;
-  try { const d = await post('/api/build_profile'); say(d.ok ? 'Đang build ~40 giây' : d.error, d.ok ? 'ok' : 'err'); }
-  catch (e) { say(e.message, 'err'); } finally { setTimeout(() => { b.disabled = false; }, 45000); }
+/// "x phút/giờ/ngày trước" từ unix giây.
+function ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  return s < 3600 ? Math.round(s / 60) + ' phút trước' : s < 86400 ? Math.round(s / 3600) + ' giờ trước' : Math.round(s / 86400) + ' ngày trước';
+}
+async function device(a) {
+  const t = say('Đang làm mới thiết bị ' + a.label + '…', 'wait');
+  try {
+    const d = await post('/api/accounts/' + a.id + '/device');
+    if (t) t.remove();
+    say(d.ok ? a.label + ': đã làm mới cookie thiết bị' : d.error, d.ok ? 'ok' : 'err');
+  } catch (e) { if (t) t.remove(); say(e.message, 'err'); }
+  loadStats();
 }
 async function togglePool(a, enabled) {
   try {
@@ -612,8 +625,11 @@ function accItem(a, perAcc) {
     const on = (a.pool_enabled !== false) === val, b = el('button', on ? 'on' : '', txt); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', on);
     b.onclick = (e) => { e.stopPropagation(); if (!on) togglePool(a, val); }; sw.append(b);
   }
-  more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}`), el('span', 'sp'), sw);
+  // acc có thiết bị riêng (login qua Chrome): ghi lần làm mới cookie gần nhất
+  const dev = a.device && a.device_refreshed_at ? ' · làm mới ' + ago(a.device_refreshed_at) : '';
+  more.append(el('span', null, `ok ${a.total_ok} · rỗng ${a.total_empty} · lỗi ${a.total_error}${dev}`), el('span', 'sp'), sw);
   const mk = (t, cls, fn) => { const b = el('button', 'sm ' + cls, t); b.onclick = fn; return b; };
+  if (a.device) { const b = mk('thiết bị', '', () => device(a)); b.title = 'Làm mới cookie thiết bị ngay (Chrome nền của acc)'; more.append(b); }
   more.append(mk('sửa', '', () => openEdit(a)), mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label)), mk('xoá', 'del', () => del(a.id, a.label)));
   box.append(hd, more);
   return box;
