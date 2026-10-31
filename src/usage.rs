@@ -145,6 +145,8 @@ async fn fetch_pricing() -> anyhow::Result<Pricing> {
     let html = wreq::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .emulation(crate::fingerprint::Fingerprint::from_seed("whalegate-pricing").emulation())
+        // trang giá giờ trả 302; wreq mặc định không đi theo redirect như reqwest
+        .redirect(wreq::redirect::Policy::limited(5))
         .build()?
         .get(PRICING_URL).send().await?.error_for_status()?.text().await?;
     parse_pricing(&html, now_secs()).ok_or_else(|| anyhow::anyhow!("không đọc được bảng giá"))
