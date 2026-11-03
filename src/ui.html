@@ -131,6 +131,8 @@
 
   /* cài đặt */
   .row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--hair); min-height: 48px; }
+  /* hàng nhập email/mật khẩu trong hộp thêm acc: không viền dưới, input chia đôi */
+  .row > input { flex: 1; min-width: 0; }
   .row:last-child { border-bottom: 0; }
   .row .t { flex: 1; font: 13px/1.35 var(--sans); min-width: 0; }
   .row .t small { display: block; font: 11px/1.3 var(--mono); color: var(--mute); margin-top: 2px; }
@@ -288,8 +290,12 @@
         <a class="cmd bm" id="bmLink" href="#" onclick="return false" draggable="true"><code>Thêm vào whalegate</code><span>kéo lên bookmark</span></a>
       </section>
       <section data-p="chrome" hidden>
-        <p>Mở cửa sổ Chrome có vân tay riêng. Đăng nhập xong cửa sổ tự đóng.</p>
-        <div class="btns"><button class="ghost" id="btnScan" onclick="captureAll()" title="Lấy các tab chat.deepseek.com đang đăng nhập từ một Chrome mở với --remote-debugging-port=9333. Từ Chrome 136 cờ này bị bỏ qua ở profile mặc định (cần thêm --user-data-dir riêng); với Chrome hằng ngày hãy dùng tab Tiện ích.">Quét Chrome chính</button><button class="solid" id="btnLogin" onclick="loginStart()">Đăng nhập qua Chrome</button></div>
+        <p>Tự đăng nhập bằng email + mật khẩu trong Chrome có vân tay riêng — không cần bấm gì trong cửa sổ. Mật khẩu chỉ đi tới chat.deepseek.com, không lưu lại.</p>
+        <div class="row">
+          <input type="text" id="lgEmail" placeholder="email" autocomplete="username" aria-label="Email">
+          <input type="password" id="lgPass" placeholder="mật khẩu" autocomplete="current-password" aria-label="Mật khẩu">
+        </div>
+        <div class="btns"><button class="solid" id="btnAuto" onclick="loginAuto()">Đăng nhập tự động</button><span class="sp"></span><button class="ghost" id="btnLogin" onclick="loginStart()" title="Mở cửa sổ Chrome rồi bạn tự đăng nhập trong đó">Mở cửa sổ tự đăng nhập</button><button class="ghost" id="btnScan" onclick="captureAll()" title="Lấy các tab chat.deepseek.com đang đăng nhập từ một Chrome mở với --remote-debugging-port=9333. Từ Chrome 136 cờ này bị bỏ qua ở profile mặc định (cần thêm --user-data-dir riêng); với Chrome hằng ngày hãy dùng tab Tiện ích.">Quét Chrome chính</button></div>
       </section>
       <section data-p="paste" hidden>
         <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder="giá trị localStorage.userToken, hoặc kết quả lệnh console"></textarea>
@@ -635,6 +641,21 @@ async function addManual() {
     say(addedText(res, !!d.browser), 'ok');
     $('tokIn').value = ''; $('lblIn').value = ''; closeAdd(); loadStats();
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+}
+/// Đăng nhập tự động: gửi email/mật khẩu, server mở Chrome riêng và tự điền form.
+async function loginAuto() {
+  const em = $('lgEmail').value.trim(), pw = $('lgPass').value;
+  if (!em || !pw) return say('Nhập email và mật khẩu trước', 'err');
+  const b = $('btnAuto'); b.disabled = true;
+  const t = say('Đang đăng nhập ' + em + '…', 'wait');
+  try {
+    const d = await post('/api/login_auto', {email: em, password: pw, label: $('lgLabel') ? $('lgLabel').value.trim() : ''});
+    if (t) t.remove();
+    if (!d.ok) return say(d.error, 'err');
+    $('lgPass').value = '';
+    say('Đã đăng nhập ' + (d.label || em) + ' — acc đã vào pool', 'ok');
+    closeAdd(); loadStats();
+  } catch (e) { if (t) t.remove(); say(e.message, 'err'); } finally { b.disabled = false; }
 }
 async function loginStart() {
   const b = $('btnLogin'); b.disabled = true;

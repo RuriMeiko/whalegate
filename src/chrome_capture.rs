@@ -28,7 +28,7 @@ fn cdp_http(port: u16) -> String {
 
 /// Cổng CDP cho Chrome riêng của acc: mỗi lần mở chọn ngẫu nhiên một cổng trống trong 40000–60000 (tránh các cổng
 /// debug phổ biến như 9222/9333 mà tool khác hay dò). DS_LOGIN_CDP_PORT ép một cổng cố định nếu cần.
-fn pick_cdp_port() -> Result<u16> {
+pub(crate) fn pick_cdp_port() -> Result<u16> {
     if let Some(p) = std::env::var("DS_LOGIN_CDP_PORT").ok().and_then(|v| v.parse().ok()) {
         return Ok(p);
     }
@@ -45,7 +45,7 @@ fn pick_cdp_port() -> Result<u16> {
 
 /// Tìm binary Chrome trên máy: DS_CHROME_BIN → chỗ cài mặc định của từng hệ → (Linux/macOS) tên lệnh trong PATH.
 /// Ưu tiên Chrome, rồi mới tới Chromium/Edge/Brave (cùng nhân Chromium, CDP như nhau).
-fn find_chrome_binary() -> Result<String> {
+pub(crate) fn find_chrome_binary() -> Result<String> {
     if let Ok(bin) = std::env::var("DS_CHROME_BIN") {
         if !bin.trim().is_empty() { return Ok(bin); }
     }
@@ -128,18 +128,18 @@ fn parse_reg_default(out: &str) -> Option<String> {
     })
 }
 
-struct CdpConn {
+pub(crate) struct CdpConn {
     ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     next_id: u64,
 }
 
 impl CdpConn {
-    async fn connect(url: &str) -> Result<Self> {
+    pub(crate) async fn connect(url: &str) -> Result<Self> {
         let (ws, _) = tokio_tungstenite::connect_async(url).await?;
         Ok(Self { ws, next_id: 0 })
     }
 
-    async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         self.next_id += 1;
         let id = self.next_id;
         self.ws
@@ -161,9 +161,25 @@ impl CdpConn {
         }
         bail!("CDP connection closed")
     }
+
+    /// Đọc message kế tiếp trên kết nối, trả nguyên envelope — dùng cho luồng sự kiện
+    /// (Network.responseReceived…) khi không có id nào để chờ. Message không phải Text bị bỏ qua,
+    /// nhưng lỗi WebSocket thì trả về ngay để caller biết tab đã đóng.
+    ///
+    /// Hiện chỉ dùng trong test; luồng capture thật poll `Runtime.evaluate` vì giá trị cần
+    /// (device_id từ SDK, body đã hook) nằm trong trang chứ không ở sự kiện mạng.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn next_event(&mut self) -> Result<Value> {
+        while let Some(msg) = self.ws.next().await {
+            if let Message::Text(t) = msg? {
+                return Ok(serde_json::from_str(&t)?);
+            }
+        }
+        bail!("CDP connection closed")
+    }
 }
 
-async fn browser_ws_url(port: u16) -> Result<String> {
+pub(crate) async fn browser_ws_url(port: u16) -> Result<String> {
     let d: Value = reqwest::get(format!("{}/json/version", cdp_http(port)))
         .await?
         .json()
@@ -175,7 +191,7 @@ async fn browser_ws_url(port: u16) -> Result<String> {
         .to_string())
 }
 
-async fn list_pages(port: u16) -> Result<Vec<Value>> {
+pub(crate) async fn list_pages(port: u16) -> Result<Vec<Value>> {
     let body = reqwest::get(format!("{}/json/list", cdp_http(port))).await?.text().await?;
     Ok(serde_json::from_str(&body)?)
 }
@@ -269,6 +285,119 @@ pub async fn watch_login_tab(ws_url: String, timeout_secs: u64, port: u16, fp_se
     }
 }
 
+/// Điền form đăng nhập trong tab đang mở và bấm nút "Đăng nhập".
+///
+/// Chạy trong page context nên dùng đúng setter của React (`HTMLInputElement.prototype.value`)
+/// rồi mới bắn event `input`/`change` — gán thẳng `.value` thì React không thấy và nút vẫn disabled.
+/// Selector bám theo trang thật: input email là `type=text`, mật khẩu là `type=password`,
+/// nút là `div.ds-button` có chữ "Đăng nhập" (DeepSeek dùng div, không phải <button>).
+pub async fn submit_login_form(ws_url: &str, email: &str, password: &str) -> Result<()> {
+    let mut conn = CdpConn::connect(ws_url).await?;
+    // Chờ React render form: poll tối đa 15s cho tới khi thấy đủ 2 input
+    let probe = r#"(() => {
+        const ins = [...document.querySelectorAll('input')];
+        return JSON.stringify({n: ins.length, hasPw: ins.some(x => x.type === 'password')});
+    })()"#;
+    let mut ready = false;
+    for _ in 0..30 {
+        let r = conn.call("Runtime.evaluate", json!({"expression": probe, "returnByValue": true})).await?;
+        let v: Value = serde_json::from_str(r["result"]["value"].as_str().unwrap_or("{}")).unwrap_or(Value::Null);
+        if v["hasPw"].as_bool().unwrap_or(false) && v["n"].as_u64().unwrap_or(0) >= 2 { ready = true; break; }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    if !ready { bail!("trang đăng nhập không render form (thiếu input mật khẩu) sau 15s"); }
+
+    // Điền cả hai ô rồi bấm nút. Dùng JSON để nhúng chuỗi an toàn (mật khẩu có thể chứa nháy/backslash).
+    let js = format!(
+        r#"(() => {{
+            const ins = [...document.querySelectorAll('input')];
+            const em = ins.find(x => x.type === 'text' || x.type === 'email') || ins[0];
+            const pw = ins.find(x => x.type === 'password');
+            if (!em || !pw) return 'no_inputs';
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            em.focus(); setter.call(em, {email}); em.dispatchEvent(new Event('input', {{bubbles: true}})); em.dispatchEvent(new Event('change', {{bubbles: true}}));
+            pw.focus(); setter.call(pw, {password}); pw.dispatchEvent(new Event('input', {{bubbles: true}})); pw.dispatchEvent(new Event('change', {{bubbles: true}}));
+            const btn = [...document.querySelectorAll('div.ds-button, button')].find(x => (x.innerText || '').trim() === 'Đăng nhập');
+            if (!btn) return 'no_button';
+            if (btn.className && /disabled/.test(btn.className)) return 'button_disabled';
+            btn.click();
+            return 'submitted';
+        }})()"#,
+        email = serde_json::to_string(email)?,
+        password = serde_json::to_string(password)?,
+    );
+    let r = conn.call("Runtime.evaluate", json!({"expression": js, "returnByValue": true})).await?;
+    let status = r["result"]["value"].as_str().unwrap_or("");
+    match status {
+        "submitted" => Ok(()),
+        other => bail!("không bấm được nút đăng nhập: {other}"),
+    }
+}
+
+/// Cài hook bắt kết quả `/users/login` vào sessionStorage trước khi bấm nút.
+///
+/// Toast lỗi của DeepSeek tự tắt sau vài giây, nên đọc DOM lúc timeout thường không còn gì.
+/// Response API thì luôn có `data.biz_code`/`biz_msg` — hook XHR + fetch ở đây giữ lại đúng lý do
+/// server trả về (`PASSWORD_OR_USER_NAME_IS_WRONG`, `USER_IS_BANNED`, …).
+pub async fn install_login_response_hook(ws_url: &str) -> Result<()> {
+    let mut conn = CdpConn::connect(ws_url).await?;
+    let expr = r#"(() => {
+        if (window.__wgLoginHook) return 'already';
+        window.__wgLoginHook = true;
+        const record = (text) => {
+            try {
+                const v = JSON.parse(text);
+                const biz = v && v.data && v.data.biz_code;
+                if (biz !== undefined) {
+                    sessionStorage.setItem('__wg_login_result', JSON.stringify({
+                        biz_code: biz, biz_msg: (v.data && v.data.biz_msg) || '',
+                        has_token: !!(v.data && v.data.biz_data && v.data.biz_data.user && v.data.biz_data.user.token),
+                    }));
+                }
+            } catch (e) {}
+        };
+        const OS = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.send = function () {
+            try {
+                this.addEventListener('loadend', () => {
+                    try {
+                        if ((this.__u || '').indexOf('/users/login') >= 0) record(this.responseText || '');
+                    } catch (e) {}
+                });
+            } catch (e) {}
+            return OS.apply(this, arguments);
+        };
+        const OO = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function (m, u) { this.__u = String(u); return OO.apply(this, arguments); };
+        const OF = window.fetch;
+        window.fetch = function (input) {
+            const u = typeof input === 'string' ? input : (input && input.url) || '';
+            const p = OF.apply(this, arguments);
+            if (u.indexOf('/users/login') >= 0) {
+                p.then(r => { try { r.clone().text().then(record).catch(() => {}); } catch (e) {} }).catch(() => {});
+            }
+            return p;
+        };
+        return 'installed';
+    })()"#;
+    conn.call("Runtime.evaluate", json!({"expression": expr, "returnByValue": true})).await?;
+    Ok(())
+}
+
+/// Đọc kết quả login đã bắt được: `Some((biz_code, biz_msg))` khi API đã trả lời.
+pub async fn login_result(ws_url: &str) -> Option<(i64, String)> {
+    let mut conn = CdpConn::connect(ws_url).await.ok()?;
+    let r = conn
+        .call("Runtime.evaluate", json!({
+            "expression": "sessionStorage.getItem('__wg_login_result') || ''",
+            "returnByValue": true,
+        }))
+        .await
+        .ok()?;
+    let raw = r["result"]["value"].as_str().filter(|s| !s.is_empty())?;
+    let v: Value = serde_json::from_str(raw).ok()?;
+    Some((v["biz_code"].as_i64()?, v["biz_msg"].as_str().unwrap_or("").to_string()))
+}
 /// Quét mọi tab DS đang mở (phụ — dùng khi user tự login trong tab riêng).
 pub async fn capture_all_ds_tabs() -> Result<Vec<CapturedSession>> {
     capture_ds_tabs_on(MAIN_CDP_PORT, None).await
@@ -395,7 +524,7 @@ pub fn account_profile_dir(seed: &str) -> String {
 /// Biến môi trường màn hình cho Chrome có cửa sổ. Dịch vụ systemd thường khởi động trước phiên đồ hoạ nên tiến trình
 /// không có DISPLAY/WAYLAND_DISPLAY (Chrome mở cửa sổ sẽ thoát ngay); lấy lại từ systemd user — phiên đồ hoạ import
 /// chúng vào đó khi đăng nhập — không được thì dò socket Wayland/X11. Đã có sẵn trong môi trường thì không đụng.
-fn gui_env() -> Vec<(String, String)> {
+pub(crate) fn gui_env() -> Vec<(String, String)> {
     if !cfg!(target_os = "linux") { return Vec::new(); }
     let has = |k: &str| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
     if has("DISPLAY") || has("WAYLAND_DISPLAY") { return Vec::new(); }
@@ -422,6 +551,16 @@ fn gui_env() -> Vec<(String, String)> {
 }
 
 /// Không có màn hình nào để mở cửa sổ (máy chủ không giao diện).
+/// Máy có phiên đồ hoạ để mở cửa sổ Chrome không (Linux: DISPLAY/WAYLAND_DISPLAY hoặc socket X11).
+/// Dùng để chọn headed/headless cho luồng login tự động.
+pub(crate) fn has_display() -> bool {
+    if !cfg!(target_os = "linux") { return true; }
+    if std::env::var("DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) { return true; }
+    if std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) { return true; }
+    if gui_env().iter().any(|(k, _)| k == "DISPLAY" || k == "WAYLAND_DISPLAY") { return true; }
+    std::path::Path::new("/tmp/.X11-unix").read_dir().map(|mut d| d.next().is_some()).unwrap_or(false)
+}
+
 fn gui_env_missing() -> bool {
     let has = |k: &str| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
     !has("DISPLAY") && !has("WAYLAND_DISPLAY") && !gui_env().iter().any(|(k, _)| k == "DISPLAY" || k == "WAYLAND_DISPLAY")
@@ -437,54 +576,71 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
     let profile = account_profile_dir(&fp.seed);
     std::fs::create_dir_all(&profile).ok();
     let (w, h) = fp.window_size();
-    let mut cmd = std::process::Command::new(&bin);
-    if headless {
-        // headless "new" là Chrome đầy đủ; UA "HeadlessChrome" bị vân tay ghi đè trên mọi tab
-        cmd.arg("--headless=new");
-    } else {
-        for (k, v) in gui_env() { cmd.env(k, v); }
-    }
     // stderr của Chrome vào file trong profile: Chrome chết lúc khởi động thì lý do nằm ở đây
     let err_log = std::path::Path::new(&profile).join("chrome-stderr.log");
-    let stderr = std::fs::File::create(&err_log).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null());
-    let mut child = cmd
-        .arg(format!("--remote-debugging-port={}", port))
-        .arg(format!("--user-data-dir={}", profile))
-        .arg(format!("--window-size={},{}", w, h))
-        .arg("--lang=vi-VN")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--disable-features=Translate")
-        .arg("about:blank")
-        .stdout(std::process::Stdio::null())
-        .stderr(stderr)
-        .spawn()
-        .context(format!("không spawn được Chrome ({})", bin))?;
-    let mut ready = false;
-    let mut exited = None;
-    for _ in 0..40 {
-        if let Ok(resp) = reqwest::get(format!("{}/json/version", cdp_http(port))).await {
-            if resp.status().is_success() { ready = true; break; }
+
+    // Thử chế độ đã yêu cầu trước; nếu Chrome chết vì SUID sandbox không cấu hình được (máy không
+    // root, chrome-sandbox không 4755 — container, sandbox của agent) thì mở lại ở headless + --no-sandbox.
+    // Trên máy người dùng bình thường nhánh này không chạy: cửa sổ thật vẫn có sandbox.
+    let mut attempt_headless = headless;
+    let mut child;
+    let mut exited;
+    loop {
+        let mut cmd = std::process::Command::new(&bin);
+        if attempt_headless {
+            // headless "new" là Chrome đầy đủ; UA "HeadlessChrome" bị vân tay ghi đè trên mọi tab
+            cmd.arg("--headless=new");
+            cmd.arg("--no-sandbox").arg("--disable-dev-shm-usage");
+        } else {
+            for (k, v) in gui_env() { cmd.env(k, v); }
         }
-        // Chrome thoát luôn (thiếu màn hình, profile bị khoá…) thì báo ngay, không đợi đủ 20s
-        if let Ok(Some(st)) = child.try_wait() { exited = Some(st); break; }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    if !ready {
-        let _ = child.kill();
-        let _ = child.wait();
+        let stderr = std::fs::File::create(&err_log).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null());
+        child = cmd
+            .arg(format!("--remote-debugging-port={}", port))
+            .arg(format!("--user-data-dir={}", profile))
+            .arg(format!("--window-size={},{}", w, h))
+            .arg("--lang=vi-VN")
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("--disable-features=Translate")
+            .arg("about:blank")
+            .stdout(std::process::Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .context(format!("không spawn được Chrome ({})", bin))?;
+        let mut ready = false;
+        exited = None;
+        for _ in 0..40 {
+            if let Ok(resp) = reqwest::get(format!("{}/json/version", cdp_http(port))).await {
+                if resp.status().is_success() { ready = true; break; }
+            }
+            // Chrome thoát luôn (thiếu màn hình, profile bị khoá…) thì báo ngay, không đợi đủ 20s
+            if let Ok(Some(st)) = child.try_wait() { exited = Some(st); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if ready { break; }
         let tail: Vec<String> = std::fs::read_to_string(&err_log).unwrap_or_default().lines()
             .filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
         let tail = tail[tail.len().saturating_sub(4)..].join(" | ");
+        let sandbox_blocked = tail.contains("setuid_sandbox_host") || tail.contains("SUID sandbox");
+        if !attempt_headless && sandbox_blocked {
+            crate::elog!("[chrome] không mở được cửa sổ (SUID sandbox) — chuyển sang headless");
+            attempt_headless = true;
+            continue;
+        }
+        // không cứu được: dọn tiến trình rồi báo lỗi kèm lý do thật
+        let _ = child.kill();
+        let _ = child.wait();
         let why = match exited {
             Some(st) => format!("Chrome thoát ngay khi khởi động ({})", st),
             None => format!("CDP :{} không sẵn sàng sau 20s", port),
         };
-        let hint = if !headless && cfg!(target_os = "linux") && gui_env_missing() {
+        let hint = if !attempt_headless && cfg!(target_os = "linux") && gui_env_missing() {
             " — không tìm thấy màn hình (DISPLAY/WAYLAND_DISPLAY) để mở cửa sổ; dùng cách dán token"
         } else { "" };
         bail!("{}{}{}", why, if tail.is_empty() { String::new() } else { format!(": {}", tail) }, hint);
     }
+    // Chrome đã lên và CDP trả lời — phần kiểm tra/ báo lỗi nằm trong vòng lặp khởi động ở trên.
 
     let ws = browser_ws_url(port).await?;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
@@ -506,6 +662,9 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
     for _ in 0..20 {
         if let Ok(pages) = list_pages(port).await {
             if let Some(u) = pages.iter().find(|p| p["type"] == "page" && p["url"].as_str().map(|u| u.contains(host.as_str())).unwrap_or(false)).and_then(|p| p["webSocketDebuggerUrl"].as_str()) {
+                if start_url.contains("deepseek.com/sign_") {
+                    if let Err(e) = warm_device(u).await { crate::elog!("[chrome] warm device: {:#}", e); }
+                }
                 return Ok((browser, u.to_string()));
             }
         }
@@ -513,6 +672,25 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
     }
     browser.close().await;
     bail!("tab {} không xuất hiện sau khi áp vân tay", host)
+}
+
+/// Thiết bị mới (profile trắng) bị DeepSeek từ chối ở lần đầu: bấm "Gửi mã"/"Đăng nhập" ngay trên lần tải đầu
+/// trả toast "Lỗi môi trường thiết bị hiện tại" vì SDK Shumei chưa đăng ký xong thiết bị. Sau khi SDK có device id
+/// mà tải lại trang thì cùng thao tác đó qua bình thường (ra captcha như trình duyệt thật). Đo trên Chrome thật:
+/// ngữ cảnh mới bấm ngay → lỗi; tải lại sau khi có device id → captcha. Chờ tối đa 20s, tải lại một lần.
+async fn warm_device(page_ws: &str) -> Result<()> {
+    let mut c = CdpConn::connect(page_ws).await?;
+    let probe = "(async()=>{try{const d=await SMSdk.getDeviceId();return String(d).length}catch(e){return 0}})()";
+    let mut have = false;
+    for _ in 0..40 {
+        let r = c.call("Runtime.evaluate", json!({"expression": probe, "awaitPromise": true, "returnByValue": true})).await?;
+        if r["result"]["value"].as_i64().unwrap_or(0) > 40 { have = true; break; }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    if !have { bail!("SDK Shumei không trả device id sau 20s"); }
+    c.call("Page.reload", json!({})).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    Ok(())
 }
 
 /// Vòng lặp trên kết nối browser-level: mỗi target mới (tab, popup OAuth, iframe) bị giữ lại ở trạng thái
@@ -777,5 +955,176 @@ mod os_tests {
             assert!(kept, "cookie không còn sau khi mở lại profile: {}", ck);
             println!("  cookie còn sau khi mở lại profile ✓");
         }
+    }
+}
+
+#[cfg(test)]
+mod shumei_tests {
+    use super::*;
+
+    /// Shumei (数美, fp.min.js → fp-it-acc.portal101.cn/deviceprofile/v4) trả gì cho Chrome riêng có vân tay:
+    /// `cargo test live_shumei -- --ignored --nocapture` (WG_TEST_HEADED=1 để thử cả cửa sổ thật)
+    #[tokio::test]
+    #[ignore]
+    async fn live_shumei_response() {
+        let mut modes = vec![true];
+        if std::env::var("WG_TEST_HEADED").map(|v| v == "1").unwrap_or(false) { modes.push(false); }
+        for headless in modes {
+            for seed in ["shumei-a", "shumei-b"] {
+                let fp = crate::fingerprint::Fingerprint::from_seed(seed);
+                let _ = std::fs::remove_dir_all(account_profile_dir(seed));
+                let (b, ws) = launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", headless).await.unwrap();
+                let (mut s, _) = tokio_tungstenite::connect_async(&ws).await.unwrap();
+                let send = |id: u64, m: &str, p: Value| Message::Text(json!({"id": id, "method": m, "params": p}).to_string());
+                s.send(send(1, "Network.enable", json!({}))).await.unwrap();
+                // SDK đã chạy ở lần tải đầu (trước khi bật Network) và nhớ mã thiết bị: xoá sạch rồi mở lại để nó đăng ký từ đầu
+                s.send(send(4, "Storage.clearDataForOrigin", json!({"origin": "https://chat.deepseek.com", "storageTypes": "all"}))).await.unwrap();
+                s.send(send(2, "Page.navigate", json!({"url": "https://chat.deepseek.com/sign_in"}))).await.unwrap();
+                let (mut rid, mut req_len, mut body) = (None::<String>, 0usize, None::<String>);
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                while body.is_none() {
+                    let Ok(Some(Ok(Message::Text(t)))) = tokio::time::timeout_at(deadline, s.next()).await else { break };
+                    let v: Value = serde_json::from_str(&t).unwrap();
+                    if v["method"] == "Network.requestWillBeSent" && v["params"]["request"]["url"].as_str().is_some_and(|u| u.contains("portal101")) {
+                        println!("  → {} {}", v["params"]["request"]["method"].as_str().unwrap_or(""), v["params"]["request"]["url"].as_str().unwrap_or(""));
+                    }
+                    match v["method"].as_str() {
+                        Some("Network.requestWillBeSent") if v["params"]["request"]["url"].as_str().is_some_and(|u| u.contains("portal101.cn/deviceprofile")) => {
+                            rid = v["params"]["requestId"].as_str().map(str::to_string);
+                            req_len = v["params"]["request"]["postData"].as_str().map(|p| p.len()).unwrap_or(0);
+                        }
+                        Some("Network.loadingFinished") if rid.is_some() && v["params"]["requestId"].as_str() == rid.as_deref() => {
+                            s.send(send(100, "Network.getResponseBody", json!({"requestId": rid}))).await.unwrap();
+                        }
+                        _ if v["id"] == 100 => body = v["result"]["body"].as_str().map(str::to_string),
+                        _ => {}
+                    }
+                }
+                s.send(send(3, "Runtime.evaluate", json!({"expression": "document.cookie.split('; ').filter(c => c.startsWith('smidV2')).join(';').slice(0, 30)", "returnByValue": true}))).await.unwrap();
+                let mut smid = Value::Null;
+                while let Ok(Some(Ok(Message::Text(t)))) = tokio::time::timeout(std::time::Duration::from_secs(5), s.next()).await {
+                    let v: Value = serde_json::from_str(&t).unwrap();
+                    if v["id"] == 3 { smid = v["result"]["result"]["value"].clone(); break; }
+                }
+                println!("[{} {}] fp: {} | {} cores | gpu {}", if headless { "headless" } else { "headed" }, seed, fp.user_agent(), fp.cores, fp.gpu_renderer);
+                println!("  shumei request body {} bytes → response: {}", req_len, body.as_deref().unwrap_or("(không bắt được)"));
+                println!("  cookie: {}", smid);
+                b.close().await;
+                let _ = std::fs::remove_dir_all(account_profile_dir(seed));
+            }
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod login_flow_tests {
+    use super::*;
+
+    /// Đường THÀNH CÔNG của luồng login tự động, chạy trên Chrome thật:
+    /// dựng tab đã đăng nhập (userToken + cookie của một acc còn sống trong store), rồi chạy đúng
+    /// chuỗi mà `register login` dùng — `read_session_from_page` (đọc token + cookie httpOnly)
+    /// → `verify_and_build` (gọi users/current xác minh) — và kiểm tra session trả về khớp acc.
+    ///
+    /// `cargo test login_flow_ -- --ignored --nocapture` (cần Chrome và một acc còn sống trong store).
+    #[tokio::test]
+    #[ignore]
+    async fn login_flow_success_path_reads_and_verifies_session() {
+        // #[cfg(test)] khiến data_dir() trỏ vào thư mục tạm, nên đọc thẳng store thật của người dùng
+        // (hoặc WHALEGATE_TEST_ACCOUNTS trỏ tới bản sao).
+        let path = std::env::var("WHALEGATE_TEST_ACCOUNTS")
+            .unwrap_or_else(|_| format!("{}/.whalegate/accounts.json", crate::server::home_dir()));
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cần {path} có ít nhất một acc còn sống: {e}"));
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        // Chọn acc còn sống: ưu tiên WHALEGATE_TEST_UID, nếu không thì bỏ qua acc đã bị đánh dấu
+        // auth-dead (40003) — token chết thì verify luôn fail và test không nói gì về luồng login.
+        let want_uid = std::env::var("WHALEGATE_TEST_UID").ok();
+        let Some(a) = v["accounts"].as_array().and_then(|arr| {
+            arr.iter()
+                .filter(|a| a["token"].as_str().map(|t| !t.is_empty()).unwrap_or(false))
+                .filter(|a| a["auth_dead_at"].is_null())
+                .filter(|a| want_uid.as_deref().map(|u| a["ds_uid"].as_str() == Some(u)).unwrap_or(true))
+                .next()
+                .cloned()
+        }) else { panic!("store không có acc nào còn sống (auth_dead_at null) để test") };
+        let token = a["token"].as_str().unwrap().to_string();
+        let seed = a["fp_seed"].as_str().map(str::to_string).unwrap_or_else(|| crate::fingerprint::seed_for(&token));
+        let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
+        let (browser, ws) = launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", true).await.unwrap();
+
+        // Gắn phiên của acc vào tab: đây chính là trạng thái mà một lần đăng nhập thành công để lại.
+        let mut conn = CdpConn::connect(&ws).await.unwrap();
+        let js = format!(
+            "localStorage.setItem('userToken', JSON.stringify({{value: {}}}))",
+            serde_json::to_string(&token).unwrap()
+        );
+        conn.call("Runtime.evaluate", json!({"expression": js})).await.unwrap();
+
+        let (got, cookies, device) = read_session_from_page(&ws).await.expect("phải đọc được token từ tab");
+        assert_eq!(got, token, "token đọc từ tab phải khớp token đã gắn");
+        // Trang chỉ mới gắn token bằng tay nên chưa có cookie nào do server đặt — điều này không
+        // ảnh hưởng bước verify (verify đi bằng Authorization header). Ghi lại để thấy rõ.
+        println!("cookie đọc được: {} (0 là bình thường khi tab chưa nhận Set-Cookie)", cookies.len());
+        println!("cookie: {:?}", cookies.keys().collect::<Vec<_>>());
+        println!("device: {:?}", device);
+
+        // watch_login_tab là vòng poll mà cả CLI lẫn dashboard dùng: nó phải tự đọc tab, gọi
+        // users/current để xác minh, rồi trả session — đây chính là bước "login xong" của luồng tự động.
+        let s = watch_login_tab(ws, 15, browser.port, &seed)
+            .await
+            .expect("watch_login_tab phải nhận ra phiên còn sống trong tab");
+        println!("watch_login_tab OK: {:?} uid={:?}", s.email, s.uid);
+        assert_eq!(s.token, token);
+        assert_eq!(s.uid.as_deref(), a["ds_uid"].as_str(), "uid phải khớp acc trong store");
+        assert!(s.email.is_some(), "users/current phải trả về email");
+        browser.close().await;
+    }
+}
+
+
+#[cfg(test)]
+mod signup_probe_tests {
+    use super::*;
+
+    /// Chrome có vân tay của whalegate → sign_up → điền email → "Gửi mã", in ra thông báo/ phản hồi:
+    /// `WG_PROBE_EMAIL=a@b.c WG_PROBE_PROXY=1 cargo test live_signup_probe -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_signup_probe() {
+        let email = std::env::var("WG_PROBE_EMAIL").expect("WG_PROBE_EMAIL");
+        let seed = std::env::var("WG_PROBE_SEED").unwrap_or_else(|_| "probe-signup".into());
+        let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
+        let _ = std::fs::remove_dir_all(account_profile_dir(&seed));
+        let (b, ws) = launch_account_chrome(&fp, "https://chat.deepseek.com/sign_up", false).await.unwrap();
+        println!("fp: {}", fp.user_agent());
+        let mut c = CdpConn::connect(&ws).await.unwrap();
+        c.call("Network.enable", json!({})).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let js = format!(r#"(async()=>{{
+          const i=[...document.querySelectorAll('input')].find(x=>/mail/i.test(x.placeholder||x.type));
+          const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+          i.focus(); set.call(i,{email:?}); i.dispatchEvent(new Event('input',{{bubbles:true}}));
+          await new Promise(r=>setTimeout(r,500));
+          const btn=[...document.querySelectorAll('button,div[role=button]')].find(x=>/^(Gửi mã|Send code|Send)$/i.test(x.textContent.trim()));
+          btn.click(); return 'clicked'}})()"#);
+        let r = c.call("Runtime.evaluate", json!({"expression": js, "awaitPromise": true, "returnByValue": true})).await.unwrap();
+        println!("click: {}", r["result"]["value"]);
+        // toast "môi trường thiết bị" = FAIL; captcha (hoặc đếm ngược "gửi lại") = ĐÚNG. Dừng ngay khi có kết quả.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
+        let mut verdict = "TIMEOUT";
+        while tokio::time::Instant::now() < deadline {
+            let r = c.call("Runtime.evaluate", json!({"expression": r#"(()=>{
+              const t=document.body.innerText;
+              if(/môi trường thiết bị|device environment|environment/i.test(t)) return 'FAIL: '+(t.match(/[^\n]*(môi trường|environment)[^\n]*/i)||[''])[0];
+              if(document.querySelector('iframe[src*=captcha],[class*=captcha],[id*=captcha],[class*=shumei],[class*=sm-]') || /Nhấp vào|Click on|captcha/i.test(t)) return 'OK: captcha';
+              if(/Gửi lại sau|Resend in/i.test(t)) return 'OK: otp sent';
+              return ''})()"#, "returnByValue": true})).await.unwrap();
+            let v = r["result"]["value"].as_str().unwrap_or("");
+            if !v.is_empty() { verdict = Box::leak(v.to_string().into_boxed_str()); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        println!("VERDICT: {verdict}");
+        b.close().await;
     }
 }

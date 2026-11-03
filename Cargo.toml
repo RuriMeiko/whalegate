@@ -1,6 +1,6 @@
 [package]
 name = "whalegate"
-version = "0.5.22"
+version = "0.5.23"
 edition = "2021"
 
 [dependencies]
@@ -11,6 +11,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # "socks": proxy đầu ra socks5/socks5h (mỗi acc một IP khác) — xem src/proxypool.rs
 wreq = { version = "6.0.0-rc.31", features = ["json", "multipart", "stream", "gzip", "brotli", "zstd", "deflate", "cookies", "socks"] }
 wreq-util = "3.0.0-rc.14"
+# Register acc không cần Chrome: mã hoá body auth (AES-128-CBC + RSA-OAEP-SHA256) như web 2.7.0
+aes = "0.9"
+cbc = "0.2"
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
 # Chỉ bật feature thực dùng — "full" kéo cả signal/process/net-unix... làm build chậm
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "io-util"] }
 tokio-tungstenite = "0.24"

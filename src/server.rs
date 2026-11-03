@@ -32,6 +32,11 @@ pub(crate) fn data_dir() -> String {
     return std::env::temp_dir().join(format!("whalegate-test-{}", std::process::id())).to_string_lossy().into_owned();
     #[allow(unreachable_code)]
     DIR.get_or_init(|| {
+        // Cho phép đổi thư mục dữ liệu (test trong sandbox, chạy nhiều instance, đặt lên ổ khác).
+        // Phải là đường dẫn tuyệt đối để không phụ thuộc cwd của tiến trình gọi.
+        if let Ok(d) = std::env::var("WHALEGATE_DATA_DIR") {
+            if !d.trim().is_empty() { return d; }
+        }
         let home = std::path::PathBuf::from(home_dir());
         let (new, old) = (home.join(".whalegate"), home.join(".ds-harness"));
         let old_is_real_dir = std::fs::symlink_metadata(&old).map(|m| m.is_dir()).unwrap_or(false);
@@ -2842,6 +2847,153 @@ async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
     // Mỗi acc mới = một "máy" mới: seed riêng → profile Chrome riêng + vân tay riêng.
     start_login(st, crate::fingerprint::new_seed()).await
 }
+/// Đăng nhập TỰ ĐỘNG: nhận email + mật khẩu, mở Chrome riêng của một seed mới, tự điền form
+/// `sign_in` và bấm nút, rồi chờ token như luồng login tay. Mật khẩu chỉ dùng một lần trong
+/// request này — không ghi vào store, không log.
+///
+/// Trả về ngay khi Chrome mở xong; phần chờ token chạy nền để dashboard không bị treo 90s.
+async fn api_login_auto(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Json<Value> {
+    let email = body["email"].as_str().unwrap_or("").trim().to_string();
+    let password = body["password"].as_str().unwrap_or("").to_string();
+    let label = body["label"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    if email.is_empty() || password.is_empty() {
+        return Json(json!({"ok": false, "error": "thiếu email hoặc mật khẩu"}));
+    }
+    // chặn double-start: Chrome riêng khoá cổng CDP, hai luồng cùng mở sẽ tranh nhau
+    {
+        let mut watching = st.login_watching.lk();
+        if *watching {
+            return Json(json!({"ok": false, "error": "đang có một cửa sổ đăng nhập mở — đợi nó xong rồi thử lại"}));
+        }
+        *watching = true;
+    }
+    let seed = crate::fingerprint::new_seed();
+    let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
+    // headless khi máy không có phiên đồ hoạ: form vẫn điều khiển được qua CDP
+    let headless = !crate::chrome_capture::has_display();
+    crate::elog!("[login-auto] {} seed={} headless={}", email, &seed[..8.min(seed.len())], headless);
+    let (browser, ws_url) = match crate::chrome_capture::launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", headless).await {
+        Ok(x) => x,
+        Err(e) => {
+            *st.login_watching.lk() = false;
+            crate::elog!("[login-auto] lỗi mở Chrome: {:#}", e);
+            return Json(json!({"ok": false, "error": format!("không mở được Chrome: {:#}", e)}));
+        }
+    };
+    let st2 = st.clone();
+    let em2 = email.clone();
+    let label2 = label.clone();
+    let reply_label = label.clone().unwrap_or_else(|| email.clone());
+    tokio::spawn(async move {
+        let res = login_auto_flow(&st2, seed, browser, ws_url, em2, password, label2).await;
+        *st2.login_watching.lk() = false;
+        match res {
+            Ok(l) => crate::elog!("[login-auto] xong: {}", l),
+            Err(e) => crate::elog!("[login-auto] lỗi: {:#}", e),
+        }
+    });
+    Json(json!({"ok": true, "label": reply_label,
+        "note": "đang tự đăng nhập trong Chrome riêng — xong acc tự vào pool"}))
+}
+
+/// Điền form, chờ token, rồi lưu acc — cùng đường với `login_flow` sau bước capture.
+async fn login_auto_flow(
+    st: &Arc<AppState>,
+    seed: String,
+    browser: crate::chrome_capture::AccountBrowser,
+    ws_url: String,
+    email: String,
+    password: String,
+    label: Option<String>,
+) -> Result<String> {
+    // trang sign_in cần vài giây nạp JS; submit_login_form tự poll tới khi form sẵn sàng
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // hook TRƯỚC khi bấm: toast lỗi tự tắt, còn biz_msg của /users/login thì giữ được
+    let hooked = crate::chrome_capture::install_login_response_hook(&ws_url).await.is_ok();
+    if let Err(e) = crate::chrome_capture::submit_login_form(&ws_url, &email, &password).await {
+        crate::elog!("[login-auto] lần 1 lỗi: {:#} — thử lại", e);
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        crate::chrome_capture::submit_login_form(&ws_url, &email, &password).await?;
+    }
+    // mật khẩu không cần nữa: xoá khỏi bộ nhớ trước khi chờ (drop chuỗi gốc ở caller)
+    drop(password);
+    let res = crate::chrome_capture::watch_login_tab(ws_url.clone(), 120, browser.port, &seed).await;
+    let session = match res {
+        Ok(s) => s,
+        Err(e) => {
+            let why = if hooked {
+                match crate::chrome_capture::login_result(&ws_url).await {
+                    Some((2, _)) => "sai email hoặc mật khẩu".to_string(),
+                    Some((10, _)) => "tài khoản đã bị khoá".to_string(),
+                    Some((11, _)) => "DeepSeek đánh dấu thiết bị này là rủi ro (RISK_DEVICE_DETECTED)".to_string(),
+                    Some((12, _)) => "số điện thoại bị hạn chế".to_string(),
+                    Some((13, _)) => "cần chữ ký thiết bị (SIGNATURE_REQUIRED)".to_string(),
+                    Some((14, _)) => "tài khoản bật xác thực 2 lớp (OTP_REQUIRED) — chưa hỗ trợ tự động".to_string(),
+                    Some((0, _)) => "server nhận đăng nhập nhưng không cấp token".to_string(),
+                    Some((c, m)) => format!("server từ chối (biz_code {c}{})", if m.is_empty() { String::new() } else { format!(", {m}") }),
+                    None => format!("{e:#}"),
+                }
+            } else {
+                format!("{e:#}")
+            };
+            browser.close().await;
+            anyhow::bail!("{}", why);
+        }
+    };
+    browser.close().await;
+    crate::elog!("[login-auto] captured: {:?}", session.email);
+
+    // lưu vào store — cùng quy tắc dedupe với login_flow: token, rồi uid
+    let label_out = label.clone().or_else(|| session.email.clone()).unwrap_or_else(|| email.clone());
+    {
+        let mut store = st.store.write().await;
+        if let Some(a) = store.accounts.iter_mut().find(|a| a.token == session.token) {
+            a.cookies = session.cookies.clone();
+            a.last_verified = Some(now());
+            a.last_status = Some("ok (login-auto)".into());
+            a.clear_auth_dead();
+            if session.fp_seed.is_some() { adopt_chrome_device(a, &session); }
+            if let Some(l) = &label { a.label = l.clone(); }
+        } else if let Some(a) = session.uid.as_ref().and_then(|u| store.accounts.iter_mut().find(|a| a.ds_uid.as_deref() == Some(u.as_str()))) {
+            if a.fp_seed.is_none() { a.fp_seed = Some(crate::fingerprint::seed_for(&a.token)); }
+            a.token = session.token.clone();
+            crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+            crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+            a.cookies = session.cookies.clone();
+            a.last_verified = Some(now());
+            a.last_status = Some("ok (login-auto)".into());
+            a.clear_auth_dead();
+            a.thread_session_id = None;
+            if session.fp_seed.is_some() { adopt_chrome_device(a, &session); }
+            if let Some(l) = &label { a.label = l.clone(); }
+        } else {
+            store.accounts.push(Account {
+                id: uuid::Uuid::new_v4().to_string(),
+                label: label_out.clone(),
+                token: session.token.clone(),
+                cookies: session.cookies.clone(),
+                added_at: now(),
+                last_verified: Some(now()),
+                last_status: Some("ok (login-auto)".into()),
+                thread_session_id: None,
+                thread_uses: 0,
+                thread_parent_message_id: None,
+                stats: Default::default(),
+                pool_enabled: true,
+                ds_uid: session.uid.clone(),
+                fp_seed: session.fp_seed.clone(),
+                device_id: session.device_id.clone(),
+                device_refreshed_at: session.fp_seed.as_ref().map(|_| now()),
+                browser: None,
+                auth_dead_at: None,
+            });
+        }
+    }
+    mark_dirty(st);
+    flush_store(st).await;
+    Ok(label_out)
+}
+
 
 /// Tiện ích trình duyệt (`extension/`) nén sẵn để "Load unpacked": đọc được cả cookie HttpOnly mà bookmarklet
 /// không đọc được. Địa chỉ dashboard lấy từ chính request tải về (giống bookmarklet), nên tiện ích gửi đúng về đây.
@@ -3315,6 +3467,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/extension.zip", get(api_extension_zip))
         .route("/api/capture", post(api_capture_from_chrome))
         .route("/api/login_start", post(api_login_start))
+        .route("/api/login_auto", post(api_login_auto))
         .route("/api/proxy", get(api_proxy_get).post(api_proxy_set))
         .route("/api/proxy/unbind", post(api_proxy_unbind))
         .route("/api/stats", get(api_stats))

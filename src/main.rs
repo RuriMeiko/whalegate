@@ -7,6 +7,7 @@ mod fingerprint;
 mod chrome_capture;
 mod pow;
 mod proxypool;
+mod register;
 mod server;
 mod settings;
 mod setup_dsh;
@@ -55,6 +56,7 @@ async fn main() -> Result<()> {
                 .unwrap_or(DEFAULT_PORT);
             server::run(port).await?;
         }
+        "register" => register::run(&args[2..]).await?,
         "setup-dsh" => setup_dsh::run(&args[2..])?,
         "version" | "--version" | "-V" => println!("whalegate {}", env!("CARGO_PKG_VERSION")),
         _ => {
