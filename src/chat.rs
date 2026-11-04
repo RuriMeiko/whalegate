@@ -39,6 +39,36 @@ enum Out {
     ToolCalls(Vec<DsmlToolCall>, Vec<String>), // (calls, id đã cấp — client sẽ echo lại, dùng làm dấu vân tay)
     Finish { reason: &'static str, prompt_tokens: i64, completion_tokens: i64, cached_tokens: i64 },
     Error(String),
+    /// DeepSeek giới hạn tốc độ và không còn cách nào chờ thêm: trả 429 để client thử lại sau `u64` giây.
+    RateLimited(String, u64),
+}
+
+/// Tiền tố lỗi khi DeepSeek giới hạn tốc độ — `run_chat` dùng nó để biết lần thất bại cuối cùng là do rate limit.
+const RL_PREFIX: &str = "DeepSeek giới hạn tốc độ";
+
+/// Lỗi `upload_file` kiểu `{"biz_code":7,"biz_msg":"rate limit reached"}` hoặc tương tự: gửi quá nhanh, không phải file bị từ chối.
+fn is_rate_limit_error(e: &anyhow::Error) -> bool {
+    format!("{:#}", e).to_lowercase().contains("rate limit")
+}
+
+/// Acc bị DeepSeek giới hạn tốc độ: nghỉ có tăng dần + học trần request/phút (xem `AccStats::note_rate_limit`).
+/// KHÔNG tính là lỗi của acc (không đụng fail_streak, không "cần đăng nhập lại"). Trả (nghỉ giây, trần học được).
+async fn rate_limit_acc(st: &Arc<AppState>, acc_id: &str, why: &str) -> (u64, u32) {
+    let t = now();
+    let mut out = (30u64, 0u32);
+    {
+        let mut store = st.store.write().await;
+        if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
+            let (cd, cap) = a.stats.note_rate_limit(t);
+            a.last_status = Some(format!("DeepSeek giới hạn tốc độ — nghỉ {}s (trần học được {}/phút)", cd, cap));
+            out = (cd, cap);
+        }
+    }
+    mark_dirty(st);
+    let id8 = &acc_id[..8.min(acc_id.len())];
+    crate::elog!("[ds-ratelimit] acc {} bị giới hạn tốc độ ({}) — nghỉ {}s, trần học được {}/phút", id8, why.chars().take(80).collect::<String>(), out.0, out.1);
+    crate::logbuf::debug("rate_limit", serde_json::json!({"acc": id8, "why": why, "cooldown_secs": out.0, "learned_rpm_cap": out.1}));
+    out
 }
 
 /// Ảnh đính kèm lấy từ messages (đã giải mã); upload lên DS theo từng acc khi cần.
@@ -685,16 +715,21 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
         // trước đây 3 acc chết liền nhau làm hỏng request dù pool còn acc tốt
         let (mut max_attempts, mut auth_skips, mut next_attempt) = (3usize, 0usize, 0usize);
         let mut net_skips = 0usize;
+        // rate limit: chờ rồi thử lại, không đổi sang phiên mới và không phát lại cả ngữ cảnh
+        let (mut rl_extra, mut rl_wait, mut rl_prev) = (0usize, false, false);
+        let mut rl_stateful_acc: Option<String> = None; // acc đã bị chặn ở lượt nối tiếp: quay lại đúng acc đó thì vẫn nối tiếp phiên cũ
+        let mut rl_retry_after = 60u64;
         while next_attempt < max_attempts {
             let attempt = next_attempt;
             next_attempt += 1;
             if attempt > 0 {
                 // failover: nhả acc hỏng rồi lấy acc khác (mềm)
                 let prev = lease.take().map(|l| l.acc_id);
-                let dl = Instant::now() + Duration::from_secs(queue_wait_secs().min(60));
+                let wait_secs = if rl_wait { queue_wait_secs() } else { queue_wait_secs().min(60) };
+                let dl = Instant::now() + Duration::from_secs(wait_secs);
                 match acquire(&st, &failed, None, dl).await {
                     Ok(l) => {
-                        if Some(&l.acc_id) == prev.as_ref() && repair.is_none() {
+                        if Some(&l.acc_id) == prev.as_ref() && repair.is_none() && !rl_wait {
                             // pool chỉ còn đúng acc này → chờ DS hồi (rate-limit mềm ~8-10s)
                             tokio::time::sleep(Duration::from_secs(8)).await;
                         }
@@ -711,7 +746,10 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             touch_acc(&st, &acc_id).await;
 
             // lượt đầu + có hội thoại đang nằm trong phiên web → chỉ gửi phần mới nối vào parent
-            let stateful_attempt = attempt == 0 && ctx.cont.is_some();
+            let after_rl = std::mem::take(&mut rl_prev);
+            rl_wait = false;
+            let stateful_attempt = ctx.cont.is_some() && (attempt == 0 || rl_stateful_acc.as_deref() == Some(acc_id.as_str()));
+            rl_stateful_acc = None;
             let full_prompt: std::borrow::Cow<str> = match repair.take() {
                 Some(r) => format!("{}{}", ctx.prompt, r).into(),
                 None => ctx.prompt.as_str().into(),
@@ -724,7 +762,8 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             };
             let own_session = stateful_attempt || ctx.reg.is_some();
             // retry sau khi lượt nối tiếp hỏng: bỏ phiên cũ (ngữ cảnh không còn đáng tin)
-            if attempt == 1 {
+            // sau rate limit KHÔNG xoá phiên cũ: nó vẫn tốt, chỉ là phải chờ
+            if attempt == 1 && !after_rl {
                 if let Some(cp) = &ctx.cont {
                     let acc = { st.store.read().await.accounts.iter().find(|a| a.id == cp.acc_id_hint()).map(|a| (a.token.clone(), cookie_string(&a.cookies))) };
                     st.sessions.lk().remove(&cp.sid);
@@ -778,6 +817,17 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                 Err(e) => {
                     crate::elog!("[ds-error] attempt {} acc {}: {:#}", attempt, &acc_id[..8.min(acc_id.len())], e);
                     last_err = Some(format!("{:#}", e));
+                    // upload / completion bị giới hạn tốc độ: nghỉ + học trần, giữ phiên, chờ rồi thử lại — không phạt acc
+                    if is_rate_limit_error(&e) {
+                        let (cd, _) = rate_limit_acc(&st, &acc_id, &format!("{:#}", e)).await;
+                        last_err = Some(format!("{RL_PREFIX} (tải file/gửi quá nhanh) — thử lại sau ~{cd}s"));
+                        rl_retry_after = cd;
+                        rl_prev = true; rl_wait = true;
+                        if stateful_attempt { rl_stateful_acc = Some(acc_id.clone()); }
+                        if rl_extra < 3 { rl_extra += 1; max_attempts += 1; }
+                        failed.push(acc_id);
+                        continue;
+                    }
                     // DS từ chối file (50404…) thường là lỗi tạm của khâu audit phía DS (retryable=true; cùng ảnh
                     // upload lại vẫn pass): chưa phạt acc, thử acc khác. Chỉ khi hết lượt mà vẫn bị từ chối mới coi dead.
                     if crate::client::is_file_rejected(&e) {
@@ -819,6 +869,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             let mut msg_id: Option<i64> = None;
             let mut real_usage: Option<u64> = None;
             let mut attempt_done = false;
+            let mut hint: Option<crate::client::StreamHint> = None;
 
             while let Some(ev) = rx.recv().await {
                 match ev {
@@ -837,6 +888,10 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                     StreamEv::MsgId(m) => { msg_id = Some(m); }
                     StreamEv::Usage(u) => { real_usage = Some(u); crate::elog!("[usage] accumulated_token_usage={} (stateful={})", u, stateful_attempt); }
                     StreamEv::Truncated(why) => { truncated = Some(why); }
+                    StreamEv::Hint(h) => {
+                        crate::elog!("[ds-hint] {}{} {:?}{}", if h.toast { "toast " } else { "" }, h.kind, h.content, h.finish_reason.as_deref().map(|f| format!(" ({f})")).unwrap_or_default());
+                        hint = Some(h);
+                    }
                     StreamEv::Done => {
                         if let Some(r) = reasoning.finish() { yield Out::Reasoning(r); }
                         // token: số thật của web (cộng dồn theo phiên) trừ phần output lượt này; không có thì ước lượng.
@@ -906,8 +961,22 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                                 fail_acc(&st, &acc_id, "error", true).await;
                                 failed.push(acc_id.clone());
                             }
+                        } else if !has_content && hint.as_ref().is_some_and(|h| h.is_rate_limit()) {
+                            // DeepSeek chặn vì gửi quá nhanh (event: hint, rate_limit_reached): không phải stream rỗng / acc hỏng
+                            let why = hint.as_ref().map(|h| h.content.clone()).unwrap_or_default();
+                            let (cd, _) = rate_limit_acc(&st, &acc_id, &why).await;
+                            last_err = Some(format!("{RL_PREFIX}: {why} — thử lại sau ~{cd}s"));
+                            rl_retry_after = cd;
+                            rl_prev = true; rl_wait = true;
+                            if stateful_attempt { rl_stateful_acc = Some(acc_id.clone()); }
+                            if rl_extra < 3 { rl_extra += 1; max_attempts += 1; }
+                            failed.push(acc_id.clone());
                         } else if !has_content {
-                            last_err = Some("DeepSeek web trả stream rỗng (có thể bị throttle)".into());
+                            // có thông báo khác của DeepSeek (không phải rate limit): đưa nội dung đó vào lỗi cho dễ hiểu
+                            last_err = Some(match hint.as_ref() {
+                                Some(h) if !h.content.is_empty() => format!("DeepSeek web: {}", h.content),
+                                _ => "DeepSeek web trả stream rỗng (có thể bị throttle)".into(),
+                            });
                             fail_acc(&st, &acc_id, "empty", true).await;
                             failed.push(acc_id.clone());
                         } else if tools_on && has_strong_tool_marker(&full_text) {
@@ -950,7 +1019,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
             let msg = last_err.unwrap_or_else(|| "DeepSeek web không trả dữ liệu".into());
             crate::elog!("[ds-fail] {}", msg);
             crate::usage::record_request(t_req.elapsed().as_millis() as u64, false);
-            yield Out::Error(msg);
+            if msg.starts_with(RL_PREFIX) { yield Out::RateLimited(msg, rl_retry_after); } else { yield Out::Error(msg); }
         }
     }
 }
@@ -1171,6 +1240,9 @@ pub(crate) async fn api_chat_completions(
                     Out::Error(m) => {
                         yield Event::default().data(json!({"error": {"message": m, "type": "upstream_error", "code": "ds_upstream_failed"}}).to_string());
                     }
+                    Out::RateLimited(m, after) => {
+                        yield Event::default().data(json!({"error": {"message": m, "type": "rate_limit_error", "code": "rate_limit_exceeded"}, "retry_after_secs": after}).to_string());
+                    }
                 }
             }
             yield Event::default().data("[DONE]");
@@ -1197,6 +1269,9 @@ pub(crate) async fn api_chat_completions(
             Out::Finish { reason, prompt_tokens, completion_tokens, cached_tokens } => { finish = reason; pt = prompt_tokens; ct = completion_tokens; cached = cached_tokens; }
             Out::Error(m) => {
                 return Err((StatusCode::BAD_GATEWAY, Json(json!({"error": {"message": m, "type": "upstream_error", "code": "ds_upstream_failed"}}))));
+            }
+            Out::RateLimited(m, after) => {
+                return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": {"message": m, "type": "rate_limit_error", "code": "rate_limit_exceeded"}, "retry_after_secs": after}))));
             }
         }
     }

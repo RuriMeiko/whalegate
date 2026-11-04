@@ -161,7 +161,22 @@ pub struct AccStats {
     pub hour_window_start: u64,
     #[serde(default)]
     pub hour_count: u32,
+    // ---- rate limit của DeepSeek ("Tin nhắn quá thường xuyên") ----
+    // số lần bị rate limit liên tiếp: cooldown 30s, 60s, 120s… tối đa 300s; một lượt thành công thì về 0
+    #[serde(default)]
+    pub rl_streak: u32,
+    // trần request/phút học được từ lần bị chặn gần nhất (số request đã gửi trong 60s trước đó, trừ cái bị chặn); 0 = chưa học
+    #[serde(default)]
+    pub rl_cap: u32,
+    #[serde(default)]
+    pub rl_cap_at: u64,
+    // thời điểm (giây) các call trong 60s gần nhất — chỉ trong bộ nhớ, để pace theo trần
+    #[serde(skip)]
+    pub recent: Vec<u64>,
 }
+
+/// Trần học được hết hạn sau chừng này giây không bị chặn nữa (DeepSeek có thể đã nới giới hạn).
+const RL_CAP_TTL_SECS: u64 = 1800;
 
 impl AccStats {
     // Tunable qua env: DS_BURST_LIMIT, DS_BURST_WINDOW, DS_COOLDOWN
@@ -185,12 +200,44 @@ impl AccStats {
         lim > 0 && now.saturating_sub(self.hour_window_start) < 3600 && self.hour_count >= lim
     }
 
+    /// Trần request/phút do người dùng đặt (DS_MAX_RPM); 0 = tự học từ các lần bị rate limit.
+    pub fn max_rpm() -> u32 { crate::settings::uint("DS_MAX_RPM") as u32 }
+
+    /// Trần đang áp dụng cho acc này: cài đặt thủ công, hoặc trần học được còn hạn.
+    pub(crate) fn rpm_cap(&self, now: u64) -> Option<u32> {
+        let m = Self::max_rpm();
+        if m > 0 { return Some(m); }
+        if self.rl_cap > 0 && now.saturating_sub(self.rl_cap_at) < RL_CAP_TTL_SECS { Some(self.rl_cap) } else { None }
+    }
+
+    pub(crate) fn calls_last_minute(&self, now: u64) -> u32 {
+        self.recent.iter().filter(|t| now.saturating_sub(**t) < 60).count() as u32
+    }
+
+    fn rpm_capped(&self, now: u64) -> bool {
+        self.rpm_cap(now).is_some_and(|c| self.calls_last_minute(now) >= c)
+    }
+
     pub(crate) fn available(&self, now: u64) -> bool {
-        now >= self.cooldown_until && !self.burst_active(now) && !self.hourly_capped(now)
+        now >= self.cooldown_until && !self.burst_active(now) && !self.hourly_capped(now) && !self.rpm_capped(now)
+    }
+
+    /// DeepSeek báo rate limit: nghỉ 30s, 60s, 120s… (tối đa 300s) và học trần request/phút để lần sau tự giãn nhịp
+    /// trước khi bị chặn. Trần chỉ được hạ trong thời hạn hiệu lực (không nới lên khi lại bị chặn). Trả (nghỉ giây, trần).
+    pub(crate) fn note_rate_limit(&mut self, now: u64) -> (u64, u32) {
+        self.rl_streak = self.rl_streak.saturating_add(1);
+        let learned = self.calls_last_minute(now).saturating_sub(1).max(3);
+        self.rl_cap = if self.rl_cap > 0 && now.saturating_sub(self.rl_cap_at) < RL_CAP_TTL_SECS { self.rl_cap.min(learned) } else { learned };
+        self.rl_cap_at = now;
+        let cd = (30u64 << (self.rl_streak - 1).min(4)).min(300);
+        self.cooldown_until = now + cd;
+        (cd, self.rl_cap)
     }
 
     /// Xoá sạch trạng thái lỗi/cooldown/burst (nút Reset trên UI, hoặc sau khi đăng nhập lại).
     pub(crate) fn reset(&mut self) {
+        self.rl_streak = 0;
+        self.rl_cap = 0;
         self.fail_streak = 0;
         self.cooldown_until = 0;
         self.burst_count = 0;
@@ -198,6 +245,7 @@ impl AccStats {
     }
 
     pub(crate) fn mark_ok(&mut self) {
+        self.rl_streak = 0;
         self.fail_streak = 0;
         self.cooldown_until = 0;
     }
@@ -222,6 +270,8 @@ impl AccStats {
         }
         self.hour_count += 1;
         self.last_used_at = now;
+        self.recent.retain(|t| now.saturating_sub(*t) < 60);
+        self.recent.push(now);
         if self.burst_count >= Self::burst_limit() {
             self.cooldown_until = now + Self::cooldown();
         }
@@ -604,13 +654,17 @@ async fn export_header(st: &Arc<AppState>) -> String {
         let shown = if d.key == "DS_PROXY_LIST" { format!("<{} dòng>", v.lines().filter(|l| !l.trim().is_empty()).count()) } else { v };
         h.push_str(&format!("{}={}\n", d.key, shown));
     }
+    h.push_str("\n===== CÀI ĐẶT ẨN / NÂNG CAO (không hiện trên giao diện; giá trị đang áp dụng) =====\n");
+    for d in crate::settings::DEFS.iter().filter(|d| !d.show && d.key != "DS_PROXY_LIST") {
+        h.push_str(&format!("{}={}\n", d.key, crate::settings::get(d.key)));
+    }
     h.push_str("\n===== TÀI KHOẢN (id 8 ký tự khớp với dòng log [route]; không token/cookie/nhãn) =====\n");
     let store = st.store.read().await;
     let t = now();
     for a in &store.accounts {
         let ck = cookie_string(&a.cookies);
         h.push_str(&format!(
-            "{} | {} | status={} | nghỉ={}s | fail_streak={} | ok/rỗng/lỗi={}/{}/{} | {} | chrome-riêng={} | cookie .thumbcache={} | cookie ds_session_id={}\n",
+            "{} | {} | status={} | nghỉ={}s | fail_streak={} | ok/rỗng/lỗi={}/{}/{} | {} | chrome-riêng={} | cookie .thumbcache={} | cookie ds_session_id={} | rate_limit: streak={} trần/phút={} gọi 60s={}\n",
             &a.id[..8.min(a.id.len())],
             if a.pool_enabled { "bật" } else { "tắt" },
             a.last_status.clone().unwrap_or_default().chars().take(80).collect::<String>(),
@@ -619,6 +673,7 @@ async fn export_header(st: &Arc<AppState>) -> String {
             if a.fp_seed.is_some() { "có" } else { "không" },
             if crate::client::shumei_id_from_cookies(&ck).is_some() { "có" } else { "không" },
             if a.cookies.contains_key("ds_session_id") { "có" } else { "không" },
+            a.stats.rl_streak, a.stats.rpm_cap(t).map_or("-".to_string(), |c| c.to_string()), a.stats.calls_last_minute(t),
         ));
     }
     h
@@ -2723,6 +2778,8 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "fail_streak": a.stats.fail_streak,
                 "id": a.id,
                 "label": a.label,
+                "rl_cap": a.stats.rpm_cap(now),
+                "calls_last_minute": a.stats.calls_last_minute(now),
                 "login_method": a.login_method_effective(),
                 "login_method_known": a.login_method.is_some(),
                 "available": a.auth_dead_at.is_none() && a.stats.available(now),
@@ -4329,6 +4386,82 @@ mod version_ui_tests {
         let v = env!("CARGO_PKG_VERSION");
         assert!(html.contains(&format!(">v{}</a>", v)));
         assert!(html.contains(&format!("/releases/tag/v{}", v)));
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    fn calls(a: &mut AccStats, start: u64, n: u32, gap: u64) -> u64 {
+        let mut t = start;
+        for _ in 0..n { a.record_call(t); t += gap; }
+        t
+    }
+
+    #[test]
+    fn rate_limit_is_not_a_failure_and_backs_off_exponentially() {
+        let mut a = AccStats::default();
+        let t = calls(&mut a, 1000, 11, 3); // 11 request trong ~30s
+        let (cd1, cap1) = a.note_rate_limit(t);
+        assert_eq!(cd1, 30);
+        assert_eq!(a.fail_streak, 0, "rate limit không phải lỗi của acc");
+        assert_eq!(cap1, 10, "học trần = số request đã gửi trừ cái bị chặn");
+        assert!(!a.available(t + 29) && a.available(t + 31 + 60), "hết cooldown thì dùng lại được (khi cửa sổ 60s đã trống)");
+        assert_eq!(a.note_rate_limit(t + 100).0, 60);
+        assert_eq!(a.note_rate_limit(t + 200).0, 120);
+        for i in 0..10 { a.note_rate_limit(t + 300 + i); }
+        assert_eq!(a.cooldown_until - (t + 309), 300, "tối đa 300s");
+    }
+
+    #[test]
+    fn learned_cap_spaces_out_calls_before_the_next_block() {
+        let mut a = AccStats::default();
+        let t = calls(&mut a, 1000, 11, 1); // 11 call dồn trong 10s, call cuối ở 1010, t = 1011
+        assert_eq!(a.note_rate_limit(t).1, 10);
+        assert!(!a.available(a.cooldown_until), "cooldown hết nhưng 60s gần nhất vẫn còn 11 call >= trần 10 → chờ");
+        assert!(!a.available(1060), "còn đúng 10 call trong cửa sổ → vẫn chờ");
+        assert!(a.available(1061), "call đầu trôi khỏi cửa sổ 60s (còn 9 < 10) → dùng lại");
+        // gửi tới đúng trần thì chặn, dưới trần thì cho
+        let mut b = AccStats::default();
+        b.rl_cap = 5; b.rl_cap_at = 1000;
+        let mut now = 1000;
+        for _ in 0..4 { b.record_call(now); now += 1; }
+        assert!(b.available(now));
+        b.record_call(now);
+        assert!(!b.available(now + 1), "đủ 5 call trong 60s");
+    }
+
+    #[test]
+    fn learned_cap_only_goes_down_and_expires() {
+        let mut a = AccStats::default();
+        a.rl_cap = 8; a.rl_cap_at = 1000;
+        let t = calls(&mut a, 1000, 20, 1);
+        a.note_rate_limit(t);
+        assert_eq!(a.rl_cap, 8, "không nới trần khi vừa bị chặn lại");
+        a.rl_cap = 4; a.rl_cap_at = 1000;
+        assert_eq!(a.rpm_cap(1000 + 100), Some(4));
+        assert_eq!(a.rpm_cap(1000 + 1800), None, "trần hết hạn sau 30 phút để thử nới");
+    }
+
+    #[test]
+    fn success_clears_streak_and_reset_clears_cap() {
+        let mut a = AccStats::default();
+        let t = calls(&mut a, 1000, 6, 2);
+        a.note_rate_limit(t); a.note_rate_limit(t + 40);
+        assert_eq!(a.rl_streak, 2);
+        a.mark_ok();
+        assert_eq!(a.rl_streak, 0);
+        assert!(a.rl_cap >= 3, "mark_ok giữ trần đã học");
+        a.reset();
+        assert_eq!((a.rl_streak, a.rl_cap, a.cooldown_until), (0, 0, 0));
+    }
+
+    #[test]
+    fn learned_cap_never_below_three() {
+        let mut a = AccStats::default();
+        let t = calls(&mut a, 1000, 1, 1);
+        assert_eq!(a.note_rate_limit(t).1, 3);
     }
 }
 

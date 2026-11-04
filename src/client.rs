@@ -66,6 +66,25 @@ fn pow_cache_put(token: &str, header: String) { pow_slots().insert(token.to_stri
 fn pow_cache_release_any(token: &str) { pow_slots().remove(token); }
 fn pow_cache_release(token: &str) { let mut m = pow_slots(); if matches!(m.get(token), Some(PowSlot::Pending)) { m.remove(token); } }
 
+/// Thông báo DeepSeek chèn vào stream (web 2.7.0: `hint` {type: warning|error, content, clear_response, finish_reason?},
+/// `toast` {type, content, finish_reason?}). Câu trả lời bị chặn kiểu rate limit không có chữ nào mà chỉ có hint này.
+#[derive(Clone, Debug, Default)]
+pub struct StreamHint {
+    pub kind: String,
+    pub content: String,
+    pub finish_reason: Option<String>,
+    pub toast: bool,
+}
+
+impl StreamHint {
+    /// DeepSeek báo gửi quá nhanh (`finish_reason: rate_limit_reached`, "Tin nhắn quá thường xuyên…").
+    pub fn is_rate_limit(&self) -> bool {
+        let c = self.content.to_lowercase();
+        self.finish_reason.as_deref().is_some_and(|f| f.contains("rate_limit"))
+            || c.contains("quá thường xuyên") || c.contains("too frequent") || c.contains("too many requests") || c.contains("rate limit")
+    }
+}
+
 /// Event từ stream DS — server push thẳng ra SSE OpenAI
 pub enum StreamEv {
     Thinking(String),
@@ -73,6 +92,7 @@ pub enum StreamEv {
     MsgId(i64),         // response_message_id
     Usage(u64),         // accumulated_token_usage thật từ web (prompt + reasoning + output)
     Truncated(String),  // stream bị cắt giữa chừng (stall/lỗi mạng) — gửi ngay trước Done
+    Hint(StreamHint),   // `event: hint` / `event: toast` của DeepSeek (vd "Tin nhắn quá thường xuyên", rate_limit_reached)
     Done,               // stream kết thúc (payload SSE đầy đủ không còn ai dùng)
 }
 
@@ -918,7 +938,7 @@ pub async fn chat_stream(
             "sid": sid_task, "end": end.why().unwrap_or_else(|| "eof".into()), "complete": state.complete(), "resumed": state.resume,
             "resp_mid": state.resp_mid, "forwarded_chars": {"response": state.emitted[0], "think": state.emitted[1]},
             "bytes": stats.total_bytes, "first_byte_ms": stats.first_byte_ms, "total_ms": t0.elapsed().as_millis() as u64,
-            "truncated": truncated.is_some(),
+            "truncated": truncated.is_some(), "hints": state.hints, "retry_on_close": state.retry_on_close,
             // đuôi SSE chỉ ghi khi có gì bất thường (đứt / không có close / không có chữ)
             "tail": if !state.complete() || truncated.is_some() || !state.has_content { json!(stats.tail) } else { Value::Null },
         }));
@@ -1000,6 +1020,12 @@ struct SseState {
     resp_mid: Option<i64>,
     /// đã thấy `event: close` (hoặc `finish`): câu trả lời kết thúc bình thường
     saw_close: bool,
+    /// tên `event:` của khối đang đọc (data ngay sau nó thuộc về event đó; khối `data:` trơn là delta)
+    cur_event: String,
+    /// `close` mang `click_behavior: "retry"`: DeepSeek đã báo lỗi và để người dùng bấm thử lại
+    retry_on_close: bool,
+    /// các hint/toast đã thấy (cho log debug), tối đa vài cái
+    hints: Vec<String>,
     resume: bool,
     base: [usize; 2],
     recv: [usize; 2],
@@ -1077,15 +1103,32 @@ impl SseState {
         if i >= 0 && i < n { self.frag_types[i as usize].clone() } else { String::new() }
     }
 
-    /// Một dòng SSE đã tách (không còn `\n`): `event: close|finish` hoặc `data: {…}`.
+    /// Một dòng SSE đã tách (không còn `\n`): `event: …` hoặc `data: {…}`.
+    /// `hint` / `toast` / `close` mang dữ liệu riêng của event; còn lại (ready, update_session, title, delta…) đi qua `feed`.
     fn handle_line(&mut self, line: &str, tx: &Tx) {
         if let Some(ev) = line.strip_prefix("event:") {
-            if matches!(ev.trim(), "close" | "finish") { self.saw_close = true; }
+            let ev = ev.trim();
+            if matches!(ev, "close" | "finish") { self.saw_close = true; }
+            self.cur_event = ev.to_string();
             return;
         }
         let Some(data) = line.strip_prefix("data: ") else { return };
+        let ev = std::mem::take(&mut self.cur_event);
         let Ok(v) = serde_json::from_str::<Value>(data) else { return };
-        self.feed(&v, tx);
+        match ev.as_str() {
+            "hint" | "toast" => {
+                let h = StreamHint {
+                    kind: v["type"].as_str().unwrap_or("").to_string(),
+                    content: v["content"].as_str().unwrap_or("").to_string(),
+                    finish_reason: v["finish_reason"].as_str().map(str::to_string),
+                    toast: ev == "toast",
+                };
+                if self.hints.len() < 5 { self.hints.push(format!("{}:{}:{}", ev, h.kind, h.finish_reason.as_deref().unwrap_or(""))); }
+                let _ = tx.send(StreamEv::Hint(h));
+            }
+            "close" => { self.retry_on_close = v["click_behavior"].as_str() == Some("retry"); }
+            _ => self.feed(&v, tx),
+        }
     }
 
     fn feed(&mut self, v: &Value, tx: &Tx) {
@@ -1935,6 +1978,57 @@ mod resume_tests {
             assert_eq!(t, want_t, "THINK lệch khi cắt ở dòng {k}");
             assert_eq!(r, want_r, "RESPONSE lệch khi cắt ở dòng {k}");
         }
+    }
+
+    /// Đuôi SSE thật của một lần bị rate limit (bắt từ file debug của một máy khác): chỉ có hint rồi close, không chữ nào.
+    #[test]
+    fn rate_limit_hint_is_parsed_from_a_real_stream() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut st = SseState::default();
+        feed_all(&mut st, &tx, &[
+            "event: ready",
+            r#"data: {"request_message_id":9,"response_message_id":10,"model_type":"default"}"#,
+            "event: hint",
+            r#"data: {"type":"error","content":"Tin nhắn quá thường xuyên. Vui lòng thử lại sau.","clear_response":true,"finish_reason":"rate_limit_reached"}"#,
+            "event: close",
+            r#"data: {"click_behavior":"retry","auto_resume":false}"#,
+        ]);
+        let mut hints = Vec::new(); let mut text = String::new(); let mut mid = None;
+        while let Ok(e) = rx.try_recv() { match e { StreamEv::Hint(h) => hints.push(h), StreamEv::Response(t) | StreamEv::Thinking(t) => text.push_str(&t), StreamEv::MsgId(m) => mid = Some(m), _ => {} } }
+        assert_eq!(mid, Some(10), "ready vẫn được đọc");
+        assert!(text.is_empty() && !st.any_delta, "không có chữ nào");
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].is_rate_limit() && hints[0].kind == "error" && !hints[0].toast);
+        assert_eq!(hints[0].finish_reason.as_deref(), Some("rate_limit_reached"));
+        assert!(st.complete() && st.retry_on_close, "close mang click_behavior=retry");
+    }
+
+    #[test]
+    fn only_rate_limit_like_hints_count_as_rate_limit() {
+        let h = |content: &str, fr: Option<&str>| StreamHint { kind: "error".into(), content: content.into(), finish_reason: fr.map(str::to_string), toast: false };
+        assert!(h("bất kỳ", Some("rate_limit_reached")).is_rate_limit());
+        assert!(h("Tin nhắn quá thường xuyên", None).is_rate_limit());
+        assert!(h("Too many requests", None).is_rate_limit());
+        assert!(!h("Nội dung không phù hợp", Some("content_filter")).is_rate_limit());
+        assert!(!h("", None).is_rate_limit());
+    }
+
+    /// event: ready/update_session/title không được nuốt nhầm vào luồng chữ, và data trơn sau event vẫn là delta.
+    #[test]
+    fn events_do_not_leak_into_the_text_stream() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut st = SseState::default();
+        feed_all(&mut st, &tx, &[
+            "event: update_session", r#"data: {"updated_at":1793761772.9}"#,
+            r#"data: {"v":{"response":{"fragments":[{"type":"RESPONSE","content":"Hi"}]}}}"#,
+            r#"data: {"p":"response/fragments/-1/content","o":"APPEND","v":"!"}"#,
+            "event: title", r#"data: {"content":"Chào"}"#,
+            "event: close", r#"data: {"click_behavior":"none","auto_resume":false}"#,
+        ]);
+        let mut text = String::new();
+        while let Ok(e) = rx.try_recv() { if let StreamEv::Response(t) = e { text.push_str(&t); } }
+        assert_eq!(text, "Hi!");
+        assert!(st.complete() && !st.retry_on_close);
     }
 
     /// sync_to chỉ gửi phần thiếu.
