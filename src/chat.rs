@@ -606,13 +606,14 @@ pub(crate) async fn mark_auth_invalid(st: &Arc<AppState>, acc_id: &str) {
 
 /// Loại lỗi DS trả cho một acc (tiền tố do `client::classify_global_code` gắn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AccErr { Auth, Challenge, Banned, IpRestricted, Pow, Network, Other }
+pub(crate) enum AccErr { Auth, Challenge, Banned, Muted, IpRestricted, Pow, Network, Other }
 
 pub(crate) fn acc_err_kind(e: &anyhow::Error) -> AccErr {
     let m = format!("{:#}", e);
     if m.contains("AUTH_INVALID") { AccErr::Auth }
     else if m.contains("CHALLENGE_REQUIRED") { AccErr::Challenge }
     else if m.contains("USER_BANNED") { AccErr::Banned }
+    else if m.contains("USER_MUTED") { AccErr::Muted }
     else if m.contains("IP_RESTRICTED") { AccErr::IpRestricted }
     else if m.contains("POW_INVALID") { AccErr::Pow }
     else if is_network_error(e) { AccErr::Network }
@@ -624,7 +625,7 @@ pub(crate) async fn note_acc_error(st: &Arc<AppState>, acc_id: &str, e: &anyhow:
     let kind = acc_err_kind(e);
     crate::logbuf::debug("acc_error", serde_json::json!({
         "acc": &acc_id[..8.min(acc_id.len())],
-        "kind": match kind { AccErr::Auth => "auth", AccErr::Challenge => "challenge", AccErr::Banned => "banned", AccErr::IpRestricted => "ip_restricted", AccErr::Pow => "pow", AccErr::Network => "network", AccErr::Other => "other" },
+        "kind": match kind { AccErr::Auth => "auth", AccErr::Challenge => "challenge", AccErr::Banned => "banned", AccErr::Muted => "muted", AccErr::IpRestricted => "ip_restricted", AccErr::Pow => "pow", AccErr::Network => "network", AccErr::Other => "other" },
         "err": format!("{:#}", e).chars().take(1200).collect::<String>(),
     }));
     match kind {
@@ -653,6 +654,7 @@ pub(crate) async fn note_acc_error(st: &Arc<AppState>, acc_id: &str, e: &anyhow:
             drop(store);
             mark_dirty(st);
         }
+        AccErr::Muted => { mute_acc(st, acc_id, e).await; }
         AccErr::IpRestricted => crate::elog!("[ds-ip] DeepSeek chặn tạm theo IP (40029, thao tác quá nhanh) — không phạt acc"),
         // PoW sai thường là lỗi phía mình (challenge hết hạn, thuật toán đổi): không đổ cho acc
         AccErr::Pow => crate::elog!("[ds-pow] DeepSeek từ chối PoW: {:#}", e),
@@ -660,6 +662,32 @@ pub(crate) async fn note_acc_error(st: &Arc<AppState>, acc_id: &str, e: &anyhow:
         AccErr::Other => fail_acc(st, acc_id, "error", true).await,
     }
     kind
+}
+
+/// Thời gian nghỉ khi bị mute mà DeepSeek không cho biết mute_until (giây).
+const MUTE_FALLBACK: u64 = 3600;
+
+/// "user is muted": DeepSeek khoá chat của acc tới `mute_until`. Cho acc nghỉ tới đúng lúc đó (không phạt fail_streak, không
+/// tắt khỏi pool, không thử lại mỗi vài phút) và ghi rõ lý do + giờ hết khoá lên dashboard.
+async fn mute_acc(st: &Arc<AppState>, acc_id: &str, e: &anyhow::Error) -> u64 {
+    let until = muted_until_from_msg(&format!("{:#}", e)).filter(|u| *u > now()).unwrap_or_else(|| now() + MUTE_FALLBACK);
+    let when = crate::logbuf::fmt_ts(until * 1000).1;
+    {
+        let mut store = st.store.write().await;
+        if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
+            a.stats.total_error += 1;
+            a.stats.cooldown_until = until;
+            a.last_status = Some(format!("DeepSeek khoá chat tài khoản này (muted) tới {}", when.chars().take(19).collect::<String>()));
+        }
+    }
+    mark_dirty(st);
+    crate::elog!("[ds-muted] acc {} bị DeepSeek mute — nghỉ tới {}", &acc_id[..8.min(acc_id.len())], when);
+    until
+}
+
+/// Số giây unix ở cuối thông điệp `USER_MUTED: … tới <ts>` — `muted_until` ghi dạng "<unix>"; 0 = không rõ.
+fn muted_until_from_msg(m: &str) -> Option<u64> {
+    m.rsplit("tới ").next()?.trim().parse::<u64>().ok().filter(|u| *u > 0)
 }
 
 /// Acc bị đòi hCaptcha nghỉ bao lâu (giây) trước khi được thử lại.
@@ -844,7 +872,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                     }
                     match kind {
                         // acc hỏng hẳn (đăng xuất / đòi hCaptcha / bị khoá): đã rút khỏi pool, nới lượt để thử acc khác
-                        AccErr::Auth | AccErr::Challenge | AccErr::Banned => {
+                        AccErr::Auth | AccErr::Challenge | AccErr::Banned | AccErr::Muted => {
                             if auth_skips < 8 { auth_skips += 1; max_attempts += 1; }
                         }
                         // DNS/kết nối từ máy mình tới DS, hoặc DS chặn theo IP: không phải lỗi của acc, không phạt,
@@ -1646,5 +1674,20 @@ mod ds_code_tests {
         assert!(crate::client::classify_global_code(&json!({"code": 0, "data": {}})).is_none());
         // lỗi nghiệp vụ nằm trong data.biz_code, không phải lỗi toàn cục
         assert!(crate::client::classify_global_code(&json!({"data": {"biz_code": 3}})).is_none());
+    }
+
+    /// Phản hồi thật bắt từ file debug: tài khoản bị DeepSeek mute ~3 ngày.
+    #[test]
+    fn user_is_muted_is_recognised_with_its_end_time() {
+        let real: serde_json::Value = serde_json::from_str(r#"{"code":0,"msg":"","data":{"biz_code":5,"biz_msg":"user is muted","biz_data":{"is_muted":1,"mute_until":1794022406.8,"msg":null}}}"#).unwrap();
+        assert_eq!(crate::client::muted_until(&real), Some(1794022407));
+        let msg = format!("USER_MUTED: DeepSeek khoá chat tài khoản này (user is muted) tới {}", 1794022407u64);
+        assert_eq!(acc_err_kind(&anyhow::anyhow!(msg.clone())), AccErr::Muted);
+        assert_eq!(muted_until_from_msg(&msg), Some(1794022407));
+        assert_eq!(muted_until_from_msg("USER_MUTED: … tới 0"), None);
+        // không mute / biz_code khác thì không nhận nhầm
+        assert_eq!(crate::client::muted_until(&json!({"data": {"biz_code": 7, "biz_msg": "rate limit reached"}})), None);
+        assert_eq!(crate::client::muted_until(&json!({"data": {"biz_code": 5, "biz_data": {"is_muted": 0}}})), None);
+        assert_eq!(crate::client::muted_until(&json!({"data": {"biz_code": 0}})), None);
     }
 }

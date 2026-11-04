@@ -386,6 +386,8 @@
     [/^rỗng (\d+)$/, 'empty $1', '空响应 $1'],
     [/^chạy (\d+)$/, 'running $1', '运行中 $1'],
     [/^nghỉ (\d+)s$/, 'cooldown $1s', '冷却 $1 秒'],
+    [/^DeepSeek khoá chat tài khoản này \(muted\) tới (.+)$/, 'DeepSeek muted this account until $1', 'DeepSeek 已禁言该账号，至 $1'],
+    [/^DeepSeek giới hạn tốc độ — nghỉ (\d+)s \(trần học được (\d+)\/phút\)$/, 'DeepSeek rate limit — resting $1s (learned cap $2/min)', 'DeepSeek 限速 — 休息 $1 秒（学到上限 $2 次/分钟）'],
     [/^đang chạy (\d+)\/(\d+)$/, 'running $1/$2', '运行中 $1/$2'],
     [/^đang chạy (.+)$/, 'running $1', '当前运行 $1'],
     [/^(\d+) phút trước$/, '$1 min ago', '$1 分钟前'],

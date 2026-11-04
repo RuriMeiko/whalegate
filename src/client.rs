@@ -908,6 +908,9 @@ pub async fn chat_stream(
         let body = resp.text().await.unwrap_or_default();
         let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
         if let Some(e) = classify_global_code(&v) { return Err(e); }
+        // `{"code":0,"data":{"biz_code":5,"biz_msg":"user is muted","biz_data":{"is_muted":1,"mute_until":<unix giây>}}}`:
+        // DeepSeek khoá chat của tài khoản tới mute_until (web đọc userIsMuted/userMuteUntil). Không phải lỗi tạm.
+        if let Some(until) = muted_until(&v) { anyhow::bail!("USER_MUTED: DeepSeek khoá chat tài khoản này (user is muted) tới {}", until); }
         anyhow::bail!("completion trả JSON thay vì stream: {}", body.chars().take(300).collect::<String>());
     }
 
@@ -1382,6 +1385,15 @@ impl DsClient {
 
 /// Mã lỗi toàn cục của web DS (bảng `GLOBAL_ERROR_BIZ_CODE` trong bundle 2.7.0) → lỗi có tiền tố cho tầng trên.
 /// None = không phải lỗi toàn cục (code 0 hoặc lỗi nghiệp vụ nằm trong `data.biz_code`).
+/// Thời điểm (unix giây) tài khoản hết bị mute, nếu phản hồi là "user is muted" (data.biz_code == 5, biz_data.is_muted).
+pub(crate) fn muted_until(v: &Value) -> Option<u64> {
+    let d = &v["data"];
+    let bd = &d["biz_data"];
+    let muted = d["biz_code"].as_i64() == Some(5) && (bd["is_muted"].as_i64() == Some(1) || bd["is_muted"].as_bool() == Some(true) || d["biz_msg"].as_str().is_some_and(|m| m.contains("muted")));
+    if !muted { return None; }
+    Some(bd["mute_until"].as_f64().filter(|t| *t > 0.0).map_or(0, |t| t.ceil() as u64))
+}
+
 pub(crate) fn classify_global_code(v: &Value) -> Option<anyhow::Error> {
     let code = v["code"].as_i64()?;
     let msg = v["msg"].as_str().unwrap_or("").to_string();
