@@ -36,26 +36,6 @@
   .lab { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 20px; }
   .lab em { font-style: normal; text-transform: none; letter-spacing: 0; }
   /* nhãn bấm được: chọn khoảng thời gian (hôm nay / tuần / tháng / toàn bộ) */
-  .rngw { position: relative; display: inline-flex; align-items: center; height: 20px; }
-  .rngw::after { content: ''; position: absolute; right: 1px; top: 50%; width: 9px; height: 6px; margin-top: -3px; background: var(--mute); pointer-events: none;
-    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat;
-            mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat; }
-  .rngw:hover::after, .rngw:focus-within::after { background: var(--ink); }
-  select.rng { font: inherit; letter-spacing: inherit; text-transform: uppercase; color: inherit; background: transparent; border: 0; height: 20px; line-height: 20px; padding: 0 14px 0 0; margin: 0; overflow: visible; cursor: pointer; appearance: none; -webkit-appearance: none; border-radius: 0; }
-  select.rng:hover { color: var(--ink); }
-  /* bấm vào: chỉ nhấn chữ (đậm + gạch chân), không tô nền, không khung — thắng quy tắc select:focus chung */
-  select.rng:focus, select.rng:focus-visible, select.rng:active { background: transparent; outline: none; color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
-  select.rng option { text-transform: none; letter-spacing: 0; color: var(--ink); background: var(--bg); }
-  /* danh sách thả xuống tự vẽ (Chrome mới): khung vuông, không tô nền — mục đang chọn / đang trỏ chỉ đậm + gạch chân */
-  @supports (appearance: base-select) {
-    select.rng, select.rng::picker(select) { appearance: base-select; }
-    select.rng { display: inline-flex; align-items: center; }
-    select.rng::picker-icon { display: none; }
-    select.rng::picker(select) { background: var(--bg); color: var(--ink); border: 1px solid var(--ink); border-radius: 0; padding: 2px 0; box-shadow: 4px 4px 0 var(--ink); margin-top: 4px; }
-    select.rng option { display: block; padding: 6px 12px; font: 12px/1.3 var(--mono); text-transform: none; letter-spacing: 0; color: var(--mute); background: transparent; cursor: pointer; }
-    select.rng option::checkmark { display: none; }
-    select.rng option:hover, select.rng option:focus, select.rng option:checked { background: transparent; color: var(--ink); font-weight: 700; text-decoration: underline; text-underline-offset: 4px; }
-  }
   .big { font: 500 28px/1.05 var(--mono); letter-spacing: -.02em; word-break: break-all; }
   .sub { font: 12px/1.4 var(--mono); color: var(--mute); margin-top: 8px; }
   .good { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
@@ -198,18 +178,31 @@
   #logJump { position: absolute; right: 16px; bottom: 12px; display: none; }
   .fchip[aria-pressed="true"], .fchip[aria-pressed="true"]:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
   /* thanh công cụ log: ô tìm có icon, nút chỉ icon, nhóm nút xuất (chọn khoảng + tải) liền nhau */
+  /* dropdown tự dựng (thay <select>): nút + menu hiện ngay, không animation, không tự tính lại kích thước khi mở */
+  .dd { position: relative; display: inline-flex; vertical-align: middle; }
+  .dd-btn { display: inline-flex; align-items: center; gap: 6px; height: 20px; min-height: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; white-space: nowrap; }
+  .dd-btn:hover:not(:disabled) { background: transparent; color: var(--ink); }
+  .dd-btn:focus-visible { outline: none; color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
+  .dd-chev { flex: none; width: 9px; height: 6px; background: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat;
+            mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat; }
+  .dd.open .dd-chev { transform: rotate(180deg); }
+  .dd-menu { position: absolute; top: calc(100% + 4px); left: 0; min-width: 100%; margin: 0; padding: 2px 0; list-style: none; background: var(--bg); border: 1px solid var(--ink); box-shadow: 4px 4px 0 var(--ink); z-index: 70; }
+  .dd.right .dd-menu { left: auto; right: 0; }
+  .dd-menu[hidden] { display: none; }
+  .dd-menu li { padding: 6px 12px; font: 12px/1.3 var(--mono); letter-spacing: 0; text-transform: none; color: var(--mute); white-space: nowrap; cursor: pointer; user-select: none; }
+  /* chỉ đổi màu + gạch chân (không đậm: chữ đậm rộng hơn làm menu nhảy chiều ngang) */
+  .dd-menu li:hover, .dd-menu li:focus, .dd-menu li[aria-selected="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; outline: none; background: transparent; }
+  /* biến thể nút có viền (thanh công cụ log) */
+  .dd.box .dd-btn { height: 29px; padding: 0 10px; border: 1px solid var(--ink); color: var(--ink); font: 500 11px/1 var(--mono); letter-spacing: .04em; text-transform: none; }
+  .dd.box .dd-btn:hover:not(:disabled) { background: var(--hair); }
+  .dd.box.active .dd-btn { background: var(--ink); color: var(--bg); }
+  .bgroup .dd .dd-btn { border-right: 0; }
   .logq { position: relative; display: inline-flex; align-items: center; }
   .logq svg { position: absolute; left: 9px; pointer-events: none; color: var(--mute); }
   #logQ { width: 160px; height: 29px; padding-left: 28px; }
   button.icn { width: 29px; height: 29px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
   .bgroup { display: inline-flex; }
-  .bgroup .bsel { position: relative; display: inline-flex; }
-  .bgroup .bsel::after { content: ''; position: absolute; right: 8px; top: 50%; width: 9px; height: 6px; margin-top: -3px; background: var(--mute); pointer-events: none;
-    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat;
-            mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat; }
-  .bgroup select { appearance: none; -webkit-appearance: none; border: 1px solid var(--ink); border-right: 0; border-radius: 0; background: transparent; color: var(--ink); font: 500 11px/1 var(--mono); letter-spacing: .04em; height: 29px; padding: 0 24px 0 10px; cursor: pointer; }
-  .bgroup select:hover { background: var(--hair); }
-  .bgroup select:focus, .bgroup select:focus-visible { background: transparent; outline: none; text-decoration: underline; text-underline-offset: 4px; }
   /* công tắc ngôn ngữ: quả cầu + VI / EN / 中, mục đang chọn tô đặc */
   .lang { display: inline-flex; align-items: center; gap: 2px; height: 29px; padding: 0 5px 0 8px; border: 1px solid var(--ink); font: 500 11px/1 var(--mono); color: var(--mute); user-select: none; }
   .lang svg { width: 13px; height: 13px; flex: none; margin-right: 4px; color: var(--ink); }
@@ -299,13 +292,13 @@
   </div>
 
   <main class="grid">
-    <div class="cell k"><div class="lab"><span class="rngw"><select class="rng" id="rngTok" aria-label="Khoảng thời gian" onchange="setRng('tok', this.value)"><option value="today">Token hôm nay</option><option value="7d">Token 7 ngày</option><option value="30d">Token 30 ngày</option><option value="all">Token toàn bộ</option></select></span></div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
-    <div class="cell k"><div class="lab"><span class="rngw"><select class="rng" id="rngSave" aria-label="Khoảng thời gian" onchange="setRng('save', this.value)"><option value="today">Tiết kiệm hôm nay</option><option value="7d">Tiết kiệm 7 ngày</option><option value="30d">Tiết kiệm 30 ngày</option><option value="all">Tiết kiệm toàn bộ</option></select></span></div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
+    <div class="cell k"><div class="lab"><span class="dd lab-dd" id="rngTok"><button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="Khoảng thời gian"><span class="dd-txt"></span><i class="dd-chev"></i></button><ul class="dd-menu" role="listbox" hidden><li role="option" data-v="today">Token hôm nay</li><li role="option" data-v="7d">Token 7 ngày</li><li role="option" data-v="30d">Token 30 ngày</li><li role="option" data-v="all">Token toàn bộ</li></ul></span></div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
+    <div class="cell k"><div class="lab"><span class="dd lab-dd" id="rngSave"><button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="Khoảng thời gian"><span class="dd-txt"></span><i class="dd-chev"></i></button><ul class="dd-menu" role="listbox" hidden><li role="option" data-v="today">Tiết kiệm hôm nay</li><li role="option" data-v="7d">Tiết kiệm 7 ngày</li><li role="option" data-v="30d">Tiết kiệm 30 ngày</li><li role="option" data-v="all">Tiết kiệm toàn bộ</li></ul></span></div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
     <div class="cell k"><div class="lab">Độ trễ (1 giờ)</div><div class="big" id="kLat">—</div><div class="sub" id="kLatSub"></div></div>
     <div class="cell k"><div class="lab">Tài khoản</div><div class="big" id="kAcc">—</div><div class="sub" id="kAccSub"></div></div>
 
     <div class="cell c8">
-      <div class="lab"><span class="rngw"><select class="rng" id="rngChart" aria-label="Khoảng thời gian" onchange="setRng('chart', this.value)"><option value="24h">24 giờ qua</option><option value="7d">7 ngày qua</option><option value="30d">30 ngày qua</option><option value="all">Toàn bộ</option></select></span><em id="h24sum"></em></div>
+      <div class="lab"><span class="dd lab-dd" id="rngChart"><button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="Khoảng thời gian"><span class="dd-txt"></span><i class="dd-chev"></i></button><ul class="dd-menu" role="listbox" hidden><li role="option" data-v="24h">24 giờ qua</li><li role="option" data-v="7d">7 ngày qua</li><li role="option" data-v="30d">30 ngày qua</li><li role="option" data-v="all">Toàn bộ</li></ul></span><em id="h24sum"></em></div>
       <div class="bars" id="bars24"></div>
       <div class="axis" id="axis24"></div>
     </div>
@@ -477,11 +470,11 @@
     <div class="top">
       <h2>log <span id="logState" style="font-weight:400;color:var(--mute)"></span></h2>
       <span class="sp"></span>
-      <button class="sm has-ic fchip" id="logFilterBtn" aria-pressed="false" onclick="logToggleFilter()" title="Lọc log: tất cả hoặc chỉ lỗi"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M2 3h12l-4.6 5.4V13l-2.8-1.4V8.4z"/></svg><span class="bt" id="logFilterTxt">tất cả</span></button>
+      <span class="dd box right" id="logFilter"><button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false" title="Lọc log: tất cả hoặc chỉ lỗi"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M2 3h12l-4.6 5.4V13l-2.8-1.4V8.4z"/></svg><span class="dd-txt"></span><i class="dd-chev"></i></button><ul class="dd-menu" role="listbox" hidden><li role="option" data-v="all">tất cả</li><li role="option" data-v="err">lỗi</li></ul></span>
       <label class="logq"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><circle cx="7" cy="7" r="3.9"/><path d="M9.9 9.9 14 14"/></svg><input type="text" id="logQ" placeholder="lọc…" aria-label="Lọc log" oninput="logRender()" autocomplete="off"></label>
       <button class="sm icn" id="logPause" onclick="logTogglePause()" title="tạm dừng" aria-label="tạm dừng"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M5 3v10M11 3v10"/></svg></button>
       <button class="sm icn" onclick="logCopy()" title="copy" aria-label="copy"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><rect x="5.5" y="5.5" width="8" height="8"/><path d="M10.5 3.5v-1h-8v8h1"/></svg></button>
-      <span class="bgroup" role="group"><span class="bsel"><select id="logExportH" aria-label="Khoảng thời gian xuất"><option value="24">24 giờ</option><option value="72">3 ngày</option><option value="168">7 ngày</option></select></span><button class="sm has-ic" onclick="logExport()" title="Tải file debug: log + chi tiết nối lại / challenge / cuối luồng SSE (không có token hay cookie). Đã lưu sẵn ở thư mục logs/ trong thư mục dữ liệu."><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M8 2v8M4.6 6.8 8 10.2l3.4-3.4M2.5 13.5h11"/></svg><span class="bt">export</span></button></span>
+      <span class="bgroup" role="group"><span class="dd box right" id="logExportH"><button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="Khoảng thời gian xuất"><span class="dd-txt"></span><i class="dd-chev"></i></button><ul class="dd-menu" role="listbox" hidden><li role="option" data-v="24">24 giờ</li><li role="option" data-v="72">3 ngày</li><li role="option" data-v="168">7 ngày</li></ul></span><button class="sm has-ic" onclick="logExport()" title="Tải file debug: log + chi tiết nối lại / challenge / cuối luồng SSE (không có token hay cookie). Đã lưu sẵn ở thư mục logs/ trong thư mục dữ liệu."><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M8 2v8M4.6 6.8 8 10.2l3.4-3.4M2.5 13.5h11"/></svg><span class="bt">export</span></button></span>
       <button class="sm solid" aria-label="Đóng" onclick="closeLog()">×</button>
     </div>
     <div class="lbody" id="logBody"><button class="sm solid" id="logJump" onclick="logBottom(true)">↓ mới</button></div>
@@ -549,19 +542,45 @@ function setRng(k, v) {
   try { localStorage.setItem('wg.rng.' + k, v); } catch (e) {}
   if (window.__lastUsage) renderUsage(window.__lastUsage);
 }
-/// Chiều rộng ô chọn = chữ đang chọn (đo bằng một span ẩn cùng font) + chỗ cho mũi tên. Đặt cố định bằng JS thay vì
-/// `field-sizing: content`: cách đó khiến trình duyệt tính lại theo mục dài nhất mỗi khi mở danh sách rồi co lại sau ~0,2s.
-function fitRng(sel) {
-  const txt = sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : '';
-  if (sel.dataset.fit === txt && sel.style.width) return;
-  const m = el('span', null, txt);
-  m.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font:inherit;letter-spacing:inherit;text-transform:uppercase;left:0;top:0';
-  sel.parentElement.append(m);
-  const w = Math.ceil(m.getBoundingClientRect().width);
-  m.remove();
-  if (w > 0) { sel.style.width = (w + 16) + 'px'; sel.dataset.fit = txt; }
+/// Dropdown tự dựng (thay <select>): nút hiện giá trị đang chọn, menu hiện ngay khi bấm.
+/// Chữ trên nút lấy từ bản gốc (tiếng Việt) của mục đã chọn để bộ dịch xử lý được khi đổi ngôn ngữ.
+const DD = {};
+function ddInit(id, onChange, value) {
+  const root = $(id); if (!root) return;
+  const btn = root.querySelector('.dd-btn'), menu = root.querySelector('.dd-menu'), items = [...menu.children];
+  items.forEach((li) => { li.dataset.src = li.textContent; li.tabIndex = -1; });
+  DD[id] = {root, btn, menu, items, onChange, value: null};
+  btn.addEventListener('click', (e) => { e.stopPropagation(); root.classList.contains('open') ? ddClose(id) : ddOpen(id); });
+  btn.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); ddOpen(id, true); } });
+  menu.addEventListener('click', (e) => { const li = e.target.closest('li'); if (!li) return; e.stopPropagation(); ddPick(id, li.dataset.v); });
+  menu.addEventListener('keydown', (e) => {
+    const i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); items[Math.min(items.length - 1, i + 1)].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[Math.max(0, i - 1)].focus(); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (i >= 0) ddPick(id, items[i].dataset.v); }
+    else if (e.key === 'Tab') ddClose(id);
+  });
+  ddSet(id, value || (items[0] && items[0].dataset.v));
 }
-const syncRng = () => { for (const [k, id] of [['tok', 'rngTok'], ['save', 'rngSave'], ['chart', 'rngChart']]) { const s = $(id); if (s && s.querySelector('option[value="' + RNG[k] + '"]')) s.value = RNG[k]; else RNG[k] = s ? s.options[0].value : RNG[k]; if (s) fitRng(s); } };
+function ddSet(id, v) {
+  const d = DD[id]; if (!d) return;
+  const li = d.items.find((x) => x.dataset.v === String(v)) || d.items[0]; if (!li) return;
+  d.value = li.dataset.v;
+  d.items.forEach((x) => x.setAttribute('aria-selected', String(x === li)));
+  const t = d.btn.querySelector('.dd-txt'); if (t.textContent !== li.dataset.src) t.textContent = li.dataset.src;
+}
+const ddVal = (id) => (DD[id] ? DD[id].value : null);
+function ddPick(id, v) { const d = DD[id]; ddClose(id); ddSet(id, v); d.btn.focus(); if (d.onChange) d.onChange(d.value); }
+function ddOpen(id, focus) {
+  ddCloseAll();
+  const d = DD[id]; d.root.classList.add('open'); d.menu.hidden = false; d.btn.setAttribute('aria-expanded', 'true');
+  if (focus) (d.items.find((x) => x.getAttribute('aria-selected') === 'true') || d.items[0]).focus();
+}
+function ddClose(id) { const d = DD[id]; if (!d) return; d.root.classList.remove('open'); d.menu.hidden = true; d.btn.setAttribute('aria-expanded', 'false'); }
+function ddCloseAll() { Object.keys(DD).forEach(ddClose); }
+document.addEventListener('click', ddCloseAll);
+
+const syncRng = () => { for (const [k, id] of [['tok', 'rngTok'], ['save', 'rngSave'], ['chart', 'rngChart']]) { if (!DD[id]) continue; ddSet(id, RNG[k]); if (!DD[id].items.some((x) => x.dataset.v === RNG[k])) RNG[k] = DD[id].items[0].dataset.v; } };
 const hh = (t) => String(new Date(t * 1000).getHours()).padStart(2, '0');
 const dur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h >= 24 ? Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : h ? h + 'h' + String(m).padStart(2, '0') : m + 'm'; };
 
@@ -1580,15 +1599,14 @@ function openLog() {
 function closeLog() { closeModal('logModal'); if (LOG.es) { LOG.es.close(); LOG.es = null; } }
 /// Tải gói debug từ server (log + sự kiện chi tiết đã lưu ra file).
 function logExport() {
-  const h = $('logExportH').value;
+  const h = ddVal('logExportH') || '24';
   const a = el('a'); a.href = '/api/logs/export?hours=' + encodeURIComponent(h); a.download = '';
   document.body.append(a); a.click(); a.remove();
   say('Đang tạo file debug…', 'ok');
 }
-function logToggleFilter() {
-  LOG.filter = LOG.filter === 'all' ? 'err' : 'all';
-  $('logFilterBtn').setAttribute('aria-pressed', String(LOG.filter === 'err'));
-  $('logFilterTxt').textContent = LOG.filter === 'err' ? 'lỗi' : 'tất cả';
+function logSetFilter(v) {
+  LOG.filter = v === 'err' ? 'err' : 'all';
+  $('logFilter').classList.toggle('active', LOG.filter === 'err');
   logRender();
 }
 const ICO_PAUSE = '<svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M5 3v10M11 3v10"/></svg>', ICO_PLAY = '<svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M5 3l8 5-8 5z"/></svg>';
@@ -1609,6 +1627,7 @@ $('logBody').addEventListener('scroll', () => { const b = $('logBody'); LOG.stic
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  if (document.querySelector('.dd.open')) { ddCloseAll(); return; }
   for (const [id, fn] of [['cfmModal', () => askDone(false)], ['editModal', closeEdit], ['addModal', closeAdd], ['setModal', closeSettings], ['logModal', closeLog]]) if ($(id).classList.contains('open')) { fn(); break; }
 });
 
@@ -1640,6 +1659,12 @@ document.addEventListener('keydown', (e) => {
   let n = 0;
   const ping = setInterval(() => { if (++n > 20) { done(); say('Không nhận được dữ liệu từ chat.deepseek.com — thử bấm bookmarklet lại', 'err'); } else send(); }, 500);
 })();
+
+ddInit('rngTok', (v) => setRng('tok', v), RNG.tok);
+ddInit('rngSave', (v) => setRng('save', v), RNG.save);
+ddInit('rngChart', (v) => setRng('chart', v), RNG.chart);
+ddInit('logFilter', logSetFilter, 'all');
+ddInit('logExportH', null, '24');
 
 loadStats();
 setInterval(loadStats, 5000);
