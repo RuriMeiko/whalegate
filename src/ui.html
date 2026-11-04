@@ -330,7 +330,7 @@
 <canvas id="veil"></canvas>
 
 <!-- thêm tài khoản -->
-<div id="addModal" class="modal" onclick="if(event.target===this)closeAdd()">
+<div id="addModal" class="modal">
   <div class="dlg">
     <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeAdd()">×</button></div>
     <div class="tabs" role="tablist" aria-label="Cách thêm">
@@ -373,7 +373,7 @@
 </div>
 
 <!-- export danh sách tài khoản -->
-<div id="expModal" class="modal" onclick="if(event.target===this)closeModal('expModal')">
+<div id="expModal" class="modal">
   <div class="dlg">
     <div class="top"><h2>Export tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('expModal')">×</button></div>
     <div class="inner">
@@ -393,7 +393,7 @@
 </div>
 
 <!-- import danh sách tài khoản -->
-<div id="impModal" class="modal" onclick="if(event.target===this)closeModal('impModal')">
+<div id="impModal" class="modal">
   <div class="dlg">
     <div class="top"><h2>Import tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('impModal')">×</button></div>
     <div class="inner">
@@ -414,7 +414,7 @@
 </div>
 
 <!-- Cloudflare Worker: IP đầu ra -->
-<div id="cfModal" class="modal" onclick="if(event.target===this)closeModal('cfModal')">
+<div id="cfModal" class="modal">
   <div class="dlg">
     <div class="top"><h2>Cloudflare Worker — IP đầu ra</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('cfModal')">×</button></div>
     <div class="inner" id="cfBody"><div class="sub">Đang tải…</div></div>
@@ -423,7 +423,7 @@
 </div>
 
 <!-- cập nhật -->
-<div id="updModal" class="modal" onclick="if(event.target===this)closeModal('updModal')">
+<div id="updModal" class="modal">
   <div class="dlg">
     <div class="top"><h2>Cập nhật</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('updModal')">×</button></div>
     <div class="inner">
@@ -441,7 +441,7 @@
 </div>
 
 <!-- cấu hình dsh trỏ về gateway này -->
-<div id="dshModal" class="modal" onclick="if(event.target===this)closeModal('dshModal')">
+<div id="dshModal" class="modal">
   <div class="dlg">
     <div class="top"><h2>Cấu hình dsh</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('dshModal')">×</button></div>
     <div class="inner">
@@ -461,7 +461,7 @@
   </div>
 </div>
 
-<div id="editModal" class="modal" onclick="if(event.target===this)closeEdit()">
+<div id="editModal" class="modal">
   <div class="dlg">
     <div class="top"><h2 id="editTitle">Sửa tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeEdit()">×</button></div>
     <div class="inner">
@@ -476,7 +476,7 @@
 </div>
 
 <!-- cài đặt -->
-<div id="setModal" class="modal" onclick="if(event.target===this)closeSettings()">
+<div id="setModal" class="modal">
   <div class="dlg">
     <div class="top"><h2>Cài đặt</h2><button class="sm solid" aria-label="Đóng" onclick="closeSettings()">×</button></div>
     <div class="inner" id="cfg"></div>
@@ -485,7 +485,7 @@
 </div>
 
 <!-- log -->
-<div id="logModal" class="modal" onclick="if(event.target===this)closeLog()">
+<div id="logModal" class="modal">
   <div class="dlg log">
     <div class="top">
       <h2>log <span id="logState" style="font-weight:400;color:var(--mute)"></span></h2>
@@ -502,7 +502,7 @@
 </div>
 
 <!-- xác nhận -->
-<div id="cfmModal" class="modal" role="alertdialog" aria-labelledby="cfmTitle" onclick="if(event.target===this)askDone(false)">
+<div id="cfmModal" class="modal" role="alertdialog" aria-labelledby="cfmTitle">
   <div class="dlg">
     <div class="top"><h2 id="cfmTitle"></h2></div>
     <div class="inner"><p id="cfmText"></p><div class="btns"><button onclick="askDone(false)">Huỷ</button><button id="cfmOk" onclick="askDone(true)">OK</button></div></div>

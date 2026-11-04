@@ -143,11 +143,12 @@ async fn wrangler(args: &[&str], cwd: Option<&Path>, stdin: Option<&str>, secs: 
     if let (Some(text), Some(mut si)) = (stdin, child.stdin.take()) { si.write_all(text.as_bytes()).await?; drop(si); }
     let (out, err) = (child.stdout.take().context("stdout")?, child.stderr.take().context("stderr")?);
     let all = std::sync::Arc::new(Mutex::new(String::new()));
+    let quiet = args.first() == Some(&"auth"); // `auth token` in ra token: không ghi vào nhật ký
     let pump = |r: Box<dyn tokio::io::AsyncRead + Unpin + Send>, all: std::sync::Arc<Mutex<String>>| async move {
         let mut lines = BufReader::new(r).lines();
         while let Ok(Some(l)) = lines.next_line().await {
             if let Some(u) = parse_login_url(&l) { with(|s| s.login_url = u); }
-            if !l.contains("telemetry") && !l.contains('─') { say(&l); }
+            if !quiet && !l.contains("telemetry") && !l.contains('─') { say(&l); }
             all.lock().unwrap_or_else(|p| p.into_inner()).push_str(&format!("{l}\n"));
         }
     };
@@ -231,6 +232,27 @@ fn finish(res: Result<()>) {
     if let Some(e) = with(|s| (!s.error.is_empty()).then(|| s.error.clone())) { crate::elog!("[cloudflare] lỗi: {e}"); }
 }
 
+pub(crate) fn needs_subdomain(text: &str) -> bool { text.contains("register a workers.dev subdomain") }
+
+/// Account mới chưa có subdomain workers.dev nên `wrangler deploy` đòi hỏi tương tác. Đăng ký qua API bằng token OAuth của wrangler.
+async fn register_subdomain(acc_id: &str) -> Result<()> {
+    let (ok, out) = wrangler(&["auth", "token"], None, None, 60, None).await?;
+    let raw = out.lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("").to_string();
+    let token = if raw.starts_with('{') { serde_json::from_str::<Value>(&raw).ok().and_then(|v| v["token"].as_str().map(String::from)).unwrap_or_default() } else { raw };
+    if !ok || token.is_empty() || token.contains(' ') { bail!("không lấy được token wrangler để đăng ký workers.dev"); }
+    let http = reqwest::Client::new();
+    let url = format!("https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/subdomain");
+    for _ in 0..4 {
+        let name = format!("wg-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let r = http.put(&url).bearer_auth(&token).json(&json!({"subdomain": name})).send().await?;
+        let ok = r.status().is_success();
+        let body: Value = r.json().await.unwrap_or(Value::Null);
+        if ok && body["success"].as_bool() == Some(true) { say(&format!("Đã đăng ký {name}.workers.dev")); return Ok(()); }
+        say(&format!("Đăng ký {name} chưa được: {}", body["errors"][0]["message"].as_str().unwrap_or("lỗi không rõ")));
+    }
+    bail!("không đăng ký được workers.dev — mở dash.cloudflare.com → Workers & Pages để tạo thủ công rồi bấm lại")
+}
+
 async fn setup_flow() -> Result<()> {
     if find_npx().is_none() {
         install_node().await?;
@@ -251,7 +273,13 @@ async fn setup_flow() -> Result<()> {
     std::fs::write(dir.join("egress.js"), EGRESS_JS)?;
     std::fs::write(dir.join("wrangler.toml"), format!("name = \"{WORKER_NAME}\"\nmain = \"egress.js\"\ncompatibility_date = \"2024-09-01\"\n\n[observability]\nenabled = false\n"))?;
     say("Đang deploy Worker…");
-    let (ok, text) = wrangler(&["deploy", "--config", "wrangler.toml"], Some(&dir), None, 300, Some(&acc_id)).await?;
+    let (mut ok, mut text) = wrangler(&["deploy", "--config", "wrangler.toml"], Some(&dir), None, 300, Some(&acc_id)).await?;
+    if !ok && needs_subdomain(&text) {
+        say("Account chưa có địa chỉ workers.dev — đang tự đăng ký…");
+        register_subdomain(&acc_id).await?;
+        say("Deploy lại Worker…");
+        (ok, text) = wrangler(&["deploy", "--config", "wrangler.toml"], Some(&dir), None, 300, Some(&acc_id)).await?;
+    }
     if !ok { bail!("deploy Worker thất bại — xem nhật ký"); }
     let url = parse_workers_url(&text).context("deploy xong nhưng không đọc được địa chỉ workers.dev")?;
 
@@ -363,6 +391,12 @@ mod tests {
         assert_eq!(sha_for(&sums, "node-v22.12.0-win-x64.zip"), None);
         let (stem, ext) = node_target().unwrap();
         assert!(stem.starts_with("node-v22.12.0-") && (ext == "tar.gz" || ext == "zip"));
+    }
+
+    #[test]
+    fn spots_missing_subdomain() {
+        assert!(needs_subdomain("ERROR You need to register a workers.dev subdomain before publishing"));
+        assert!(!needs_subdomain("Deployed ds-egress"));
     }
 
     #[test]
