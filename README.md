@@ -503,7 +503,8 @@ stateDiagram-v2
 
 - Each request gets up to **3 attempts**. Upstream failures move to another account. Model mistakes (a bad tool call) retry with a correction note and don't penalize the account.
 - When no account is free, the request waits up to `DS_QUEUE_WAIT_SECS`, then returns `429` with `Retry-After`.
-- A stream that stalls for 90s or breaks mid-way counts as truncated and is retried, not returned as complete.
+- A stream that stalls for 90s or breaks mid-way (some text received, no `close` event) is first **resumed on the same account**, exactly as the web does: `POST /chat/resume_stream` for up to 5s (3s wait per try, 1s pause between tries), then the *Continue* button's `POST /chat/continue` with `fallback_to_resume` after a short random pause. Only the part the client has not seen yet is forwarded. If that fails too, the answer counts as truncated and the request fails over to another account.
+- When DeepSeek asks for a captcha (`CHALLENGE_REQUIRED`), the account rests and the gateway waits 2–5s at random before trying another account, instead of replaying the same payload at once.
 - The in-flight lease lives for the whole stream, even if the client disconnects, so the concurrency cap really holds.
 
 ---
@@ -541,7 +542,7 @@ Open `http://127.0.0.1:8790/`. It is loopback-only.
 - **Accounts:** add, verify, reset, edit label or token, enable/disable in the pool, bulk verify/reset, and duplicate-user detection. **Verify** is not just an auth check: it sends one minimal real completion on a throwaway session, because a throttled account still passes the auth endpoint. The result is alive, throttled, auth_dead or unknown, and only alive clears a throttle label.
 - **Usage:** tokens per hour (cache miss / cache hit / output), and what the same traffic would cost on the official API, shown in $ (English), ¥ (Chinese) or ₫ (Vietnamese) using the rates in **Settings → Display**. Prices are fetched live every 6h from DeepSeek's pricing page, peak hours are included, and there is a monthly projection. Click the **Tokens**, **Saved** or chart label to switch between today / 7 days / 30 days / all time (the choice is remembered). Data lives in `usage.json` next to `accounts.json`.
 - **Latency:** p50/p90 over the last hour, plus the error count.
-- **Live logs:** SSE stream with filters and search. Useful tags include `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` and `[ds-fail]`.
+- **Live logs:** SSE stream with filters and search. Useful tags include `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` and `[ds-fail]`. Every line is also saved to `~/.whalegate/logs/whalegate-YYYYMMDD.log` (kept 7 days, 64 MB per file), and detailed events go to `debug-YYYYMMDD.jsonl`: each resume / continue attempt, the last SSE lines of a stream that broke, account errors such as `CHALLENGE_REQUIRED`. The **export** button in the log window downloads one debug bundle (version, settings, a per-account summary, both logs for the last 24 hours to 7 days). Nothing in it contains tokens, cookies or account labels.
 - **Settings:** verified knobs only. Saving waits until no request is in flight, then the process re-execs itself (same PID, picks up a new build) and the page reloads. **Hard reset** restarts immediately.
 - **Export / import:** move the whole account pool to another machine as a JSON file or straight through the clipboard. Import merges by DeepSeek user id, so running it twice is safe; it never deletes accounts you already have.
 - **Language:** Tiếng Việt / English / 简体中文 from the globe switch (VI / EN / 中) at the right end of the header. It follows your browser language the first time and remembers the choice. See [docs/i18n.md](docs/i18n.md).

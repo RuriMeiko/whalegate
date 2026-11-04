@@ -571,6 +571,60 @@ async fn api_logs(axum::extract::Query(q): axum::extract::Query<LogsQ>) -> Json<
     Json(json!({ "lines": lines }))
 }
 
+#[derive(Deserialize)]
+struct ExportQ { hours: Option<u64> }
+
+/// Phần đầu của gói debug: phiên bản, cài đặt (không bí mật) và tóm tắt từng acc — KHÔNG có token / cookie / nhãn.
+async fn export_header(st: &Arc<AppState>) -> String {
+    let now_ms = crate::logbuf::now_ms();
+    let mut h = String::new();
+    h.push_str(&format!("whalegate v{} {}/{}\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH));
+    h.push_str(&format!("xuất lúc {} (DS_TZ_OFFSET={}s)\n", crate::logbuf::fmt_ts(now_ms).1, crate::settings::int("DS_TZ_OFFSET")));
+    h.push_str(&format!("thư mục log: {}\n", crate::logbuf::logs_dir().display()));
+    h.push_str("\n===== CÀI ĐẶT (không có bí mật) =====\n");
+    for d in crate::settings::DEFS.iter().filter(|d| d.show) {
+        let v = crate::settings::get(d.key);
+        // danh sách proxy có thể chứa user:pass → chỉ ghi số dòng
+        let shown = if d.key == "DS_PROXY_LIST" { format!("<{} dòng>", v.lines().filter(|l| !l.trim().is_empty()).count()) } else { v };
+        h.push_str(&format!("{}={}\n", d.key, shown));
+    }
+    h.push_str("\n===== TÀI KHOẢN (id 8 ký tự khớp với dòng log [route]; không token/cookie/nhãn) =====\n");
+    let store = st.store.read().await;
+    let t = now();
+    for a in &store.accounts {
+        let ck = cookie_string(&a.cookies);
+        h.push_str(&format!(
+            "{} | {} | status={} | nghỉ={}s | fail_streak={} | ok/rỗng/lỗi={}/{}/{} | {} | chrome-riêng={} | cookie .thumbcache={} | cookie ds_session_id={}\n",
+            &a.id[..8.min(a.id.len())],
+            if a.pool_enabled { "bật" } else { "tắt" },
+            a.last_status.clone().unwrap_or_default().chars().take(80).collect::<String>(),
+            a.stats.cooldown_until.saturating_sub(t), a.stats.fail_streak, a.stats.total_ok, a.stats.total_empty, a.stats.total_error,
+            if a.auth_dead_at.is_some() { "DS ĐÃ ĐĂNG XUẤT" } else { "token ok" },
+            if a.fp_seed.is_some() { "có" } else { "không" },
+            if crate::client::shumei_id_from_cookies(&ck).is_some() { "có" } else { "không" },
+            if a.cookies.contains_key("ds_session_id") { "có" } else { "không" },
+        ));
+    }
+    h
+}
+
+/// Tải gói debug: phần đầu + log và sự kiện chi tiết đã lưu ra file trong `?hours=` giờ gần nhất (mặc định 24, tối đa 7 ngày).
+async fn api_logs_export(State(st): State<Arc<AppState>>, axum::extract::Query(q): axum::extract::Query<ExportQ>) -> Response {
+    let hours = q.hours.unwrap_or(24).clamp(1, 24 * 7);
+    let header = export_header(&st).await;
+    let (log, dbg) = tokio::task::spawn_blocking(move || crate::logbuf::read_recent(hours, 12 << 20)).await.unwrap_or_default();
+    let body = format!("{header}\n===== LOG ({hours} giờ gần nhất) =====\n{log}\n===== DEBUG CHI TIẾT (JSONL, mỗi dòng một sự kiện) =====\n{dbg}");
+    let stamp: String = crate::logbuf::fmt_ts(crate::logbuf::now_ms()).1.chars().take(19).filter(|c| c.is_ascii_digit() || *c == ' ').collect::<String>().replace(' ', "-");
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"whalegate-debug-{stamp}.txt\"")),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        body,
+    ).into_response()
+}
+
 /// SSE: gửi backlog (`?backlog=N`, mặc định 300) rồi phát trực tiếp từng dòng mới.
 async fn api_logs_stream(axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>)
     -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
@@ -3474,6 +3528,7 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/usage", get(api_usage))
         .route("/api/logs", get(api_logs))
         .route("/api/logs/stream", get(api_logs_stream))
+        .route("/api/logs/export", get(api_logs_export))
         .route("/api/settings", get(api_settings_get).post(api_settings_set))
         .route("/api/restart", get(api_restart_status).post(api_restart))
         .route("/api/dsh", get(api_dsh_status).post(api_dsh_setup))

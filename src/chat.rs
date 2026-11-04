@@ -592,6 +592,11 @@ pub(crate) fn acc_err_kind(e: &anyhow::Error) -> AccErr {
 /// Ghi nhận lỗi lên acc theo đúng loại, trả loại để vòng failover quyết định có nới lượt không.
 pub(crate) async fn note_acc_error(st: &Arc<AppState>, acc_id: &str, e: &anyhow::Error) -> AccErr {
     let kind = acc_err_kind(e);
+    crate::logbuf::debug("acc_error", serde_json::json!({
+        "acc": &acc_id[..8.min(acc_id.len())],
+        "kind": match kind { AccErr::Auth => "auth", AccErr::Challenge => "challenge", AccErr::Banned => "banned", AccErr::IpRestricted => "ip_restricted", AccErr::Pow => "pow", AccErr::Network => "network", AccErr::Other => "other" },
+        "err": format!("{:#}", e).chars().take(1200).collect::<String>(),
+    }));
     match kind {
         AccErr::Auth => mark_auth_invalid(st, acc_id).await,
         AccErr::Challenge => {
@@ -780,7 +785,14 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         failed.push(acc_id);
                         continue;
                     }
-                    match note_acc_error(&st, &acc_id, &e).await {
+                    let kind = note_acc_error(&st, &acc_id, &e).await;
+                    // bị đòi hCaptcha: đừng phát lại ngay cùng một payload sang acc khác (nhìn như bot). Nghỉ một nhịp ngẫu nhiên nhẹ
+                    if matches!(kind, AccErr::Challenge) {
+                        let ms = 2000 + (uuid::Uuid::new_v4().as_u128() % 3000) as u64;
+                        crate::elog!("[ds-challenge] chờ {}ms rồi mới thử acc khác", ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    }
+                    match kind {
                         // acc hỏng hẳn (đăng xuất / đòi hCaptcha / bị khoá): đã rút khỏi pool, nới lượt để thử acc khác
                         AccErr::Auth | AccErr::Challenge | AccErr::Banned => {
                             if auth_skips < 8 { auth_skips += 1; max_attempts += 1; }

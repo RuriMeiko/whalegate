@@ -515,7 +515,8 @@ stateDiagram-v2
 
 - Mỗi request có tối đa **3 lần thử**. Lỗi từ upstream chuyển sang tài khoản khác. Lỗi của model (một lệnh gọi tool hỏng) thì thử lại kèm lời nhắc sửa và không phạt tài khoản.
 - Khi không còn tài khoản rảnh, request chờ tối đa `DS_QUEUE_WAIT_SECS` rồi trả `429` kèm `Retry-After`.
-- Một stream đứng im 90 giây hoặc đứt giữa chừng bị coi là cụt và được thử lại, không trả về như đã hoàn tất.
+- Một stream đứng im 90 giây hoặc đứt giữa chừng (đã nhận chữ mà chưa có sự kiện `close`) được **nối lại trên chính tài khoản đó** trước, y như web: `POST /chat/resume_stream` tối đa 5 giây (mỗi lần chờ 3 giây, nghỉ 1 giây giữa các lần), rồi bấm "Tiếp tục" bằng `POST /chat/continue` kèm `fallback_to_resume` sau một nhịp ngẫu nhiên nhẹ. Chỉ phần client chưa thấy mới được chuyển tiếp. Nếu vẫn không được thì mới coi là cụt và chuyển sang tài khoản khác.
+- Khi DeepSeek đòi xác minh captcha (`CHALLENGE_REQUIRED`), tài khoản nghỉ và gateway chờ ngẫu nhiên 2–5 giây rồi mới thử tài khoản khác, thay vì phát lại ngay cùng payload.
 - Lease đang chạy giữ suốt cả stream, kể cả khi client ngắt kết nối, nên trần đồng thời giữ đúng thật sự.
 
 ---
@@ -555,7 +556,7 @@ Mở `http://127.0.0.1:8790/`. Chỉ truy cập được từ loopback.
 - **Tài khoản:** thêm, verify, reset, sửa nhãn hoặc token, bật/tắt trong pool, verify/reset hàng loạt và phát hiện user trùng. **Verify** không chỉ là kiểm tra xác thực: nó gửi một completion thật tối thiểu trên một phiên dùng một lần, vì tài khoản đang bị throttle vẫn qua được endpoint xác thực. Kết quả là alive, throttled, auth_dead hoặc unknown, và chỉ alive mới gỡ nhãn throttle.
 - **Mức dùng:** token theo giờ (cache miss / cache hit / output) và cùng lưu lượng đó sẽ tốn bao nhiêu trên API chính thức, hiển thị bằng $ (English), ¥ (tiếng Trung) hoặc ₫ (tiếng Việt) theo tỷ giá ở **Cài đặt → Hiển thị**. Giá được lấy trực tiếp từ trang giá của DeepSeek mỗi 6 giờ, có tính giờ cao điểm, và có dự phóng cả tháng. Bấm vào nhãn **Token**, **Tiết kiệm** hoặc biểu đồ để chuyển giữa hôm nay / 7 ngày / 30 ngày / toàn bộ (lựa chọn được nhớ). Dữ liệu nằm trong `usage.json` cạnh `accounts.json`.
 - **Độ trễ:** p50/p90 trong giờ qua, kèm số lỗi.
-- **Log trực tiếp:** luồng SSE có lọc và tìm kiếm. Các tag hữu ích gồm `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` và `[ds-fail]`.
+- **Log trực tiếp:** luồng SSE có lọc và tìm kiếm. Các tag hữu ích gồm `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` và `[ds-fail]`. Mọi dòng log cũng được lưu ra `~/.whalegate/logs/whalegate-YYYYMMDD.log` (giữ 7 ngày, tối đa 64 MB mỗi file), còn sự kiện chi tiết vào `debug-YYYYMMDD.jsonl`: từng lần nối lại / tiếp tục, vài dòng SSE cuối của stream bị đứt, lỗi tài khoản như `CHALLENGE_REQUIRED`. Nút **export** trong cửa sổ log tải về một gói debug (phiên bản, cài đặt, tóm tắt từng tài khoản, cả hai loại log trong 24 giờ đến 7 ngày). Trong đó không có token, cookie hay nhãn tài khoản.
 - **Cài đặt:** chỉ có các nút đã kiểm chứng. Lưu sẽ đợi tới khi không còn request nào đang chạy, rồi tiến trình tự re-exec (cùng PID, nạp bản build mới) và trang tự tải lại. **Hard reset** khởi động lại ngay.
 - **Export / import:** chuyển cả pool tài khoản sang máy khác bằng file JSON hoặc thẳng qua clipboard. Import gộp theo user id của DeepSeek nên chạy hai lần vẫn an toàn; nó không bao giờ xoá tài khoản bạn đang có.
 - **Ngôn ngữ:** Tiếng Việt / English / 简体中文 bằng công tắc quả cầu (VI / EN / 中) ở cuối thanh đầu trang. Lần đầu nó theo ngôn ngữ trình duyệt và nhớ lựa chọn của bạn. Xem [docs/i18n.md](docs/i18n.md).

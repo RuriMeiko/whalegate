@@ -1018,6 +1018,84 @@ mod shumei_tests {
 
 
 #[cfg(test)]
+mod shumei_id_tests {
+    use super::*;
+
+    /// `shumei_device_id` (SDK `SMSdk.getDeviceId()`, web gửi trong body completion) = "B" + giải mã cookie `.thumbcache_*`.
+    /// Đo trên Chrome riêng của whalegate: lấy được ở headless không, có đổi sau mỗi lần tải trang không, có đổi khi mở lại profile / xoá profile không.
+    /// `cargo test live_shumei_id -- --ignored --nocapture` (WG_TEST_HEADED=1 để thử thêm cửa sổ thật)
+    #[tokio::test]
+    #[ignore]
+    async fn live_shumei_id_probe() {
+        let mut modes = vec![true];
+        if std::env::var("WG_TEST_HEADED").map(|v| v == "1").unwrap_or(false) { modes.push(false); }
+        for headless in modes {
+            let tag = if headless { "headless" } else { "headed" };
+            let seed = format!("shumei-id-{}", tag);
+            let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
+            let _ = std::fs::remove_dir_all(account_profile_dir(&seed));
+            let short = |s: &str| if s.len() > 14 { format!("{}…{}({})", &s[..7], &s[s.len() - 4..], s.len()) } else { s.to_string() };
+
+            // đọc (id SDK, cookie .thumbcache giải mã, smidV2) từ tab đang mở, chờ SDK có id
+            async fn read(s: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, n: &mut u64) -> (String, String, String, f64) {
+                let t0 = std::time::Instant::now();
+                let expr = r#"(()=>{const id=(window.SMSdk&&SMSdk.getDeviceId&&SMSdk.getDeviceId())||'';const ck=Object.fromEntries(document.cookie.split('; ').map(c=>{const k=c.indexOf('=');return [c.slice(0,k),c.slice(k+1)]}));const tk=Object.keys(ck).find(k=>k.startsWith('.thumbcache_'));return JSON.stringify({id,thumb:tk?decodeURIComponent(ck[tk]):'',smid:ck['smidV2']||''})})()"#;
+                loop {
+                    *n += 1; let myid = *n;
+                    s.send(Message::Text(json!({"id": myid, "method": "Runtime.evaluate", "params": {"expression": expr, "returnByValue": true}}).to_string())).await.unwrap();
+                    let mut val = String::new();
+                    while let Ok(Some(Ok(Message::Text(t)))) = tokio::time::timeout(std::time::Duration::from_secs(5), s.next()).await {
+                        let v: Value = serde_json::from_str(&t).unwrap();
+                        if v["id"] == myid { val = v["result"]["result"]["value"].as_str().unwrap_or("").to_string(); break; }
+                    }
+                    let j: Value = serde_json::from_str(&val).unwrap_or(Value::Null);
+                    let id = j["id"].as_str().unwrap_or("").to_string();
+                    if id.len() > 40 || t0.elapsed() > std::time::Duration::from_secs(40) {
+                        return (id, j["thumb"].as_str().unwrap_or("").to_string(), j["smid"].as_str().unwrap_or("").to_string(), t0.elapsed().as_secs_f64());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                }
+            }
+
+            let mut report: Vec<(String, String, bool, String)> = Vec::new();
+            // 1) profile mới
+            let (b, ws) = launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", headless).await.unwrap();
+            let (mut s, _) = tokio_tungstenite::connect_async(&ws).await.unwrap();
+            let mut n = 10u64;
+            let (id, thumb, smid, secs) = read(&mut s, &mut n).await;
+            println!("[{tag}] profile mới     : id {} ({:.1}s) formula={} smid {}", short(&id), secs, id == format!("B{}", thumb), short(&smid));
+            report.push(("profile mới".into(), id.clone(), id == format!("B{}", thumb), smid.clone()));
+            // 2) tải lại trang ×2 trong cùng phiên
+            for i in 1..=2 {
+                n += 1;
+                s.send(Message::Text(json!({"id": n, "method": "Page.reload", "params": {}}).to_string())).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let (id2, thumb2, smid2, secs2) = read(&mut s, &mut n).await;
+                println!("[{tag}] tải lại lần {i}   : id {} ({:.1}s) formula={} smid {} | đổi id: {} | smid giữ: {}", short(&id2), secs2, id2 == format!("B{}", thumb2), short(&smid2), id2 != report.last().unwrap().1, smid2 == smid);
+                report.push((format!("tải lại {i}"), id2, true, smid2));
+            }
+            b.close().await;
+            // 3) mở lại CÙNG profile (cookie/localStorage còn)
+            let (b, ws) = launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", headless).await.unwrap();
+            let (mut s, _) = tokio_tungstenite::connect_async(&ws).await.unwrap();
+            let (id3, thumb3, smid3, secs3) = read(&mut s, &mut n).await;
+            println!("[{tag}] mở lại profile  : id {} ({:.1}s) formula={} smid {} | smid giữ: {}", short(&id3), secs3, id3 == format!("B{}", thumb3), short(&smid3), smid3 == smid);
+            b.close().await;
+            // 4) xoá profile, cùng vân tay
+            let _ = std::fs::remove_dir_all(account_profile_dir(&seed));
+            let (b, ws) = launch_account_chrome(&fp, "https://chat.deepseek.com/sign_in", headless).await.unwrap();
+            let (mut s, _) = tokio_tungstenite::connect_async(&ws).await.unwrap();
+            let (id4, thumb4, smid4, secs4) = read(&mut s, &mut n).await;
+            println!("[{tag}] xoá profile, cùng vân tay: id {} ({:.1}s) formula={} smid {} | smid giống lần đầu: {}", short(&id4), secs4, id4 == format!("B{}", thumb4), short(&smid4), smid4 == smid);
+            b.close().await;
+            let _ = std::fs::remove_dir_all(account_profile_dir(&seed));
+            let distinct: std::collections::HashSet<_> = report.iter().map(|r| r.1.clone()).chain([id3, id4]).collect();
+            println!("[{tag}] {} id khác nhau trong {} lần đọc", distinct.len(), report.len() + 2);
+        }
+    }
+}
+
+#[cfg(test)]
 mod login_flow_tests {
     use super::*;
 
