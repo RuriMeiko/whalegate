@@ -541,6 +541,7 @@ Open `http://127.0.0.1:8790/`. It is loopback-only.
 - **Live logs:** SSE stream with filters and search. Useful tags include `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` and `[ds-fail]`.
 - **Settings:** verified knobs only. Saving waits until no request is in flight, then the process re-execs itself (same PID, picks up a new build) and the page reloads. **Hard reset** restarts immediately.
 - **Export / import:** move the whole account pool to another machine as a JSON file or straight through the clipboard. Import merges by DeepSeek user id, so running it twice is safe; it never deletes accounts you already have.
+- **Language:** Tiếng Việt / English / 简体中文 from the globe switch (VI / EN / 中) at the right end of the header. It follows your browser language the first time and remembers the choice. See [docs/i18n.md](docs/i18n.md).
 - **Updates:** the dashboard checks GitHub Releases on load and every 30 minutes. When a newer tag exists a banner appears; one click downloads the prebuilt binary, verifies its SHA-256, swaps it in place and re-execs, and the page reloads by itself once the new process is up.
 
 ---
@@ -764,7 +765,8 @@ src/
 ├── setup_dsh.rs       `whalegate setup-dsh` + dashboard dsh button (cross-platform config writer)
 ├── usage.rs           token accounting, live API pricing, latency
 ├── logbuf.rs          in-memory log ring for the live log view
-└── ui.html            dashboard (embedded in the binary)
+├── ui.html            dashboard (embedded in the binary)
+└── i18n.js            dashboard translations vi/en/zh (inlined into ui.html at startup)
 deploy/                systemd unit for source checkouts, dsh setup wrapper
 install.sh, install.ps1 one-line installers (Linux/macOS, Windows)
 .github/workflows/     release pipeline: static musl, macOS, Windows builds → GitHub release
@@ -777,6 +779,8 @@ Malformed tool-call outputs are saved to `~/.whalegate/samples.jsonl`. Replay th
 ```bash
 cargo test --release replay_samples -- --ignored --nocapture
 ```
+
+The Chinese dashboard translation grew out of a userscript contributed by [wang1048920402](https://github.com/wang1048920402) in [issue #3](https://github.com/RuriMeiko/whalegate/issues/3).
 
 The `DeepSeekHashV1` PoW is SHA3-256 without round 0 of keccak-f, ported 1:1 from [CJackHwang/ds2api](https://github.com/CJackHwang/ds2api).
 

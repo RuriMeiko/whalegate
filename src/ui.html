@@ -163,6 +163,14 @@
   #logJump { position: absolute; right: 16px; bottom: 12px; display: none; }
   .fchip.on, .fchip.on:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
   #logQ { width: 160px; }
+  /* công tắc ngôn ngữ: quả cầu + VI / EN / 中, mục đang chọn tô đặc */
+  .lang { display: inline-flex; align-items: center; gap: 2px; height: 29px; padding: 0 5px 0 8px; border: 1px solid var(--ink); font: 500 11px/1 var(--mono); color: var(--mute); user-select: none; }
+  .lang svg { width: 13px; height: 13px; flex: none; margin-right: 4px; color: var(--ink); }
+  .lang i { font-style: normal; color: var(--mute); opacity: .75; transform: skewX(-12deg); padding: 0 1px; }
+  .lang button { min-height: 0; border: 0; padding: 5px 5px; font: inherit; letter-spacing: .04em; color: var(--mute); background: none; }
+  .lang button:hover:not(:disabled) { background: none; color: var(--ink); }
+  .lang button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+  .lang button[aria-pressed="true"]:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
 
   /* thông báo */
   #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: min(400px, calc(100vw - 32px)); pointer-events: none; }
@@ -207,14 +215,14 @@
 
   @media (max-width: 860px) { .k { grid-column: span 6; } .c8, .c4 { grid-column: span 12; } }
   @media (max-width: 560px) {
-    .wrap { padding: 0 12px 32px; } h1 { font-size: 13px; } #liveTxt { display: none; } .gh-t { display: none; } header { gap: 7px; } a.btn { padding: 7px 8px; } .live { margin-right: 0; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
+    .wrap { padding: 0 12px 32px; } h1 { font-size: 13px; } #liveTxt { display: none; } .gh-t { display: none; } .lang svg { display: none; } .lang { padding-left: 4px; } header { gap: 7px; } a.btn { padding: 7px 8px; } .live { margin-right: 0; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
     .row { flex-wrap: wrap; } .row .ctl { margin-left: auto; }
     .modal { padding: 0; } .dlg, .dlg.log { width: 100%; height: 100%; max-height: none; box-shadow: none; border: 0; }
     .modal:not(#logModal):not(#setModal) .dlg { height: auto; max-height: 100%; align-self: flex-end; border-top: 1px solid var(--ink); }
     .ll { flex-direction: column; gap: 0; } #logQ { width: 100%; order: 9; }
     #toasts { left: 12px; right: 12px; bottom: 12px; max-width: none; }
   }
-  @media (pointer: coarse) { button { min-height: 44px; } button.sm, a.btn { min-height: 40px; } }
+  @media (pointer: coarse) { button { min-height: 44px; } button.sm, a.btn { min-height: 40px; } .lang { height: 40px; } .lang button { min-height: 34px; padding: 0 8px; } }
 </style>
 </head>
 <body>
@@ -226,6 +234,10 @@
     <button class="sm" onclick="openDsh()">dsh</button>
     <button class="sm" onclick="openSettings()">cài đặt</button>
     <a class="btn" href="https://github.com/RuriMeiko/whalegate" target="_blank" rel="noopener noreferrer" title="Mã nguồn trên GitHub" aria-label="GitHub"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-t">github</span></a>
+    <div class="lang" data-nt role="group" aria-label="Language">
+      <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.6"/><ellipse cx="8" cy="8" rx="2.9" ry="6.6"/><path d="M1.4 8h13.2M2.4 4.6h11.2M2.4 11.4h11.2"/></svg>
+      <button type="button" data-l="vi" title="Tiếng Việt" onclick="WG_I18N.setLang('vi')">VI</button><i>/</i><button type="button" data-l="en" title="English" onclick="WG_I18N.setLang('en')">EN</button><i>/</i><button type="button" data-l="zh" title="简体中文 · 贡献者 wang1048920402" onclick="WG_I18N.setLang('zh')">中</button>
+    </div>
   </header>
 
   <div id="updBar" role="status">
@@ -534,7 +546,7 @@ const DS_ORIGIN = 'https://chat.deepseek.com';
 /// Mã gom "máy" của trình duyệt đang chạy: dùng chung cho bookmarklet và lệnh console dự phòng (trả Promise).
 /// Mọi thứ ở đây là giá trị trang web đọc được, nên chỉ cần đang đăng nhập chat.deepseek.com là chạy.
 /// CHỈ dùng comment /* */: URL javascript: bị trình duyệt bỏ hết xuống dòng, một `//` sẽ nuốt phần code phía sau.
-const COLLECT_JS = String.raw`(async function () {
+const COLLECT_SRC = String.raw`(async function () {
   if (location.origin !== 'https://chat.deepseek.com') { alert('whalegate: chạy trên tab chat.deepseek.com'); return null; }
   var raw = null;
   try { raw = localStorage.getItem('userToken'); } catch (e) {}
@@ -577,6 +589,10 @@ const COLLECT_JS = String.raw`(async function () {
   };
 })`;
 
+/// alert() chạy ở tab khác nên bộ dịch DOM không với tới: dịch lúc dựng mã, theo ngôn ngữ đang chọn.
+const T = (s) => (window.WG_I18N ? WG_I18N.tr(s) : s);
+const collectJs = () => COLLECT_SRC.replace(/alert\('whalegate: ([^']+)'\)/g, (m, t) => 'alert(' + JSON.stringify('whalegate: ' + T(t)) + ')');
+
 /// Bookmarklet: mở tab dashboard, chờ nó báo sẵn sàng rồi gửi gói qua postMessage — không nằm trong URL,
 /// không vào lịch sử, không đi qua mạng. Dashboard chỉ nhận tin từ đúng tab chat.deepseek.com đã mở nó.
 /// Mở tab NGAY trong cú bấm (trước mọi await) để trình chặn popup không chặn.
@@ -584,10 +600,10 @@ function bookmarkletCode() {
   const base = location.origin + location.pathname;
   return 'javascript:(function(){try{' +
     'var O=' + JSON.stringify(location.origin) + ';' +
-    'if(location.origin!=="' + DS_ORIGIN + '"){alert("whalegate: bấm bookmarklet này trên tab chat.deepseek.com");return;}' +
+    'if(location.origin!=="' + DS_ORIGIN + '"){alert(' + JSON.stringify('whalegate: ' + T('bấm bookmarklet này trên tab chat.deepseek.com')) + ');return;}' +
     'var w=window.open(' + JSON.stringify(base + '#bm') + ',"_blank");' +
-    'if(!w){alert("whalegate: trình duyệt chặn tab mới — cho phép popup rồi bấm lại");return;}' +
-    'var p=' + COLLECT_JS + '();' +
+    'if(!w){alert(' + JSON.stringify('whalegate: ' + T('trình duyệt chặn tab mới — cho phép popup rồi bấm lại')) + ');return;}' +
+    'var p=' + collectJs() + '();' +
     'var h=function(e){if(e.source!==w||e.origin!==O||e.data!=="whalegate-ready")return;' +
     'window.removeEventListener("message",h);' +
     'p.then(function(d){w.postMessage({whalegate:d},O);},function(x){w.postMessage({whalegate:null,error:String(x&&x.message||x)},O);});};' +
@@ -604,7 +620,7 @@ function refreshBookmarklet() {
 }
 
 async function copyCmd() {
-  const text = 'copy(await ' + COLLECT_JS + '())', b = $('cmdCopy');
+  const text = 'copy(await ' + collectJs() + '())', b = $('cmdCopy');
   try { await navigator.clipboard.writeText(text); }
   catch (e) { const t = el('textarea'); t.value = text; t.style.cssText = 'position:fixed;opacity:0'; document.body.append(t); t.select(); try { document.execCommand('copy'); } finally { t.remove(); } }
   b.classList.add('done'); b.querySelector('span').textContent = 'đã copy'; say('Đã copy lệnh — dán vào Console của tab chat.deepseek.com', 'ok');
@@ -1421,5 +1437,6 @@ setInterval(loadStats, 5000);
 setTimeout(() => checkUpdate(true), 1500);
 setInterval(() => checkUpdate(true), 30 * 60 * 1000);
 </script>
+<script>/*__WG_I18N__*/</script>
 </body>
 </html>

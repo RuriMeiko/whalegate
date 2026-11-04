@@ -610,7 +610,7 @@ async fn index() -> Html<&'static str> {
 /// ui.html kèm phiên bản đang chạy (thay `__WG_VERSION__` một lần, giữ lại cho mọi lần tải trang).
 fn index_html() -> &'static str {
     static HTML: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HTML.get_or_init(|| include_str!("ui.html").replace("__WG_VERSION__", env!("CARGO_PKG_VERSION")))
+    HTML.get_or_init(|| include_str!("ui.html").replace("__WG_VERSION__", env!("CARGO_PKG_VERSION")).replace("/*__WG_I18N__*/", include_str!("i18n.js")))
 }
 
 #[derive(Deserialize)]
