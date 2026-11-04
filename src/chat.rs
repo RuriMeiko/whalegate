@@ -43,6 +43,9 @@ enum Out {
     RateLimited(String, u64),
 }
 
+/// Prompt dài hơn chừng này byte thì đổi acc sau rate limit nghĩa là gửi lại cả ngữ cảnh lớn lên acc khác: không làm, đợi acc cũ.
+const RL_PIN_BYTES: usize = 60_000;
+
 /// Tiền tố lỗi khi DeepSeek giới hạn tốc độ — `run_chat` dùng nó để biết lần thất bại cuối cùng là do rate limit.
 const RL_PREFIX: &str = "DeepSeek giới hạn tốc độ";
 
@@ -677,7 +680,7 @@ async fn mute_acc(st: &Arc<AppState>, acc_id: &str, e: &anyhow::Error) -> u64 {
         if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
             a.stats.total_error += 1;
             a.stats.cooldown_until = until;
-            a.last_status = Some(format!("DeepSeek khoá chat tài khoản này (muted) tới {}", when.chars().take(19).collect::<String>()));
+            a.last_status = Some(mute_status(until));
         }
     }
     mark_dirty(st);
@@ -685,10 +688,19 @@ async fn mute_acc(st: &Arc<AppState>, acc_id: &str, e: &anyhow::Error) -> u64 {
     until
 }
 
+/// Dòng trạng thái hiện trên dashboard cho acc bị mute (giờ theo DS_TZ_OFFSET).
+pub(crate) fn mute_status(until: u64) -> String {
+    let when = crate::logbuf::fmt_ts(until * 1000).1;
+    format!("DeepSeek khoá chat tài khoản này (muted) tới {}", when.chars().take(19).collect::<String>())
+}
+
 /// Số giây unix ở cuối thông điệp `USER_MUTED: … tới <ts>` — `muted_until` ghi dạng "<unix>"; 0 = không rõ.
 fn muted_until_from_msg(m: &str) -> Option<u64> {
     m.rsplit("tới ").next()?.trim().parse::<u64>().ok().filter(|u| *u > 0)
 }
+
+/// Lượt nối tiếp phiên chịu đợi acc giữ phiên tối đa chừng này giây (cửa sổ burst mặc định 30s).
+const CONT_MAX_WAIT_SECS: u64 = 35;
 
 /// Acc bị đòi hCaptcha nghỉ bao lâu (giây) trước khi được thử lại.
 const CHALLENGE_COOLDOWN: u64 = 1800;
@@ -747,6 +759,8 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
         let (mut rl_extra, mut rl_wait, mut rl_prev) = (0usize, false, false);
         let mut rl_stateful_acc: Option<String> = None; // acc đã bị chặn ở lượt nối tiếp: quay lại đúng acc đó thì vẫn nối tiếp phiên cũ
         let mut rl_retry_after = 60u64;
+        // bị giới hạn tốc độ mà phải gửi lại cả ngữ cảnh lớn nếu đổi acc → ở lại đúng acc đó, chờ hết nghỉ rồi thử lại
+        let mut rl_pin: Option<String> = None;
         while next_attempt < max_attempts {
             let attempt = next_attempt;
             next_attempt += 1;
@@ -755,7 +769,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                 let prev = lease.take().map(|l| l.acc_id);
                 let wait_secs = if rl_wait { queue_wait_secs() } else { queue_wait_secs().min(60) };
                 let dl = Instant::now() + Duration::from_secs(wait_secs);
-                match acquire(&st, &failed, None, dl).await {
+                match acquire(&st, &failed, rl_pin.take().as_deref(), dl).await {
                     Ok(l) => {
                         if Some(&l.acc_id) == prev.as_ref() && repair.is_none() && !rl_wait {
                             // pool chỉ còn đúng acc này → chờ DS hồi (rate-limit mềm ~8-10s)
@@ -853,7 +867,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                         rl_prev = true; rl_wait = true;
                         if stateful_attempt { rl_stateful_acc = Some(acc_id.clone()); }
                         if rl_extra < 3 { rl_extra += 1; max_attempts += 1; }
-                        failed.push(acc_id);
+                        if stateful_attempt || ctx.prompt.len() > RL_PIN_BYTES { rl_pin = Some(acc_id); } else { failed.push(acc_id); }
                         continue;
                     }
                     // DS từ chối file (50404…) thường là lỗi tạm của khâu audit phía DS (retryable=true; cùng ảnh
@@ -998,7 +1012,7 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             rl_prev = true; rl_wait = true;
                             if stateful_attempt { rl_stateful_acc = Some(acc_id.clone()); }
                             if rl_extra < 3 { rl_extra += 1; max_attempts += 1; }
-                            failed.push(acc_id.clone());
+                            if stateful_attempt || ctx.prompt.len() > RL_PIN_BYTES { rl_pin = Some(acc_id.clone()); } else { failed.push(acc_id.clone()); }
                         } else if !has_content {
                             // có thông báo khác của DeepSeek (không phải rate limit): đưa nội dung đó vào lỗi cho dễ hiểu
                             last_err = Some(match hint.as_ref() {
@@ -1202,8 +1216,12 @@ pub(crate) async fn api_chat_completions(
             let delta = messages_to_prompt_from(&req.messages, k);
             if usable && !delta.trim().is_empty() {
                 let delta = format!("{}\n{}", delta, directive);
-                // cần đúng acc đã giữ phiên; bận quá 4s thì thôi, gửi đủ ở acc khác
-                match acquire(&st, &[], Some(&conv.acc_id), Instant::now() + Duration::from_secs(4)).await {
+                // Cần đúng acc đã giữ phiên. Nó đang nghỉ ngắn (giới hạn burst 6 call/30s, trần request/phút…) thì ĐỢI đúng
+                // chừng đó như người dùng web phải đợi: bỏ phiên và gửi lại cả ngữ cảnh (hàng trăm nghìn ký tự) sang
+                // acc khác chính là thứ DeepSeek dễ đòi hCaptcha nhất. Nghỉ dài (challenge, mute, hết giờ) thì đổi acc ngay.
+                let holder_wait = { let t = now(); st.store.read().await.accounts.iter().find(|a| a.id == conv.acc_id).map(|a| a.stats.wait_secs(t)) };
+                let wait = match holder_wait { Some(w) if w <= CONT_MAX_WAIT_SECS => w + 5, _ => 4 };
+                match acquire(&st, &[], Some(&conv.acc_id), Instant::now() + Duration::from_secs(wait)).await {
                     Ok(l) => {
                         let delta_images = collect_images_cached(&req.messages[k..], 4, &mut img_cache).await;
                         st.stat_conv_hit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

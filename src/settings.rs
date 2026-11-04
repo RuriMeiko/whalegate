@@ -42,6 +42,7 @@ pub static DEFS: &[Def] = &[
     n("DS_SESSION_ROTATE", "Hội thoại", "30", 1, 1000, "lượt", "Đổi phiên dùng chung (không tool) sau"),
     // nhanh
     shown(b("DS_POW_PREFETCH", "Tốc độ", "1", "Dự đoán PoW: tải + giải sẵn cho request kế tiếp"), "Dự đoán PoW", "Tải và giải sẵn cho request kế tiếp"),
+    shown(b("DS_WEB_BOOT", "Mạng", "1", "Traffic nền giả lập trang web (settings, telemetry, report) cho từng acc đang dùng"), "Traffic nền như web", "Tắt nếu nghi DeepSeek đánh dấu acc vì các request nền này"),
     Def { key: "DS_DEFAULT_EFFORT", group: "Tốc độ", kind: Kind::Choice, default: "none", min: 0, max: 0, choices: &["none", "auto", "max"], unit: "", label: "Mức suy nghĩ mặc định", hint: "Khi client không chỉ định. none nhanh · auto nghĩ lượt người dùng · max luôn nghĩ", show: true, live: true },
     shown(n("DS_CONTEXT_TOKENS", "Tốc độ", "512000", 8000, 1000000, "token", "Cửa sổ ngữ cảnh báo cho client (/v1/models)"), "Cửa sổ ngữ cảnh", "Số báo cho client; web nhận ≥512K token"),
     shown(n("DS_PROMPT_MAX_CHARS", "Tốc độ", "1822000", 10000, 5000000, "ký tự", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"), "Trần prompt", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"),
@@ -63,6 +64,10 @@ pub static DEFS: &[Def] = &[
     shown(n("DS_FX_VND", "Hiển thị", "26000", 1000, 100000, "đồng", "Tỷ giá USD → VND"), "Tỷ giá USD → VND", "Số đồng cho 1 USD. Dùng khi dashboard ở tiếng Việt"),
     // proxy đầu ra: mỗi vân tay (mỗi acc) đi ra DS qua một IP khác
     Def { key: "DS_PROXY_MODE", group: "Proxy", kind: Kind::Choice, default: "off", min: 0, max: 0, choices: &["off", "auto", "strict"], unit: "", label: "IP đầu ra", hint: "off = đi thẳng · auto = có proxy thì dùng, chết thì đi thẳng · strict = proxy chết thì báo lỗi, không lộ IP thật", show: true, live: true },
+    Def { key: "DS_EGRESS_URL", group: "Proxy", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Worker Cloudflare (IP đầu ra)", hint: "Địa chỉ Worker (nút Cloudflare trên đầu trang tự cài). Mọi request và mọi cửa sổ Chrome của acc đi qua đường hầm của Worker, DeepSeek thấy IP Cloudflare", show: true, live: true },
+    Def { key: "DS_EGRESS_KEY", group: "Proxy", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Khoá Worker", hint: "Khoá bí mật của Worker (tự điền khi cài bằng nút Cloudflare)", show: true, live: true },
+    Def { key: "DS_EGRESS_ON", group: "Proxy", kind: Kind::Bool, default: "1", min: 0, max: 1, choices: &[], unit: "", label: "Dùng Worker Cloudflare", hint: "Tắt để đi thẳng bằng IP nhà (hoặc proxy riêng của từng acc) mà không phải xoá Worker", show: true, live: true },
+    shown(n("DS_EGRESS_DAILY_LIMIT", "Proxy", "100000", 0, 1000000000, "request", "Hạn mức request mỗi ngày của gói Cloudflare (Free = 100000)"), "Hạn mức Worker/ngày", "Mỗi kết nối qua Worker tính 1 request · Free 100.000/ngày, gói trả phí tính theo tháng nên đặt số bạn muốn theo dõi"),
     Def { key: "DS_PROXY_LIST", group: "Proxy", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Danh sách proxy", hint: "Mỗi dòng một proxy: scheme://[user:pass@]host:port (http | https | socks5 | socks5h)", show: true, live: true },
     restart(n("DS_READ_TIMEOUT_SECS", "Mạng", "120", 30, 900, "giây", "Timeout mỗi lần đọc socket (cần restart)")),
     b("DS_DEBUG_SSE", "Mạng", "0", "Ghi SSE thô vào /tmp/ds_debug_sse.log (chỉ để gỡ lỗi)"),
@@ -197,7 +202,7 @@ mod tests {
     #[test]
     fn only_verified_settings_are_exposed() {
         let shown: Vec<&str> = DEFS.iter().filter(|d| d.show).map(|d| d.key).collect();
-        assert_eq!(shown, ["DS_STATEFUL", "DS_POW_PREFETCH", "DS_DEFAULT_EFFORT", "DS_CONTEXT_TOKENS", "DS_PROMPT_MAX_CHARS", "DS_MAX_CONC_PER_ACC", "DS_HOURLY_LIMIT", "DS_MAX_RPM", "DS_DEVICE_REFRESH_HOURS", "DS_TZ_OFFSET", "DS_FX_CNY", "DS_FX_VND", "DS_PROXY_MODE", "DS_PROXY_LIST"]);
+        assert_eq!(shown, ["DS_STATEFUL", "DS_POW_PREFETCH", "DS_WEB_BOOT", "DS_DEFAULT_EFFORT", "DS_CONTEXT_TOKENS", "DS_PROMPT_MAX_CHARS", "DS_MAX_CONC_PER_ACC", "DS_HOURLY_LIMIT", "DS_MAX_RPM", "DS_DEVICE_REFRESH_HOURS", "DS_TZ_OFFSET", "DS_FX_CNY", "DS_FX_VND", "DS_PROXY_MODE", "DS_EGRESS_URL", "DS_EGRESS_KEY", "DS_EGRESS_ON", "DS_EGRESS_DAILY_LIMIT", "DS_PROXY_LIST"]);
         assert!(set("DS_BURST_LIMIT", Some("5")).is_err(), "mục ẩn không được đặt qua API");
     }
 

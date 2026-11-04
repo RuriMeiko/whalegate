@@ -334,6 +334,61 @@ pub async fn submit_login_form(ws_url: &str, email: &str, password: &str) -> Res
     }
 }
 
+/// Hook ghi lại email/mật khẩu bạn gõ trong form đăng nhập vào `window.__wgCred` (đọc bằng `read_typed_creds`).
+const CRED_HOOK_JS: &str = r#"(() => {
+    if (window.__wgCredHook) return 1;
+    window.__wgCredHook = 1; window.__wgCred = window.__wgCred || {e: '', p: ''};
+    document.addEventListener('input', (ev) => {
+        const t = ev.target;
+        if (!(t instanceof HTMLInputElement)) return;
+        if (t.type === 'password') window.__wgCred.p = t.value;
+        else if ((t.type === 'text' || t.type === 'email') && !t.value.includes('*') && (t.value.includes('@') || /^\+?\d{8,}$/.test(t.value))) window.__wgCred.e = t.value;
+    }, true);
+    return 1;
+})()"#;
+
+/// Chuẩn bị trang đăng nhập: chờ form render, điền sẵn email (và mật khẩu nếu đã nhớ) — KHÔNG bấm "Đăng nhập", để bạn tự
+/// bấm và giải captcha — rồi cài hook ghi lại những gì bạn gõ. Form không có (đã đăng nhập, trang khác) thì chỉ cài hook.
+pub async fn prepare_login_page(ws_url: &str, email: Option<&str>, password: Option<&str>) -> Result<()> {
+    let mut conn = CdpConn::connect(ws_url).await?;
+    let probe = "(() => { const i = [...document.querySelectorAll('input')]; return i.some(x => x.type === 'password') && i.length >= 2; })()";
+    for _ in 0..40 {
+        let r = conn.call("Runtime.evaluate", json!({"expression": probe, "returnByValue": true})).await?;
+        if r["result"]["value"].as_bool() == Some(true) {
+            let js = format!(
+                r#"(() => {{
+                    const ins = [...document.querySelectorAll('input')];
+                    const em = ins.find(x => x.type === 'text' || x.type === 'email') || ins[0];
+                    const pw = ins.find(x => x.type === 'password');
+                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                    const fill = (el, v) => {{ if (!el || !v || el.value) return; el.focus(); setter.call(el, v); el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); }};
+                    fill(em, {email}); fill(pw, {password});
+                    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+                    return 1;
+                }})()"#,
+                email = serde_json::to_string(&email.unwrap_or(""))?,
+                password = serde_json::to_string(&password.unwrap_or(""))?,
+            );
+            conn.call("Runtime.evaluate", json!({"expression": js, "returnByValue": true})).await?;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    // hook cài SAU khi điền sẵn: giá trị whalegate tự điền không bị ghi nhận như người dùng gõ
+    conn.call("Runtime.evaluate", json!({"expression": CRED_HOOK_JS, "returnByValue": true})).await?;
+    Ok(())
+}
+
+/// Email + mật khẩu người dùng đã gõ trong tab (cài lại hook phòng khi trang vừa tải lại). None nếu chưa đủ cả hai.
+pub async fn read_typed_creds(ws_url: &str) -> Option<(String, String)> {
+    let mut conn = CdpConn::connect(ws_url).await.ok()?;
+    conn.call("Runtime.evaluate", json!({"expression": CRED_HOOK_JS, "returnByValue": true})).await.ok()?;
+    let r = conn.call("Runtime.evaluate", json!({"expression": "JSON.stringify(window.__wgCred || null)", "returnByValue": true})).await.ok()?;
+    let v: Value = serde_json::from_str(r["result"]["value"].as_str()?).ok()?;
+    let (e, p) = (v["e"].as_str()?.to_string(), v["p"].as_str()?.to_string());
+    if e.is_empty() || p.is_empty() || e.contains('*') { None } else { Some((e, p)) }
+}
+
 /// Cài hook bắt kết quả `/users/login` vào sessionStorage trước khi bấm nút.
 ///
 /// Toast lỗi của DeepSeek tự tắt sau vài giây, nên đọc DOM lúc timeout thường không còn gì.
@@ -516,6 +571,49 @@ impl AccountBrowser {
     }
 }
 
+/// Cổng CDP còn trả lời không (cửa sổ Chrome chưa bị đóng).
+pub async fn cdp_alive(port: u16) -> bool {
+    reqwest::get(format!("{}/json/version", cdp_http(port))).await.is_ok()
+}
+
+/// Đọc nhanh phiên đang có trong các tab DeepSeek của Chrome riêng (token, cookie kể cả httpOnly, device id) mà không gọi
+/// API DeepSeek. Dùng để theo dõi một cửa sổ người dùng đang tự thao tác; xác minh một lần ở cuối bằng `finish_session`.
+pub async fn peek_session(port: u16) -> Option<(String, std::collections::BTreeMap<String, String>, Option<String>)> {
+    let pages = list_pages(port).await.ok()?;
+    for p in pages.iter().filter(|p| p["type"] == "page" && p["url"].as_str().is_some_and(|u| u.contains("chat.deepseek.com"))) {
+        let Some(ws) = p["webSocketDebuggerUrl"].as_str() else { continue };
+        if let Ok(x) = read_session_from_page(ws).await { return Some(x); }
+    }
+    None
+}
+
+pub async fn finish_session(
+    s: (String, std::collections::BTreeMap<String, String>, Option<String>),
+    fp_seed: &str,
+) -> Result<CapturedSession> {
+    verify_and_build(s.0, s.1, s.2, Some(fp_seed)).await
+}
+
+/// Bảo đảm Chrome của acc có bật trình quản lý mật khẩu: mật khẩu người dùng nhập tay (hoặc đăng ký) trong cửa sổ này
+/// được Chrome lưu vào chính profile của acc, lần sau tự điền. Chỉ sửa khi profile đã có `Preferences` (profile mới thì
+/// mặc định của Chrome đã là bật); không đụng khoá nào khác.
+pub(crate) fn ensure_password_prefs(profile: &str) {
+    let path = std::path::Path::new(profile).join("Default").join("Preferences");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let Ok(mut v) = serde_json::from_str::<Value>(&text) else { return };
+    if !v.is_object() { return; }
+    let before = v.clone();
+    v["credentials_enable_service"] = json!(true);
+    v["credentials_enable_autosignin"] = json!(true);
+    if !v["profile"].is_object() { v["profile"] = json!({}); }
+    v["profile"]["password_manager_enabled"] = json!(true);
+    // kiểm tra rò rỉ mật khẩu gọi dịch vụ Google — không cần cho việc tự điền
+    v["profile"]["password_manager_leak_detection"] = json!(false);
+    if v != before {
+        if let Ok(out) = serde_json::to_string(&v) { let _ = std::fs::write(&path, out); }
+    }
+}
+
 /// Thư mục profile Chrome của một acc: cố định theo seed để lần sau mở lại đúng "máy" đó.
 pub fn account_profile_dir(seed: &str) -> String {
     format!("{}/profiles/{}", crate::server::data_dir(), seed)
@@ -575,6 +673,7 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
     let bin = find_chrome_binary()?;
     let profile = account_profile_dir(&fp.seed);
     std::fs::create_dir_all(&profile).ok();
+    ensure_password_prefs(&profile);
     let (w, h) = fp.window_size();
     // stderr của Chrome vào file trong profile: Chrome chết lúc khởi động thì lý do nằm ở đây
     let err_log = std::path::Path::new(&profile).join("chrome-stderr.log");
@@ -594,6 +693,7 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
         } else {
             for (k, v) in gui_env() { cmd.env(k, v); }
         }
+        for a in crate::egress::chrome_args() { cmd.arg(a); }
         let stderr = std::fs::File::create(&err_log).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null());
         child = cmd
             .arg(format!("--remote-debugging-port={}", port))
@@ -1204,5 +1304,42 @@ mod signup_probe_tests {
         }
         println!("VERDICT: {verdict}");
         b.close().await;
+    }
+}
+
+#[cfg(test)]
+mod password_prefs_tests {
+    use super::*;
+
+    fn tmp() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("wg-prefs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(d.join("Default")).unwrap();
+        d
+    }
+
+    #[test]
+    fn turns_the_password_manager_on_without_touching_other_keys() {
+        let d = tmp();
+        let p = d.join("Default").join("Preferences");
+        std::fs::write(&p, r#"{"credentials_enable_service":false,"profile":{"password_manager_enabled":false,"name":"Người 1"},"intl":{"selected_languages":"vi"}}"#).unwrap();
+        ensure_password_prefs(d.to_str().unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["credentials_enable_service"], true);
+        assert_eq!(v["credentials_enable_autosignin"], true);
+        assert_eq!(v["profile"]["password_manager_enabled"], true);
+        assert_eq!(v["profile"]["name"], "Người 1", "khoá khác giữ nguyên");
+        assert_eq!(v["intl"]["selected_languages"], "vi");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn leaves_fresh_or_broken_profiles_alone() {
+        let d = tmp();
+        ensure_password_prefs(d.to_str().unwrap()); // chưa có Preferences → không tạo
+        assert!(!d.join("Default").join("Preferences").exists());
+        std::fs::write(d.join("Default").join("Preferences"), "không phải json").unwrap();
+        ensure_password_prefs(d.to_str().unwrap());
+        assert_eq!(std::fs::read_to_string(d.join("Default").join("Preferences")).unwrap(), "không phải json");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

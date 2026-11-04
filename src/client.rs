@@ -185,9 +185,16 @@ impl<'a> CompletionBody<'a> {
 ///
 /// Trả (proxy để gắn vào client, chuỗi gốc để so cache).
 fn pick_proxy(token: &str) -> Result<(Option<wreq::Proxy>, Option<String>)> {
+    // Cổng ra qua Cloudflare Worker (đường hầm TCP, TLS đi nguyên vẹn): dùng cho acc không có proxy riêng
+    let egress = || -> Result<(Option<wreq::Proxy>, Option<String>)> {
+        match crate::egress::proxy_url() {
+            Some(u) => Ok((Some(wreq::Proxy::all(&u)?), Some(format!("egress:{u}")))),
+            None => Ok((None, None)),
+        }
+    };
     let pool = crate::proxypool::snapshot();
     if pool.mode == crate::proxypool::Mode::Off {
-        return Ok((None, None));
+        return egress();
     }
     if !pool.problems.is_empty() {
         for p in &pool.problems {
@@ -198,6 +205,7 @@ fn pick_proxy(token: &str) -> Result<(Option<wreq::Proxy>, Option<String>)> {
     let fp_seed = crate::fingerprint::seed_for(token);
     let entry = crate::proxypool::proxy_for(&fp_seed, &pool);
     let Some(entry) = entry else {
+        if crate::egress::proxy_url().is_some() { return egress(); }
         return match pool.mode {
             crate::proxypool::Mode::Strict => Err(anyhow::anyhow!(
                 "chế độ proxy=strict nhưng không có proxy nào dùng được ({})",
@@ -490,7 +498,7 @@ impl DsClient {
     /// scope có kho (main/model/provider) báo một telemetry `loadRemoteFeaturesSuccess` (→ ~1 gói / 100s). Đo trên tab
     /// web 2.7.0 để yên ~56 phút. Mỗi acc một vòng nền, tự dừng khi acc không dùng 30 phút. DS_WEB_BOOT=0 để tắt.
     pub fn web_boot_in_background(&self) {
-        if std::env::var("DS_WEB_BOOT").map(|v| v == "0").unwrap_or(false) { return; }
+        if !crate::settings::boolean("DS_WEB_BOOT") { return; }
         type Map = std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>;
         static USED: std::sync::OnceLock<Map> = std::sync::OnceLock::new();
         static RUNNING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
@@ -513,7 +521,7 @@ impl DsClient {
                         for i in (1..n).rev() { order.swap(i, (uuid::Uuid::new_v4().as_u128() % (i as u128 + 1)) as usize); }
                         for scope in order {
                             tokio::time::sleep(std::time::Duration::from_secs(rnd(60, 90))).await;
-                            if idle(&me.token) > 1800 { break 'outer; }
+                            if idle(&me.token) > 1800 || !crate::settings::boolean("DS_WEB_BOOT") { break 'outer; }
                             if let Err(e) = me.refresh_scope(scope, &uid, &did, &session).await { crate::elog!("[boot] refresh {scope}: {:#}", e); }
                         }
                     }
@@ -1410,7 +1418,19 @@ pub(crate) fn classify_global_code(v: &Value) -> Option<anyhow::Error> {
         40303 | 40304 => "CHALLENGE_REQUIRED",
         _ => return Some(anyhow::anyhow!("DS code {}: {}", code, msg)),
     };
-    Some(anyhow::anyhow!("{}: {} ({})", tag, if msg.is_empty() { tag } else { &msg }, code))
+    let extra = if tag == "CHALLENGE_REQUIRED" {
+        find_str(v, "provider").map(|p| format!(" provider={}", p)).unwrap_or_default()
+    } else { String::new() };
+    Some(anyhow::anyhow!("{}: {} ({}){}", tag, if msg.is_empty() { tag } else { &msg }, code, extra))
+}
+
+/// Tìm chuỗi theo khóa ở bất kỳ độ sâu nào của JSON (challenge mang `provider` ở data/biz_data tuỳ phiên bản).
+fn find_str(v: &Value, key: &str) -> Option<String> {
+    match v {
+        Value::Object(m) => m.get(key).and_then(|x| x.as_str()).map(str::to_string).or_else(|| m.values().find_map(|x| find_str(x, key))),
+        Value::Array(a) => a.iter().find_map(|x| find_str(x, key)),
+        _ => None,
+    }
 }
 
 /// Kết quả dò "acc này có chat được không", tách bạch với "token còn hợp lệ không".
@@ -1424,6 +1444,8 @@ pub enum Probe {
     AuthDead,
     /// Token hợp lệ nhưng DeepSeek trả stream rỗng: đang bị throttle/hết hạn mức.
     Throttled,
+    /// DeepSeek khoá chat của acc ("user is muted") tới thời điểm này (unix giây; 0 = không rõ).
+    Muted(u64),
     /// Lỗi khác (mạng, PoW, 5xx) — không kết luận được gì về acc.
     Unknown,
 }
@@ -1434,6 +1456,7 @@ impl Probe {
             Probe::Alive => "alive",
             Probe::AuthDead => "auth_dead",
             Probe::Throttled => "throttled",
+            Probe::Muted(_) => "muted",
             Probe::Unknown => "unknown",
         }
     }
@@ -1462,7 +1485,9 @@ impl DsClient {
         let _ = self.delete_session(&sid).await;
         match out {
             Ok((_, sse, _)) => {
-                if sse_has_response(&sse) { Probe::Alive } else { Probe::Throttled }
+                if sse_has_response(&sse) { Probe::Alive }
+                else if let Some(u) = serde_json::from_str::<Value>(sse.trim()).ok().and_then(|v| muted_until(&v)) { Probe::Muted(u) }
+                else { Probe::Throttled }
             }
             Err(e) => {
                 let msg = format!("{:#}", e);

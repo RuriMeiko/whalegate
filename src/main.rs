@@ -3,6 +3,9 @@
 mod backup;
 mod logbuf;
 mod chat;
+mod cloudflare;
+mod creds;
+mod egress;
 mod client;
 mod fingerprint;
 mod chrome_capture;

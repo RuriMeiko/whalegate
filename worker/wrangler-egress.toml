@@ -1,0 +1,8 @@
+name = "ds-egress"
+main = "egress.js"
+compatibility_date = "2024-09-01"
+
+# Secret: wrangler secret put EGRESS_KEY --name ds-egress   (hoặc dùng worker/deploy-egress.sh)
+
+[observability]
+enabled = false

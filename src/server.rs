@@ -222,6 +222,25 @@ impl AccStats {
         now >= self.cooldown_until && !self.burst_active(now) && !self.hourly_capped(now) && !self.rpm_capped(now)
     }
 
+    /// Bao nhiêu giây nữa acc dùng lại được (0 = đang dùng được). `u64::MAX` nếu phải đợi tới hết giờ (trần lượt/giờ).
+    /// Dùng để lượt nối tiếp phiên chờ đúng acc giữ phiên thay vì bỏ phiên và gửi lại cả ngữ cảnh sang acc khác.
+    pub(crate) fn wait_secs(&self, now: u64) -> u64 {
+        if self.hourly_capped(now) { return u64::MAX; }
+        let mut w = self.cooldown_until.saturating_sub(now);
+        if self.burst_active(now) {
+            w = w.max((self.burst_window_start + Self::burst_window()).saturating_sub(now));
+        }
+        if let Some(cap) = self.rpm_cap(now) {
+            let live: Vec<u64> = self.recent.iter().copied().filter(|t| now.saturating_sub(*t) < 60).collect();
+            if live.len() as u32 >= cap {
+                // phải có (đang có - trần + 1) call trôi khỏi cửa sổ 60s: call thứ (đang có - trần) hết hạn sau 60s
+                let idx = live.len() - cap as usize;
+                w = w.max((live[idx] + 60).saturating_sub(now));
+            }
+        }
+        w
+    }
+
     /// DeepSeek báo rate limit: nghỉ 30s, 60s, 120s… (tối đa 300s) và học trần request/phút để lần sau tự giãn nhịp
     /// trước khi bị chặn. Trần chỉ được hạ trong thời hạn hiệu lực (không nới lên khi lại bị chặn). Trả (nghỉ giây, trần).
     pub(crate) fn note_rate_limit(&mut self, now: u64) -> (u64, u32) {
@@ -651,7 +670,9 @@ async fn export_header(st: &Arc<AppState>) -> String {
     for d in crate::settings::DEFS.iter().filter(|d| d.show) {
         let v = crate::settings::get(d.key);
         // danh sách proxy có thể chứa user:pass → chỉ ghi số dòng
-        let shown = if d.key == "DS_PROXY_LIST" { format!("<{} dòng>", v.lines().filter(|l| !l.trim().is_empty()).count()) } else { v };
+        let shown = if d.key == "DS_PROXY_LIST" { format!("<{} dòng>", v.lines().filter(|l| !l.trim().is_empty()).count()) }
+            else if d.key == "DS_EGRESS_KEY" { (if v.trim().is_empty() { "<chưa đặt>" } else { "<đã đặt>" }).to_string() }
+            else { v };
         h.push_str(&format!("{}={}\n", d.key, shown));
     }
     h.push_str("\n===== CÀI ĐẶT ẨN / NÂNG CAO (không hiện trên giao diện; giá trị đang áp dụng) =====\n");
@@ -1090,6 +1111,7 @@ async fn api_delete_account(
     if removed {
         // profile Chrome riêng của acc (hàng trăm MB) chỉ phục vụ acc này — xoá cùng lúc
         if let Some(seed) = profile_seed {
+            crate::creds::remove(&seed);
             let dir = crate::chrome_capture::account_profile_dir(&seed);
             tokio::task::spawn_blocking(move || { let _ = std::fs::remove_dir_all(dir); });
         }
@@ -1140,6 +1162,7 @@ async fn api_reset_account(
             a.last_status = Some(match probe {
                 crate::client::Probe::Alive => "ok (reset)".into(),
                 crate::client::Probe::Throttled => "throttled".into(),
+                crate::client::Probe::Muted(u) => crate::chat::mute_status(u),
                 crate::client::Probe::AuthDead => "invalid token — cần login lại".into(),
                 crate::client::Probe::Unknown => "reset: không kết luận được".into(),
             });
@@ -1192,6 +1215,11 @@ async fn api_verify_account(
                     // Giữ nguyên nhãn throttle, chỉ đẩy cooldown ra để scheduler né acc này.
                     a.last_status = Some("throttled".into());
                     a.stats.cooldown_until = now() + AccStats::cooldown();
+                }
+                crate::client::Probe::Muted(u) => {
+                    a.last_status = Some(crate::chat::mute_status(u));
+                    a.clear_auth_dead();
+                    a.stats.cooldown_until = if u > now() { u } else { now() + 3600 };
                 }
                 crate::client::Probe::AuthDead => {
                     a.set_auth_dead();
@@ -3171,6 +3199,10 @@ fn extension_zip(host: &str) -> Result<Vec<u8>> {
 /// Đăng nhập lại acc DS đã đăng xuất, mở đúng Chrome riêng của nó (profile `profiles/<seed>`, còn phiên Google)
 /// với đúng vân tay cũ. Người dùng tự bấm đăng nhập trong cửa sổ — whalegate không tự điền gì. Đăng nhập xong,
 /// `login_flow` nhận ra cùng người dùng qua uid và thay token vào chính acc này.
+fn cf_result(r: Result<(), String>) -> Json<Value> {
+    match r { Ok(()) => Json(json!({"ok": true})), Err(e) => Json(json!({"ok": false, "error": e})) }
+}
+
 async fn api_account_relogin(
     State(st): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -3186,6 +3218,110 @@ async fn api_account_relogin(
         .unwrap_or_else(crate::fingerprint::new_seed);
     crate::elog!("[login-flow] đăng nhập lại {} (profile {})", label, &seed[..8.min(seed.len())]);
     start_login(st, seed).await
+}
+
+/// Nút "mở Chrome" trên dashboard: mở ĐÚNG Chrome của acc (profile `profiles/<seed>` với phiên, cookie, mật khẩu đã lưu,
+/// vân tay cũ) ở chat.deepseek.com để bạn tự thao tác — giải hCaptcha, gửi thử một tin, đăng nhập lại… Cửa sổ giữ mở
+/// tới khi bạn đóng; trong lúc đó whalegate theo dõi phiên, đóng xong thì lưu cookie/token mới vào acc và cho acc quay lại
+/// pool (bỏ cooldown vì bị đòi xác minh).
+async fn api_account_open_chrome(
+    State(st): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<Value> {
+    let acc = st.store.read().await.accounts.iter().find(|a| a.id == id).map(|a| (a.fp_seed.clone(), a.browser.is_some(), a.label.clone(), a.auth_dead_at.is_some()));
+    let Some((seed, has_browser, label, dead)) = acc else { return Json(json!({"ok": false, "error": "không tìm thấy tài khoản"})) };
+    if has_browser {
+        return Json(json!({"ok": false, "error": "acc này dùng trình duyệt gốc của bạn — mở chat.deepseek.com ngay trên trình duyệt đó"}));
+    }
+    // acc đã bị đăng xuất: "mở Chrome" làm đúng việc của "đăng nhập lại" (mở trang đăng nhập, tự điền, đăng nhập xong tự đóng)
+    if dead { return api_account_relogin(State(st), axum::extract::Path(id)).await; }
+    let Some(seed) = seed.filter(|s| std::path::Path::new(&crate::chrome_capture::account_profile_dir(s)).is_dir()) else {
+        return Json(json!({"ok": false, "error": "acc này chưa có Chrome riêng (dán token) — dùng \"đăng nhập lại\" hoặc thêm lại bằng Chrome riêng"}));
+    };
+    {
+        let mut watching = st.login_watching.lk();
+        if *watching {
+            return Json(json!({"ok": false, "error": "đang có một cửa sổ Chrome của whalegate mở — đóng cửa sổ đó rồi thử lại"}));
+        }
+        *watching = true;
+    }
+    let fp = crate::fingerprint::Fingerprint::from_seed(&seed);
+    crate::elog!("[open-chrome] mở Chrome của {} (profile {}) — {} {} cores={}", label, &seed[..8.min(seed.len())], fp.user_agent(), fp.screen.0, fp.cores);
+    let (browser, ws_url) = match crate::chrome_capture::launch_account_chrome(&fp, "https://chat.deepseek.com/", false).await {
+        Ok(x) => x,
+        Err(e) => {
+            *st.login_watching.lk() = false;
+            crate::elog!("[open-chrome] lỗi: {:#}", e);
+            return Json(json!({"ok": false, "error": format!("không mở được Chrome: {:#}", e)}));
+        }
+    };
+    let _ = ws_url;
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        let res = open_flow(st2.clone(), id, seed, browser).await;
+        *st2.login_watching.lk() = false;
+        if let Err(e) = res { crate::elog!("[open-chrome] lỗi: {:#}", e); }
+    });
+    Json(json!({"ok": true, "note": "đã mở Chrome của acc — làm gì cần làm (giải captcha, gửi thử một tin…) rồi đóng cửa sổ; whalegate tự lưu phiên"}))
+}
+
+/// Theo dõi cửa sổ Chrome do người dùng điều khiển tới khi họ đóng (tối đa 2 giờ), rồi áp phiên cuối cùng vào acc.
+async fn open_flow(st: Arc<AppState>, acc_id: String, seed: String, browser: crate::chrome_capture::AccountBrowser) -> Result<()> {
+    let port = browser.port;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2 * 3600);
+    let mut last = None;
+    let mut ticks = 0u32;
+    loop {
+        if tokio::time::Instant::now() >= deadline { crate::elog!("[open-chrome] quá 2 giờ — tự đóng cửa sổ"); break; }
+        if !crate::chrome_capture::cdp_alive(port).await { break; }
+        if ticks % 3 == 0 {
+            if let Some(s) = crate::chrome_capture::peek_session(port).await { last = Some(s); }
+        }
+        ticks += 1;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+    browser.close().await;
+    let Some(raw) = last else {
+        crate::elog!("[open-chrome] đã đóng — không có phiên DeepSeek đang đăng nhập trong cửa sổ, giữ nguyên acc");
+        return Ok(());
+    };
+    let session = crate::chrome_capture::finish_session(raw, &seed).await?;
+    let mut note = String::new();
+    {
+        let mut store = st.store.write().await;
+        let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) else { return Ok(()) };
+        let same_token = a.token == session.token;
+        let same_user = session.uid.is_some() && session.uid == a.ds_uid;
+        if !same_token && !same_user && !a.auth_dead_at.is_some() {
+            crate::elog!("[open-chrome] cửa sổ đang đăng nhập người dùng khác ({:?}) — không đụng vào acc", session.email);
+            return Ok(());
+        }
+        if !same_token {
+            // đăng nhập lại: token mới của cùng người dùng, giữ nguyên vân tay
+            a.token = session.token.clone();
+            crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
+            crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
+            a.thread_session_id = None;
+            note.push_str("token mới; ");
+        }
+        a.cookies = session.cookies.clone();
+        if session.device_id.is_some() { a.device_id = session.device_id.clone(); crate::fingerprint::bind_device(&a.token, a.device_id.as_deref()); }
+        if session.uid.is_some() && a.ds_uid.is_none() { a.ds_uid = session.uid.clone(); }
+        a.last_verified = Some(now());
+        if a.auth_dead_at.is_some() { a.clear_auth_dead(); a.stats.reset(); note.push_str("hết đăng xuất; "); }
+        // bị đòi hCaptcha mà bạn đã xác minh trong cửa sổ: bỏ nghỉ để acc thử lại ngay (không chắc đã qua — nếu DS còn đòi
+        // thì acc tự nghỉ lại 30 phút)
+        if a.last_status.as_deref().is_some_and(|s| s.contains("hCaptcha")) {
+            a.stats.cooldown_until = 0;
+            a.stats.fail_streak = 0;
+            note.push_str("bỏ nghỉ hCaptcha; ");
+        }
+        a.last_status = Some("ok (đã mở Chrome)".into());
+        crate::elog!("[open-chrome] đã lưu phiên của {:?}: {}", session.email, note.trim_end_matches("; "));
+    }
+    mark_dirty(&st);
+    flush_store(&st).await;
+    Ok(())
 }
 
 async fn start_login(st: Arc<AppState>, seed: String) -> Json<Value> {
@@ -3308,9 +3444,36 @@ fn adopt_chrome_device(a: &mut Account, session: &crate::chrome_capture::Capture
 }
 
 async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capture::AccountBrowser, ws_url: String) -> Result<()> {
+    // Điền sẵn email/mật khẩu đã nhớ (không bấm đăng nhập) và ghi lại những gì bạn gõ để lần sau khỏi gõ lại.
+    let (known_email, known_pw) = {
+        let saved = crate::creds::get(&seed);
+        let email = saved.as_ref().map(|c| c.0.clone()).or_else(|| {
+            let store = st.store.try_read().ok()?;
+            store.accounts.iter().find(|a| a.fp_seed.as_deref() == Some(seed.as_str()) && a.label.contains('@') && !a.label.contains('*')).map(|a| a.label.clone())
+        });
+        (email, saved.map(|c| c.1))
+    };
+    let typed: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>> = Default::default();
+    let helper = {
+        let (ws, typed) = (ws_url.clone(), typed.clone());
+        tokio::spawn(async move {
+            if let Err(e) = crate::chrome_capture::prepare_login_page(&ws, known_email.as_deref(), known_pw.as_deref()).await {
+                crate::elog!("[login-flow] điền sẵn form lỗi: {:#}", e);
+            }
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if let Some(c) = crate::chrome_capture::read_typed_creds(&ws).await { *typed.lock().unwrap_or_else(|p| p.into_inner()) = Some(c); }
+            }
+        })
+    };
     // canh login tới 10 phút, xong thì tắt Chrome (giữ profile)
     let res = crate::chrome_capture::watch_login_tab(ws_url, 600, browser.port, &seed).await;
+    helper.abort();
     browser.close().await;
+    if res.is_ok() {
+        let c = typed.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some((e, p)) = c { crate::creds::set(&seed, &e, &p); crate::elog!("[login-flow] đã nhớ email + mật khẩu của acc để điền sẵn lần sau"); }
+    }
 
     let session = res?;
     crate::elog!("[login-flow] captured: {:?}", session.email);
@@ -3605,7 +3768,12 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/accounts/{id}/pool", post(api_toggle_pool))
         .route("/api/accounts/{id}/reset", post(api_reset_account))
         .route("/api/accounts/{id}/device", post(api_account_device))
+        .route("/api/cf", get(|| async { Json(crate::cloudflare::status()) }))
+        .route("/api/cf/setup", post(|| async { cf_result(crate::cloudflare::start_setup()) }))
+        .route("/api/cf/remove", post(|| async { cf_result(crate::cloudflare::start_remove()) }))
+        .route("/api/cf/refresh", post(|| async { cf_result(crate::cloudflare::start_refresh()) }))
         .route("/api/accounts/{id}/relogin", post(api_account_relogin))
+        .route("/api/accounts/{id}/open_chrome", post(api_account_open_chrome))
         .route("/api/extension.zip", get(api_extension_zip))
         .route("/api/capture", post(api_capture_from_chrome))
         .route("/api/login_start", post(api_login_start))
@@ -3636,6 +3804,7 @@ pub async fn run(port: u16) -> Result<()> {
     tokio::spawn(conv_sweeper(st.clone()));
     tokio::spawn(store_flusher(st.clone()));
     tokio::spawn(auto_refresh_loop(st.clone()));
+    tokio::spawn(crate::egress::start());
     tokio::spawn(device_refresh_loop(st));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -4392,6 +4561,26 @@ mod version_ui_tests {
 #[cfg(test)]
 mod rate_limit_tests {
     use super::*;
+
+    #[test]
+    fn wait_secs_tells_how_long_until_the_account_is_usable() {
+        let mut a = AccStats::default();
+        assert_eq!(a.wait_secs(1000), 0);
+        // 6 call dồn trong 11s (đúng ca trong file debug): burst 6/30s chặn tới hết cửa sổ 30s, không phải 10s cooldown
+        for t in [1000u64, 1002, 1004, 1007, 1009, 1011] { a.record_call(t); }
+        assert!(!a.available(1012));
+        assert_eq!(a.wait_secs(1012), 1000 + 30 - 1012, "đợi tới hết cửa sổ burst");
+        assert!(a.available(1031) && a.wait_secs(1031) == 0);
+        // cooldown dài (challenge/mute) thì báo đúng số giây còn lại
+        let mut b = AccStats::default();
+        b.cooldown_until = 5000;
+        assert_eq!(b.wait_secs(4000), 1000);
+        // trần request/phút
+        let mut c = AccStats::default();
+        c.rl_cap = 3; c.rl_cap_at = 1000;
+        c.recent = vec![1000, 1010, 1020];
+        assert_eq!(c.wait_secs(1030), 30, "call cũ nhất (1000) hết hạn ở 1060");
+    }
 
     fn calls(a: &mut AccStats, start: u64, n: u32, gap: u64) -> u64 {
         let mut t = start;

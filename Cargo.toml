@@ -1,6 +1,6 @@
 [package]
 name = "whalegate"
-version = "0.5.32"
+version = "0.5.33"
 edition = "2021"
 
 [dependencies]
@@ -17,8 +17,8 @@ cbc = "0.2"
 rsa = { version = "0.9", features = ["sha2"] }
 sha2 = "0.10"
 # Chỉ bật feature thực dùng — "full" kéo cả signal/process/net-unix... làm build chậm
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "io-util"] }
-tokio-tungstenite = "0.24"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "io-util", "process"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
