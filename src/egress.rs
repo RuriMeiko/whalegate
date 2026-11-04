@@ -366,3 +366,23 @@ mod tests {
         assert_eq!(spread.len(), 4, "các acc phải rải đều ra cả 4 Worker");
     }
 }
+
+#[cfg(test)]
+mod tls_provider_tests {
+    /// rustls phải có đúng một crypto provider dựng sẵn; thiếu thì `connect_async` tới wss:// panic trong task đường hầm.
+    #[test]
+    fn rustls_has_a_default_crypto_provider() {
+        let cfg = std::panic::catch_unwind(|| {
+            rustls::ClientConfig::builder().with_root_certificates(rustls::RootCertStore::empty()).with_no_client_auth()
+        });
+        assert!(cfg.is_ok(), "rustls không có crypto provider — thêm feature \"ring\" cho rustls trong Cargo.toml");
+    }
+
+    /// Đi qua đúng đường code thật: mở WebSocket TLS (wss://). Bị bỏ qua mặc định vì cần mạng.
+    #[tokio::test]
+    #[ignore]
+    async fn wss_connect_does_not_panic() {
+        let r = tokio_tungstenite::connect_async("wss://echo.websocket.org").await;
+        assert!(r.is_ok(), "{:?}", r.err());
+    }
+}

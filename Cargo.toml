@@ -1,6 +1,6 @@
 [package]
 name = "whalegate"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 
 [dependencies]
@@ -17,6 +17,9 @@ sha2 = "0.10"
 # Chỉ bật feature thực dùng — "full" kéo cả signal/process/net-unix... làm build chậm
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "io-util", "process"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Crypto provider cho rustls (WebSocket tới Worker cổng ra). Trước v1.0.0 reqwest bật "ring" hộ; bỏ reqwest mà không
+# khai báo thì rustls không có provider → panic ở mỗi lần mở đường hầm (client chỉ thấy "tunnel error: unexpected end of file").
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
