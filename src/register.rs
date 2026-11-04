@@ -187,17 +187,27 @@ impl Session {
 
 /// Mã hoá body như web: AES-128-CBC(key,iv) + RSA-OAEP(key||iv) → (ciphertext, encryption-key b64).
 fn encrypt_body(obj: &Value) -> Result<(Vec<u8>, String)> {
+    encrypt_bytes(obj.to_string().as_bytes())
+}
+
+/// Phần mã hoá thô (telemetry nén gzip trước rồi mới vào đây).
+pub(crate) fn encrypt_bytes(msg: &[u8]) -> Result<(Vec<u8>, String)> {
+    encrypt_bytes_with(msg, PUB_B64)
+}
+
+/// Khóa công khai của telemetry (cặp "production" thứ nhất trong main.js; register dùng cặp thứ hai ở trên).
+pub(crate) const TELEMETRY_PUB_B64: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo2wegFXo1m3LGL5mWHXe3s2+tuxutbxwRQRO3RJO6Xjengngpkqtq0CfkZVdQyMRIR+9nU5xr26swsEbnwG9keuW4ZF8iAPfTobFT5Dxo0Pkya2Q6i+3jBnnC+MdWlSWuW2pJIX0O+78kmB6ZtXxnf/KmUBa9s6ufFcisgnH1tdpbjwRvzcUz4+zDIneEL7fZlB+nzo258F/oYfqECPRRJRLgDzFYfDd5K22K3grhSTpIvdaYAUe4gyIz/DHLuo+fIeEeGeTcy2hp4pqaT6ctlh7iHDbcSXvy5wqmVwI4M8atyLcl0/osb7JErbu/nuTc8okGCKzt3D8RTwHa/Z2BQIDAQAB";
+
+pub(crate) fn encrypt_bytes_with(msg: &[u8], pub_b64: &str) -> Result<(Vec<u8>, String)> {
     use cbc::cipher::BlockModeEncrypt as _;
     let key: [u8; 16] = rand_bytes()?;
     let iv: [u8; 16] = rand_bytes()?;
-    let msg = obj.to_string();
-    let mut buf = vec![0u8; msg.len()];
-    buf.copy_from_slice(msg.as_bytes());
+    let buf = msg.to_vec();
     let mut out = vec![0u8; msg.len() + 16]; // đủ chỗ cho padding
     let enc = AesCbcEnc::new_from_slices(&key, &iv).expect("key/iv 16B");
     let ct = enc.encrypt_padded_b2b::<Pkcs7>(&buf, &mut out)
         .map_err(|e| anyhow::anyhow!("AES pad: {e}"))?;
-    let pubk = RsaPublicKey::from_public_key_der(&base64::engine::general_purpose::STANDARD.decode(PUB_B64)?)
+    let pubk = RsaPublicKey::from_public_key_der(&base64::engine::general_purpose::STANDARD.decode(pub_b64)?)
         .context("parse RSA public key")?;
     let wrapped = pubk.encrypt(
         &mut rsa::rand_core::OsRng,

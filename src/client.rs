@@ -449,7 +449,139 @@ impl DsClient {
         Ok(v)
     }
 
+    /// Những gì web làm khi mở trang rồi để tab đó: lúc tải làm một lượt (users/current, 4 scope settings, banner,
+    /// check_device, telemetry, settings/report), sau đó mỗi ~300s nạp lại từng scope settings (lệch pha nhau), và mỗi
+    /// scope có kho (main/model/provider) báo một telemetry `loadRemoteFeaturesSuccess` (→ ~1 gói / 100s). Đo trên tab
+    /// web 2.7.0 để yên ~56 phút. Mỗi acc một vòng nền, tự dừng khi acc không dùng 30 phút. DS_WEB_BOOT=0 để tắt.
+    pub fn web_boot_in_background(&self) {
+        if std::env::var("DS_WEB_BOOT").map(|v| v == "0").unwrap_or(false) { return; }
+        type Map = std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>;
+        static USED: std::sync::OnceLock<Map> = std::sync::OnceLock::new();
+        static RUNNING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+        USED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+            .insert(self.token.clone(), std::time::Instant::now());
+        {
+            let mut r = RUNNING.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+            if !r.insert(self.token.clone()) { return; }
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let idle = |t: &str| USED.get().and_then(|m| m.lock().ok().and_then(|m| m.get(t).map(|i| i.elapsed().as_secs()))).unwrap_or(u64::MAX);
+            match me.web_boot().await {
+                Ok((uid, did, session)) => {
+                    let rnd = |lo: u64, hi: u64| lo + (uuid::Uuid::new_v4().as_u128() % (hi - lo + 1) as u128) as u64;
+                    'outer: loop {
+                        // ~300s mỗi vòng, 4 scope rải đều, mỗi bước ±20%
+                        let mut order = vec!["web_upgrade", "main", "provider", "model"];
+                        let n = order.len();
+                        for i in (1..n).rev() { order.swap(i, (uuid::Uuid::new_v4().as_u128() % (i as u128 + 1)) as usize); }
+                        for scope in order {
+                            tokio::time::sleep(std::time::Duration::from_secs(rnd(60, 90))).await;
+                            if idle(&me.token) > 1800 { break 'outer; }
+                            if let Err(e) = me.refresh_scope(scope, &uid, &did, &session).await { crate::elog!("[boot] refresh {scope}: {:#}", e); }
+                        }
+                    }
+                }
+                Err(e) => crate::elog!("[boot] {:#}", e),
+            }
+            RUNNING.get().map(|r| r.lock().unwrap_or_else(|e| e.into_inner()).remove(&me.token));
+        });
+    }
+
+    fn feature_did(&self) -> String {
+        // did của kho cấu hình từ xa (`__ds_remote_feature_did`): id riêng của web, KHÁC x-device-id; ổn định theo thiết bị
+        let d = self.device_id.replace('-', "");
+        let x = |i: usize| u64::from_str_radix(&d[i..i + 8], 16).unwrap_or(0).wrapping_mul(0x9e37_79b9).rotate_left(7);
+        format!("{:08x}-{:04x}-4{:03x}-a{:03x}-{:012x}", x(0) as u32, x(8) as u16, x(16) as u16 & 0xfff, x(24) as u16 & 0xfff, (x(0) ^ x(16)) & 0xffff_ffff_ffff)
+    }
+
+    /// Một telemetry `loadRemoteFeaturesSuccess` cho kho `key` (gzip → AES-CBC → RSA-OAEP).
+    async fn feature_telemetry(&self, key: &str, session: &str, uid: &str, did: &str) -> Result<()> {
+        use std::io::Write;
+        let fp = crate::fingerprint::Fingerprint::for_token(&self.token);
+        let (w, h) = (fp.avail.0, fp.avail.1.saturating_sub(80));
+        let body = serde_json::json!({
+            "events": [{"event_name": "loadRemoteFeaturesSuccess", "event_params": {
+                "__appVersion": "2.7.0", "__commitId": "26090614", "__runtimeSessionId": session,
+                "storageKey": key, "__windowWidth": w, "__windowHeight": h, "__documentHidden": "false",
+                "event_level": "info", "event_message": "成功加载并存储远程规则"}}],
+            "extra": {"uid": uid, "ds_did": did}
+        });
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(body.to_string().as_bytes())?;
+        let (ct, ek) = crate::register::encrypt_bytes_with(&gz.finish()?, crate::register::TELEMETRY_PUB_B64)?;
+        let r = self.req(wreq::Method::POST, "/telemetry")
+            .header("content-type", "application/octet-stream")
+            .header("x-ds-compression", "gzip")
+            .header("x-request-encryption-key", ek)
+            .body(ct).send().await?;
+        let st = r.status();
+        let txt = r.text().await.unwrap_or_default();
+        crate::elog!("[boot] telemetry({key}) -> {st} {}", txt.chars().take(80).collect::<String>());
+        Ok(())
+    }
+
+    /// Nạp lại một scope settings như web làm định kỳ; scope có kho thì báo telemetry sau đó.
+    async fn refresh_scope(&self, scope: &str, uid: &str, did: &str, session: &str) -> Result<()> {
+        let _ = self.req(wreq::Method::GET, &format!("/client/settings?did={}&scope={}", did, scope))
+            .send().await?.bytes().await?;
+        let key = match scope {
+            "main" => "__ds_remote_feature_store",
+            "model" => "__ds_remote_feature_store_model",
+            "provider" => "__ds_remote_feature_store_provider",
+            _ => return Ok(()),
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        self.feature_telemetry(key, session, uid, did).await
+    }
+
+    async fn web_boot(&self) -> Result<(String, String, String)> {
+        let pause = |ms: u64| tokio::time::sleep(std::time::Duration::from_millis(ms));
+        let get = |path: String| async move {
+            let v: Value = self.req(wreq::Method::GET, &path).send().await?.json().await.unwrap_or(Value::Null);
+            Ok::<Value, anyhow::Error>(v)
+        };
+        let feat_did = self.feature_did();
+        let session = format!("session_v0_{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
+
+        // 1) như web lúc tải trang: users/current, rồi settings các scope
+        let cur = self.users_current().await?;
+        let uid = cur["data"]["biz_data"]["id"].as_str().unwrap_or("").to_string();
+        let sso = cur["data"]["biz_data"]["id_profile"]["id"].as_str().unwrap_or("").to_string();
+        let mut ids: Vec<i64> = Vec::new();
+        let mut stored: Vec<&str> = Vec::new();
+        for (scope, key) in [("main", Some("__ds_remote_feature_store")), ("model", Some("__ds_remote_feature_store_model")),
+                             ("web_upgrade", None), ("provider", Some("__ds_remote_feature_store_provider"))] {
+            let v = get(format!("/client/settings?did={}&scope={}", feat_did, scope)).await?;
+            if let Some(m) = v["data"]["biz_data"]["settings"].as_object() {
+                if let Some(k) = key { stored.push(k); for e in m.values() { if let Some(i) = e["id"].as_i64() { ids.push(i); } } }
+            }
+            pause(60).await;
+        }
+        // 2) danh sách chat, banner, kiểm tra thiết bị
+        let _ = get("/chat_session/fetch_page?lte_cursor.pinned=false".into()).await?;
+        let _ = get(format!("/client/settings?did={}&scope=banner", feat_did)).await?;
+        pause(150).await;
+        let _ = self.req(wreq::Method::POST, "/users/auth_token/check_device")
+            .json(&serde_json::json!({"device_id": self.device_id, "device_model": ""})).send().await?.bytes().await;
+
+        // 3) mỗi kho nạp xong, web báo một telemetry loadRemoteFeaturesSuccess (gzip → AES-CBC → RSA-OAEP)
+        for key in &stored {
+            self.feature_telemetry(key, &session, &uid, &feat_did).await?;
+            pause(250).await;
+        }
+
+        // 4) báo các cấu hình đã nạp
+        let r = self.req(wreq::Method::POST, "/client/settings/report")
+            .json(&serde_json::json!({"settings_ids": ids, "did": feat_did, "sso_id": sso})).send().await?;
+        let st = r.status();
+        let txt = r.text().await.unwrap_or_default();
+        crate::elog!("[boot] settings/report ({} ids) -> {st} {}", ids.len(), txt.chars().take(100).collect::<String>());
+        Ok((uid, feat_did, session))
+    }
+
     pub async fn create_session(&self) -> Result<String> {
+        self.web_boot_in_background();
         let v: Value = self
             .req(wreq::Method::POST, "/chat_session/create")
             .json(&json!({}))
@@ -1298,5 +1430,25 @@ mod session_cookie_tests {
         assert!(sid.chars().all(|ch| ch.is_ascii_hexdigit()));
         // lần hai: jar đã có, trả cùng giá trị
         assert_eq!(c.ensure_session_cookie().await.unwrap(), sid);
+    }
+
+    /// web_boot (users/current + client/settings + telemetry) trên acc đầu trong store:
+    /// `cargo test live_web_boot -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_web_boot() {
+        let (tok, cookies) = match std::env::var("WG_TEST_TOKEN") {
+            Ok(t) => (t, std::env::var("WG_TEST_COOKIES").unwrap_or_default()),
+            Err(_) => {
+                let raw = std::fs::read_to_string(format!("{}/.whalegate/accounts.json", std::env::var("HOME").unwrap())).expect("store");
+                let st: Value = serde_json::from_str(&raw).unwrap();
+                let a = st["accounts"].as_array().unwrap().iter().find(|a| a["token"].as_str().is_some()).expect("acc có token");
+                let ck = a["cookies"].as_object().map(|o| o.iter().map(|(k, v)| format!("{}={}", k, v.as_str().unwrap_or(""))).collect::<Vec<_>>().join("; ")).unwrap_or_default();
+                (a["token"].as_str().unwrap().to_string(), ck)
+            }
+        };
+        let c = DsClient::new(tok, cookies).unwrap();
+        c.web_boot().await.expect("web_boot");
+        println!("web_boot xong");
     }
 }
