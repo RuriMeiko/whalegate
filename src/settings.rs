@@ -57,6 +57,9 @@ pub static DEFS: &[Def] = &[
     n("DS_COOLDOWN", "Pool", "10", 0, 600, "giây", "Nghỉ sau khi chạm burst"),
     // mạng
     shown(n("DS_TZ_OFFSET", "Mạng", "25200", -43200, 50400, "giây", "Lệch múi giờ gửi cho web và tính ngày (UTC+7 = 25200)"), "Múi giờ", "Giây lệch UTC · +7 = 25200"),
+    // hiển thị tiền: chi phí tính gốc bằng USD, dashboard đổi sang ¥ (tiếng Trung) / ₫ (tiếng Việt) theo tỷ giá này
+    shown(n("DS_FX_CNY", "Hiển thị", "720", 100, 2000, "×0,01 ¥", "Tỷ giá USD → CNY"), "Tỷ giá USD → CNY", "Tính bằng 0,01 ¥: 720 = 7,20 ¥ cho 1 USD. Dùng khi dashboard ở tiếng Trung"),
+    shown(n("DS_FX_VND", "Hiển thị", "26000", 1000, 100000, "đồng", "Tỷ giá USD → VND"), "Tỷ giá USD → VND", "Số đồng cho 1 USD. Dùng khi dashboard ở tiếng Việt"),
     // proxy đầu ra: mỗi vân tay (mỗi acc) đi ra DS qua một IP khác
     Def { key: "DS_PROXY_MODE", group: "Proxy", kind: Kind::Choice, default: "off", min: 0, max: 0, choices: &["off", "auto", "strict"], unit: "", label: "IP đầu ra", hint: "off = đi thẳng · auto = có proxy thì dùng, chết thì đi thẳng · strict = proxy chết thì báo lỗi, không lộ IP thật", show: true, live: true },
     Def { key: "DS_PROXY_LIST", group: "Proxy", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Danh sách proxy", hint: "Mỗi dòng một proxy: scheme://[user:pass@]host:port (http | https | socks5 | socks5h)", show: true, live: true },
@@ -174,7 +177,7 @@ mod tests {
     #[test]
     fn only_verified_settings_are_exposed() {
         let shown: Vec<&str> = DEFS.iter().filter(|d| d.show).map(|d| d.key).collect();
-        assert_eq!(shown, ["DS_STATEFUL", "DS_POW_PREFETCH", "DS_DEFAULT_EFFORT", "DS_CONTEXT_TOKENS", "DS_PROMPT_MAX_CHARS", "DS_MAX_CONC_PER_ACC", "DS_HOURLY_LIMIT", "DS_DEVICE_REFRESH_HOURS", "DS_TZ_OFFSET", "DS_PROXY_MODE", "DS_PROXY_LIST"]);
+        assert_eq!(shown, ["DS_STATEFUL", "DS_POW_PREFETCH", "DS_DEFAULT_EFFORT", "DS_CONTEXT_TOKENS", "DS_PROMPT_MAX_CHARS", "DS_MAX_CONC_PER_ACC", "DS_HOURLY_LIMIT", "DS_DEVICE_REFRESH_HOURS", "DS_TZ_OFFSET", "DS_FX_CNY", "DS_FX_VND", "DS_PROXY_MODE", "DS_PROXY_LIST"]);
         assert!(set("DS_BURST_LIMIT", Some("5")).is_err(), "mục ẩn không được đặt qua API");
     }
 

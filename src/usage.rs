@@ -278,7 +278,7 @@ pub fn report() -> Value {
         if h + 24 * 7 > hnow { a_7d.add(b, &p, peak); }
         let d = local_day(h);
         if d == today { a_today.add(b, &p, peak); }
-        if d + 14 > today { days.entry(d).or_default().add(b, &p, peak); }
+        days.entry(d).or_default().add(b, &p, peak);
     }
 
     // 24 giờ gần nhất (cũ → mới)
@@ -288,11 +288,17 @@ pub fn report() -> Value {
         json!({"t": h * 3600, "input": b.miss + b.hit, "cached": b.hit, "output": b.out, "peak": is_peak(h), "cost": cost(&b, &p, is_peak(h))})
     }).collect();
 
-    // 14 ngày gần nhất
-    let daily: Vec<Value> = (0..14).map(|i| {
-        let d = today - 13 + i;
+    // theo ngày, từ ngày có dữ liệu đầu tiên tới hôm nay (ít nhất 30 ngày, nhiều nhất 366) — cho biểu đồ tuần / tháng / toàn bộ
+    let first_day = days.keys().next().copied().unwrap_or(today);
+    let start = first_day.min(today - 29).max(today - 365);
+    let daily: Vec<Value> = (start..=today).map(|d| {
         let a = days.get(&d);
-        json!({"t": d * 86400 - tz, "tokens": a.map(|a| a.miss + a.hit + a.out).unwrap_or(0), "cost": a.map(|a| a.cost).unwrap_or(0.0)})
+        json!({"t": d * 86400 - tz,
+               "tokens": a.map(|a| a.miss + a.hit + a.out).unwrap_or(0),
+               "input": a.map(|a| a.miss + a.hit).unwrap_or(0),
+               "cached": a.map(|a| a.hit).unwrap_or(0),
+               "output": a.map(|a| a.out).unwrap_or(0),
+               "cost": a.map(|a| a.cost).unwrap_or(0.0)})
     }).collect();
 
     // lịch giá 24 giờ tới + lần đổi giá kế tiếp
@@ -309,6 +315,7 @@ pub fn report() -> Value {
 
     json!({
         "pricing": p,
+        "fx": {"cny": crate::settings::int("DS_FX_CNY") as f64 / 100.0, "vnd": crate::settings::int("DS_FX_VND") as f64},
         "now": now, "tz": tz, "now_peak": now_peak, "next_switch": next_switch,
         "today": a_today.json(), "d7": a_7d.json(), "d30": a_30d.json(), "all": a_all.json(),
         "projection": {"days_basis": span_days, "tokens_per_day": per_day_tokens, "cost_per_day": per_day_cost,

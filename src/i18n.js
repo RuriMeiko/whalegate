@@ -93,7 +93,7 @@
     ['Đã copy lệnh — dán vào Console của tab chat.deepseek.com', 'Command copied — paste it into the Console of a chat.deepseek.com tab', '命令已复制 — 请粘贴到 chat.deepseek.com 标签页的控制台'],
     ['Dán token trước', 'Paste a token first', '请先粘贴 Token'],
     ['Nhập email và mật khẩu trước', 'Enter the email and password first', '请先输入邮箱和密码'],
-    ['Đã mở cửa sổ Chrome riêng — đăng nhập trong đó, xong tự lưu và tự đóng.', 'Opened a dedicated Chrome window — log in there; it saves and closes by itself when done.', '已打开专属 Chrome 窗口 — 请在其中登录，完成后会自动保存并关闭。'],
+    ['Đã mở cửa sổ Chrome riêng — đăng nhập hoặc đăng ký trong đó, xong tự lưu và tự đóng.', 'Opened a dedicated Chrome window — log in or sign up there; it saves and closes by itself when done.', '已打开专属 Chrome 窗口 — 请在其中登录或注册，完成后会自动保存并关闭。'],
     ['acc quay lại pool', 'account is back in the pool', '账号已回到池中'],
     ['acc đã vào pool', 'account is in the pool', '账号已加入池中'],
     ['giữ vân tay trình duyệt gốc', 'original browser fingerprint kept', '保留原浏览器指纹'],
@@ -266,6 +266,31 @@
 
     ['Kéo lên thanh bookmark', 'Drag to the bookmarks bar', '拖到书签栏'],
     ['gửi về', 'sends to', '发送到'],
+    ['Mở một cửa sổ Chrome riêng (profile và vân tay riêng cho tài khoản này). Bạn đăng nhập DeepSeek trong đó bằng cách nào cũng được — email, Google, mã OTP — hoặc đăng ký tài khoản mới ngay trong cửa sổ đó. whalegate bắt token và cookie qua CDP, lưu tài khoản rồi tự đóng cửa sổ.',
+      'Opens a separate Chrome window with its own profile and fingerprint for this account. Log in to DeepSeek there any way you like — email, Google, OTP — or sign up for a new account right in that window. whalegate captures the token and cookies over CDP, saves the account and closes the window by itself.',
+      '打开一个独立的 Chrome 窗口（该账号专属的配置文件和指纹）。你可以在其中用任意方式登录 DeepSeek — 邮箱、Google、验证码均可 — 也可以直接在该窗口里注册新账号。whalegate 会通过 CDP 获取 Token 和 Cookie，保存账号并自动关闭窗口。'],
+    ['Mở cửa sổ riêng để đăng nhập / đăng ký', 'Open dedicated window to log in / sign up', '打开专属窗口登录 / 注册'],
+    ['Dán token (legacy)', 'Paste token (legacy)', '粘贴 Token（旧方式）'],
+    ['Mở cửa sổ Chrome riêng rồi bạn tự đăng nhập trong đó', 'Opens a dedicated Chrome window and you log in there yourself', '打开专属 Chrome 窗口，由你在其中自行登录'],
+    ['Tự điền email + mật khẩu (kém ổn định)', 'Auto-fill email + password (less reliable)', '自动填写邮箱和密码（稳定性较差）'],
+    ['Hiển thị', 'Display', '显示'],
+    ['Tỷ giá USD → CNY', 'USD → CNY rate', '美元兑人民币汇率'],
+    ['Tính bằng 0,01 ¥: 720 = 7,20 ¥ cho 1 USD. Dùng khi dashboard ở tiếng Trung', 'In units of 0.01 ¥: 720 = 7.20 ¥ per 1 USD. Used when the dashboard is in Chinese', '以 0.01 ¥ 为单位：720 = 1 美元兑 7.20 ¥。控制面板为中文时使用'],
+    ['×0,01 ¥', '×0.01 ¥', '×0.01 ¥'],
+    ['Tỷ giá USD → VND', 'USD → VND rate', '美元兑越南盾汇率'],
+    ['Số đồng cho 1 USD. Dùng khi dashboard ở tiếng Việt', 'Dong per 1 USD. Used when the dashboard is in Vietnamese', '1 美元兑多少越南盾。控制面板为越南语时使用'],
+    ['đồng', 'VND', '越南盾'],
+    ['Log trực tiếp', 'Live log', '实时日志'],
+    ['Khoảng thời gian', 'Time range', '时间范围'],
+    ['Token 7 ngày', 'Tokens 7 days', '7 天 Token'],
+    ['Token 30 ngày', 'Tokens 30 days', '30 天 Token'],
+    ['Token toàn bộ', 'Tokens all time', '累计 Token'],
+    ['Tiết kiệm 7 ngày', 'Saved 7 days', '7 天节省'],
+    ['Tiết kiệm 30 ngày', 'Saved 30 days', '30 天节省'],
+    ['Tiết kiệm toàn bộ', 'Saved all time', '累计节省'],
+    ['7 ngày qua', 'Last 7 days', '过去 7 天'],
+    ['30 ngày qua', 'Last 30 days', '过去 30 天'],
+    ['Toàn bộ', 'All time', '全部'],
     /* alert() của bookmarklet / lệnh console (chạy ở tab khác, dịch lúc dựng mã) */
     ['chạy trên tab chat.deepseek.com', 'run this on a chat.deepseek.com tab', '请在 chat.deepseek.com 标签页中运行'],
     ['tab này chưa đăng nhập chat.deepseek.com (không thấy userToken).', 'this tab is not logged in to chat.deepseek.com (no userToken found).', '此标签页尚未登录 chat.deepseek.com（找不到 userToken）。'],
@@ -325,6 +350,7 @@
     [/^(\d+) lỗi$/, '$1 error(s)', '$1 个错误'],
     [/^(\d+) lỗi \((.*)\)$/, '$1 error(s) ($2)', '$1 个错误（$2）'],
     [/^lỗi (\d+)$/, 'error $1', '错误 $1'],
+    [/^TB (.+)\/ngày$/, 'avg $1/day', '日均 $1'],
     [/^ok (\d+)$/, 'ok $1', '成功 $1'],
     [/^rỗng (\d+)$/, 'empty $1', '空响应 $1'],
     [/^chạy (\d+)$/, 'running $1', '运行中 $1'],
@@ -548,6 +574,7 @@
     document.querySelectorAll('.lang [data-l]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.l === l)));
     busy = true; walk(document.body); busy = false;
     try { if (typeof refreshBookmarklet === 'function') refreshBookmarklet(); } catch (e) {}
+    try { if (typeof onLangChange === 'function') onLangChange(); } catch (e) {}
   }
 
   function init() {

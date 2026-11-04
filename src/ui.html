@@ -21,6 +21,10 @@
   header { display: flex; align-items: center; gap: 10px; padding: 18px 0 12px; }
   h1 { margin: 0; font: 600 15px/1.2 var(--mono); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   h1 .sl { color: var(--mute); font-weight: 400; }
+  h1 a.name { color: inherit; text-decoration: none; }
+  h1 a.name:hover { text-decoration: underline; text-underline-offset: 3px; }
+  button.has-ic { display: inline-flex; align-items: center; gap: 6px; }
+  button.has-ic .ic { flex: none; }
   .live { font: 12px/1 var(--mono); color: var(--mute); display: flex; align-items: center; gap: 7px; margin-right: 6px; }
   .dot { width: 8px; height: 8px; background: var(--ink); display: inline-block; }
   .dot.off { background: transparent; border: 1px solid var(--mute); }
@@ -31,6 +35,14 @@
   .k { grid-column: span 3; } .c8 { grid-column: span 8; } .c4 { grid-column: span 4; } .c12 { grid-column: span 12; }
   .lab { font: 11px/1 var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 20px; }
   .lab em { font-style: normal; text-transform: none; letter-spacing: 0; }
+  /* nhãn bấm được: chọn khoảng thời gian (hôm nay / tuần / tháng / toàn bộ) */
+  .rngw { position: relative; display: inline-block; }
+  .rngw::after { content: ''; position: absolute; right: 1px; top: 50%; width: 5px; height: 5px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: translateY(-75%) rotate(45deg); pointer-events: none; }
+  select.rng { font: inherit; letter-spacing: inherit; text-transform: uppercase; color: inherit; background: transparent; border: 0; padding: 0 14px 0 0; margin: 0; cursor: pointer; appearance: none; -webkit-appearance: none; border-radius: 0; field-sizing: content; }
+  select.rng:hover { color: var(--ink); }
+  /* bấm vào: chỉ nhấn chữ (đậm + gạch chân), không tô nền, không khung — thắng quy tắc select:focus chung */
+  select.rng:focus, select.rng:focus-visible, select.rng:active { background: transparent; outline: none; color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
+  select.rng option { text-transform: none; letter-spacing: 0; color: var(--ink); background: var(--bg); }
   .big { font: 500 28px/1.05 var(--mono); letter-spacing: -.02em; word-break: break-all; }
   .sub { font: 12px/1.4 var(--mono); color: var(--mute); margin-top: 8px; }
   .good { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
@@ -80,6 +92,11 @@
   .dlg .alt { margin-top: 16px; border-top: 1px solid var(--hair); padding-top: 12px; }
   .dlg .alt p { color: var(--mute); font-size: 12px; margin-bottom: 10px; }
   .dlg .foot .hint { color: var(--mute); }
+  details.auto > summary { cursor: pointer; font: 12px/1.4 var(--mono); color: var(--mute); list-style: none; }
+  details.auto > summary::before { content: '+ '; }
+  details.auto[open] > summary::before { content: '− '; }
+  details.auto > summary::-webkit-details-marker { display: none; }
+  details.auto[open] > summary { margin-bottom: 10px; }
   .acc .dupe { font: 11px/1 var(--mono); color: var(--bad); border: 1px solid var(--bad); padding: 3px 6px; white-space: nowrap; }
   .empty { color: var(--mute); font: 12px/1.4 var(--mono); padding: 6px 0; }
 
@@ -101,7 +118,7 @@
   .dlg .foot .sp, .sp { flex: 1; min-width: 6px; }
   .dlg p { margin: 0 0 12px; font: 13px/1.55 var(--sans); }
   .dlg .btns { display: flex; justify-content: flex-end; gap: 8px; }
-  textarea, input[type=text], input[type=number], select { font: 12px/1.4 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 8px 10px; outline: none; }
+  textarea, input[type=text], input[type=password], input[type=number], select { font: 12px/1.4 var(--mono); color: var(--ink); background: transparent; border: 1px solid var(--ink); padding: 8px 10px; outline: none; }
   textarea:focus, input:focus, select:focus { background: #f4efe2; outline: 2px solid var(--ink); outline-offset: 1px; }
   textarea { width: 100%; resize: vertical; }
   .cmd { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; margin: 0 0 12px; padding: 9px 12px; text-align: left; }
@@ -215,7 +232,7 @@
 
   @media (max-width: 860px) { .k { grid-column: span 6; } .c8, .c4 { grid-column: span 12; } }
   @media (max-width: 560px) {
-    .wrap { padding: 0 12px 32px; } h1 { font-size: 13px; } #liveTxt { display: none; } .gh-t { display: none; } .lang svg { display: none; } .lang { padding-left: 4px; } header { gap: 7px; } a.btn { padding: 7px 8px; } .live { margin-right: 0; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
+    .wrap { padding: 0 12px 32px; } h1 { font-size: 13px; } #liveTxt { display: none; } .bt { display: none; } button.has-ic { padding: 7px 9px; } .lang svg { display: none; } .lang { padding-left: 4px; } header { gap: 7px; } a.btn { padding: 7px 8px; } .live { margin-right: 0; } .cell { padding: 12px 12px 14px; } .big { font-size: 24px; }
     .row { flex-wrap: wrap; } .row .ctl { margin-left: auto; }
     .modal { padding: 0; } .dlg, .dlg.log { width: 100%; height: 100%; max-height: none; box-shadow: none; border: 0; }
     .modal:not(#logModal):not(#setModal) .dlg { height: auto; max-height: 100%; align-self: flex-end; border-top: 1px solid var(--ink); }
@@ -228,12 +245,11 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>whalegate<span class="sl">/rust</span><a class="ver" href="https://github.com/RuriMeiko/whalegate/releases/tag/v__WG_VERSION__" target="_blank" rel="noopener noreferrer" title="Phiên bản đang chạy — ghi chú phát hành">v__WG_VERSION__</a></h1>
+    <h1><a class="name" href="https://github.com/RuriMeiko/whalegate" target="_blank" rel="noopener noreferrer" title="Mã nguồn trên GitHub">whalegate<span class="sl">/rust</span></a><a class="ver" href="https://github.com/RuriMeiko/whalegate/releases/tag/v__WG_VERSION__" target="_blank" rel="noopener noreferrer" title="Phiên bản đang chạy — ghi chú phát hành">v__WG_VERSION__</a></h1>
     <div class="live"><span class="dot off" id="dot"></span><span id="liveTxt">—</span></div>
-    <button class="sm" onclick="openLog()">log</button>
-    <button class="sm" onclick="openDsh()">dsh</button>
-    <button class="sm" onclick="openSettings()">cài đặt</button>
-    <a class="btn" href="https://github.com/RuriMeiko/whalegate" target="_blank" rel="noopener noreferrer" title="Mã nguồn trên GitHub" aria-label="GitHub"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-t">github</span></a>
+    <button class="sm has-ic" onclick="openLog()" title="Log trực tiếp"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg><span class="bt">log</span></button>
+    <button class="sm has-ic" onclick="openDsh()" title="Cấu hình dsh"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><rect x="1.7" y="2.7" width="12.6" height="10.6"/><path d="M4.6 6.2 7 8.2l-2.4 2M8.6 10.4h2.8"/></svg><span class="bt">dsh</span></button>
+    <button class="sm has-ic" onclick="openSettings()" title="Cài đặt"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M2 4h12M2 8h12M2 12h12"/><circle cx="10.5" cy="4" r="1.7" fill="var(--bg)"/><circle cx="5.5" cy="8" r="1.7" fill="var(--bg)"/><circle cx="11" cy="12" r="1.7" fill="var(--bg)"/></svg><span class="bt">cài đặt</span></button>
     <div class="lang" data-nt role="group" aria-label="Language">
       <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.6"/><ellipse cx="8" cy="8" rx="2.9" ry="6.6"/><path d="M1.4 8h13.2M2.4 4.6h11.2M2.4 11.4h11.2"/></svg>
       <button type="button" data-l="vi" title="Tiếng Việt" onclick="WG_I18N.setLang('vi')">VI</button><i>/</i><button type="button" data-l="en" title="English" onclick="WG_I18N.setLang('en')">EN</button><i>/</i><button type="button" data-l="zh" title="简体中文 · 贡献者 wang1048920402" onclick="WG_I18N.setLang('zh')">中</button>
@@ -253,13 +269,13 @@
   </div>
 
   <main class="grid">
-    <div class="cell k"><div class="lab">Token hôm nay</div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
-    <div class="cell k"><div class="lab">Tiết kiệm hôm nay</div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
+    <div class="cell k"><div class="lab"><span class="rngw"><select class="rng" id="rngTok" aria-label="Khoảng thời gian" onchange="setRng('tok', this.value)"><option value="today">Token hôm nay</option><option value="7d">Token 7 ngày</option><option value="30d">Token 30 ngày</option><option value="all">Token toàn bộ</option></select></span></div><div class="big" id="kTok">—</div><div class="sub" id="kTokSub"></div></div>
+    <div class="cell k"><div class="lab"><span class="rngw"><select class="rng" id="rngSave" aria-label="Khoảng thời gian" onchange="setRng('save', this.value)"><option value="today">Tiết kiệm hôm nay</option><option value="7d">Tiết kiệm 7 ngày</option><option value="30d">Tiết kiệm 30 ngày</option><option value="all">Tiết kiệm toàn bộ</option></select></span></div><div class="big good" id="kSave">—</div><div class="sub" id="kSaveSub"></div></div>
     <div class="cell k"><div class="lab">Độ trễ (1 giờ)</div><div class="big" id="kLat">—</div><div class="sub" id="kLatSub"></div></div>
     <div class="cell k"><div class="lab">Tài khoản</div><div class="big" id="kAcc">—</div><div class="sub" id="kAccSub"></div></div>
 
     <div class="cell c8">
-      <div class="lab">24 giờ qua <em id="h24sum"></em></div>
+      <div class="lab"><span class="rngw"><select class="rng" id="rngChart" aria-label="Khoảng thời gian" onchange="setRng('chart', this.value)"><option value="24h">24 giờ qua</option><option value="7d">7 ngày qua</option><option value="30d">30 ngày qua</option><option value="all">Toàn bộ</option></select></span><em id="h24sum"></em></div>
       <div class="bars" id="bars24"></div>
       <div class="axis" id="axis24"></div>
     </div>
@@ -284,30 +300,35 @@
   <div class="dlg">
     <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeAdd()">×</button></div>
     <div class="tabs" role="tablist" aria-label="Cách thêm">
-      <button role="tab" data-t="ext" onclick="addTab('ext')">Tiện ích</button>
-      <button role="tab" data-t="bm" onclick="addTab('bm')">Bookmarklet</button>
       <button role="tab" data-t="chrome" onclick="addTab('chrome')">Chrome riêng</button>
-      <button role="tab" data-t="paste" onclick="addTab('paste')">Dán token</button>
+      <button role="tab" data-t="bm" onclick="addTab('bm')">Bookmarklet</button>
+      <button role="tab" data-t="ext" onclick="addTab('ext')">Tiện ích</button>
+      <button role="tab" data-t="paste" onclick="addTab('paste')">Dán token (legacy)</button>
     </div>
     <div class="inner">
-      <section data-p="ext">
-        <p>Đủ mọi cookie, kể cả HttpOnly. Cài một lần, sau đó bấm biểu tượng whalegate trên tab chat.deepseek.com.</p>
-        <ol class="steps">
-          <li><a class="btn" href="/api/extension.zip" download>Tải tiện ích</a> rồi giải nén</li>
-          <li><code>chrome://extensions</code> → bật Developer mode → Load unpacked → chọn thư mục vừa giải nén</li>
-        </ol>
+      <section data-p="chrome">
+        <p>Mở một cửa sổ Chrome riêng (profile và vân tay riêng cho tài khoản này). Bạn đăng nhập DeepSeek trong đó bằng cách nào cũng được — email, Google, mã OTP — hoặc đăng ký tài khoản mới ngay trong cửa sổ đó. whalegate bắt token và cookie qua CDP, lưu tài khoản rồi tự đóng cửa sổ.</p>
+        <div class="btns"><button class="solid" id="btnLogin" onclick="loginStart()" title="Mở cửa sổ Chrome riêng rồi bạn tự đăng nhập trong đó">Mở cửa sổ riêng để đăng nhập / đăng ký</button><span class="sp"></span><button class="ghost" id="btnScan" onclick="captureAll()" title="Lấy các tab chat.deepseek.com đang đăng nhập từ một Chrome mở với --remote-debugging-port=9333. Từ Chrome 136 cờ này bị bỏ qua ở profile mặc định (cần thêm --user-data-dir riêng); với Chrome hằng ngày hãy dùng tab Tiện ích.">Quét Chrome chính</button></div>
+        <details class="alt auto">
+          <summary>Tự điền email + mật khẩu (kém ổn định)</summary>
+          <p>Tự đăng nhập bằng email + mật khẩu trong Chrome có vân tay riêng — không cần bấm gì trong cửa sổ. Mật khẩu chỉ đi tới chat.deepseek.com, không lưu lại.</p>
+          <div class="row">
+            <input type="text" id="lgEmail" placeholder="email" autocomplete="username" aria-label="Email">
+            <input type="password" id="lgPass" placeholder="mật khẩu" autocomplete="current-password" aria-label="Mật khẩu">
+          </div>
+          <div class="btns"><button id="btnAuto" onclick="loginAuto()">Đăng nhập tự động</button></div>
+        </details>
       </section>
       <section data-p="bm" hidden>
         <p>Kéo lên thanh bookmark một lần, sau đó bấm trên tab chat.deepseek.com. Cookie HttpOnly (<code>ds_session_id</code>) do whalegate tự xin, khác với của trình duyệt.</p>
         <a class="cmd bm" id="bmLink" href="#" onclick="return false" draggable="true"><code>Thêm vào whalegate</code><span>kéo lên bookmark</span></a>
       </section>
-      <section data-p="chrome" hidden>
-        <p>Tự đăng nhập bằng email + mật khẩu trong Chrome có vân tay riêng — không cần bấm gì trong cửa sổ. Mật khẩu chỉ đi tới chat.deepseek.com, không lưu lại.</p>
-        <div class="row">
-          <input type="text" id="lgEmail" placeholder="email" autocomplete="username" aria-label="Email">
-          <input type="password" id="lgPass" placeholder="mật khẩu" autocomplete="current-password" aria-label="Mật khẩu">
-        </div>
-        <div class="btns"><button class="solid" id="btnAuto" onclick="loginAuto()">Đăng nhập tự động</button><span class="sp"></span><button class="ghost" id="btnLogin" onclick="loginStart()" title="Mở cửa sổ Chrome rồi bạn tự đăng nhập trong đó">Mở cửa sổ tự đăng nhập</button><button class="ghost" id="btnScan" onclick="captureAll()" title="Lấy các tab chat.deepseek.com đang đăng nhập từ một Chrome mở với --remote-debugging-port=9333. Từ Chrome 136 cờ này bị bỏ qua ở profile mặc định (cần thêm --user-data-dir riêng); với Chrome hằng ngày hãy dùng tab Tiện ích.">Quét Chrome chính</button></div>
+      <section data-p="ext" hidden>
+        <p>Đủ mọi cookie, kể cả HttpOnly. Cài một lần, sau đó bấm biểu tượng whalegate trên tab chat.deepseek.com.</p>
+        <ol class="steps">
+          <li><a class="btn" href="/api/extension.zip" download>Tải tiện ích</a> rồi giải nén</li>
+          <li><code>chrome://extensions</code> → bật Developer mode → Load unpacked → chọn thư mục vừa giải nén</li>
+        </ol>
       </section>
       <section data-p="paste" hidden>
         <textarea id="tokIn" rows="3" spellcheck="false" autocomplete="off" aria-label="Token" placeholder="giá trị localStorage.userToken, hoặc kết quả lệnh console"></textarea>
@@ -451,7 +472,29 @@ const J = {'Content-Type': 'application/json'};
 const post = async (url, body) => (await fetch(url, {method: 'POST', headers: J, body: body === undefined ? undefined : JSON.stringify(body)})).json();
 
 const fmtTok = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
-const fmtUsd = (v) => '$' + (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
+/// Tiền: server tính bằng USD; hiển thị theo ngôn ngữ — en $ · zh ¥ (CNY) · vi ₫ (VND), tỷ giá chỉnh trong Cài đặt → Hiển thị.
+let FX = {cny: 7.2, vnd: 26000};
+const curLang = () => (window.WG_I18N && WG_I18N.lang) || 'vi';
+const fmtNum = (v) => (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
+const fmtMoney = (usd) => {
+  const l = curLang();
+  if (l === 'vi') return Math.round(usd * FX.vnd).toLocaleString('vi-VN') + ' ₫';
+  if (l === 'zh') return '¥' + fmtNum(usd * FX.cny);
+  return '$' + fmtNum(usd);
+};
+/// Giá mỗi 1M token (số nhỏ, vd 0.28 USD): giữ 2 chữ số thập phân với ¥ và $, làm tròn nguyên với ₫.
+const fmtPrice = (usd) => { const l = curLang(); return l === 'vi' ? Math.round(usd * FX.vnd).toLocaleString('vi-VN') + ' ₫' : l === 'zh' ? '¥' + (usd * FX.cny).toFixed(2) : '$' + usd; };
+const fmtUsd = fmtMoney;
+
+/// Khoảng thời gian của ba ô (token / tiết kiệm / biểu đồ): nhớ lựa chọn theo trình duyệt.
+const RNG = {tok: 'today', save: 'today', chart: '24h'};
+for (const k of Object.keys(RNG)) { try { const v = localStorage.getItem('wg.rng.' + k); if (v) RNG[k] = v; } catch (e) {} }
+function setRng(k, v) {
+  RNG[k] = v;
+  try { localStorage.setItem('wg.rng.' + k, v); } catch (e) {}
+  if (window.__lastUsage) renderUsage(window.__lastUsage);
+}
+const syncRng = () => { for (const [k, id] of [['tok', 'rngTok'], ['save', 'rngSave'], ['chart', 'rngChart']]) { const s = $(id); if (s && s.querySelector('option[value="' + RNG[k] + '"]')) s.value = RNG[k]; else RNG[k] = s ? s.options[0].value : RNG[k]; } };
 const hh = (t) => String(new Date(t * 1000).getHours()).padStart(2, '0');
 const dur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h >= 24 ? Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : h ? h + 'h' + String(m).padStart(2, '0') : m + 'm'; };
 
@@ -528,12 +571,12 @@ function askDone(v) { if (!ASK) return; const r = ASK; ASK = null; closeModal('c
 function openAdd(tab) {
   let t = tab;
   if (!t) { try { t = localStorage.getItem('wg.addTab'); } catch (e) {} }
-  addTab(t || 'ext');
+  addTab(t || 'chrome');
   openModal('addModal'); refreshBookmarklet();
 }
 /// Hộp thêm acc: một tab cho mỗi cách; nhớ tab dùng lần trước.
 function addTab(t) {
-  if (!document.querySelector('#addModal [data-p="' + t + '"]')) t = 'ext';
+  if (!document.querySelector('#addModal [data-p="' + t + '"]')) t = 'chrome';
   document.querySelectorAll('#addModal [data-t]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.t === t)));
   document.querySelectorAll('#addModal [data-p]').forEach((p) => { p.hidden = p.dataset.p !== t; });
   try { localStorage.setItem('wg.addTab', t); } catch (e) {}
@@ -678,7 +721,7 @@ async function loginStart() {
   try {
     const d = await post('/api/login_start');
     if (!d.ok) return say(d.error, 'err');
-    say('Đã mở cửa sổ Chrome riêng — đăng nhập trong đó, xong tự lưu và tự đóng.', 'ok'); closeAdd();
+    say('Đã mở cửa sổ Chrome riêng — đăng nhập hoặc đăng ký trong đó, xong tự lưu và tự đóng.', 'ok'); closeAdd();
     const t = setInterval(loadStats, 2000); setTimeout(() => clearInterval(t), 660000);
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
@@ -842,7 +885,7 @@ function accItem(a, perAcc) {
 
 /* ---- biểu đồ ---- */
 function drawBars(box, items) {
-  box.textContent = '';
+  box.textContent = ''; box.style.gap = items.length > 60 ? '1px' : '';
   const max = Math.max(1, ...items.map((i) => i.input + i.output)), H = (box.clientHeight || 96) - 6, px = (n) => Math.round((n / max) * H);
   for (const it of items) {
     const col = el('div', 'col'), out = px(it.output), hit = px(it.cached || 0), inp = Math.max(0, px(it.input) - hit);
@@ -854,11 +897,18 @@ function drawBars(box, items) {
 }
 
 function renderUsage(u) {
-  const t = u.today, pr = u.pricing, pj = u.projection;
-  $('kTok').textContent = fmtTok(t.tokens);
-  $('kTokSub').textContent = t.input ? `cache ${Math.round((t.cached / t.input) * 100)}% · ${t.req} lượt` : `${t.req} lượt`;
-  $('kSave').textContent = fmtUsd(t.cost);
-  $('kSaveSub').textContent = `tháng này ~${fmtUsd(pj.month_cost)}`;
+  window.__lastUsage = u; if (u.fx) FX = {cny: +u.fx.cny || FX.cny, vnd: +u.fx.vnd || FX.vnd};
+  const pr = u.pricing, pj = u.projection;
+  syncRng();
+  const agg = (r) => (r === '7d' ? u.d7 : r === '30d' ? u.d30 : r === 'all' ? u.all : u.today) || u.today;
+  const days = (u.daily || []).length || 1;
+  const tk = agg(RNG.tok), sv = agg(RNG.save);
+  $('kTok').textContent = fmtTok(tk.tokens);
+  $('kTokSub').textContent = tk.input ? `cache ${Math.round((tk.cached / tk.input) * 100)}% · ${tk.req} lượt` : `${tk.req} lượt`;
+  $('kSave').textContent = fmtUsd(sv.cost);
+  // hôm nay: dự phóng cả tháng; khoảng dài hơn: trung bình mỗi ngày
+  const nd = RNG.save === '7d' ? 7 : RNG.save === '30d' ? 30 : days;
+  $('kSaveSub').textContent = RNG.save === 'today' ? `tháng này ~${fmtUsd(pj.month_cost)}` : `TB ${fmtUsd(sv.cost / nd)}/ngày`;
   const L = u.latency || {}, sec = (ms) => (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's';
   $('kLat').textContent = L.p50_ms != null ? sec(L.p50_ms) : '—';
   $('kLatSub').textContent = L.n ? `p90 ${L.p90_ms != null ? sec(L.p90_ms) : '—'} · ${L.n} lượt` + (L.err ? ` · ${L.err} lỗi` : '') : 'chưa có lượt nào';
@@ -868,13 +918,20 @@ function renderUsage(u) {
   for (const [name, a] of [['hôm nay', u.today], ['7 ngày', u.d7], ['30 ngày', u.d30]]) {
     const tr = el('tr'); tr.append(el('td', null, name), el('td', 'r', fmtTok(a.tokens)), el('td', 'r', fmtUsd(a.cost))); cb.append(tr);
   }
-  $('pLine').textContent = `${pr.model} · in $${pr.miss[0]} · out $${pr.out[0]} /1M` + (pr.source === 'live' ? '' : ' · giá dự phòng');
+  $('pLine').textContent = `${pr.model} · in ${fmtPrice(pr.miss[0])} · out ${fmtPrice(pr.out[0])} /1M` + (pr.source === 'live' ? '' : ' · giá dự phòng');
   $('pLine').className = 'sub' + (pr.source === 'live' ? '' : ' bad');
 
-  const h = u.hours;
-  drawBars($('bars24'), h.map((x) => ({input: x.input, output: x.output, cached: x.cached, peak: x.peak, cost: x.cost, title: hh(x.t) + ':00'})));
-  const ax = $('axis24'); ax.textContent = ''; h.forEach((x, i) => ax.append(el('span', null, i % 3 === 0 ? hh(x.t) : '')));
-  $('h24sum').textContent = fmtTok(h.reduce((a, x) => a + x.input + x.output, 0));
+  const dm = (t) => { const d = new Date((t + (u.tz || 0)) * 1000); return String(d.getUTCDate()).padStart(2, '0') + '/' + String(d.getUTCMonth() + 1).padStart(2, '0'); };
+  let rows;
+  if (RNG.chart === '24h') rows = u.hours.map((x) => ({input: x.input, output: x.output, cached: x.cached, peak: x.peak, cost: x.cost, title: hh(x.t) + ':00', lab: hh(x.t)}));
+  else {
+    const all = u.daily || [], n = RNG.chart === '7d' ? 7 : RNG.chart === '30d' ? 30 : all.length;
+    rows = all.slice(-n).map((x) => ({input: x.input || 0, output: x.output || 0, cached: x.cached || 0, peak: false, cost: x.cost, title: dm(x.t), lab: dm(x.t)}));
+  }
+  drawBars($('bars24'), rows);
+  const step = RNG.chart === '24h' ? 3 : Math.max(1, Math.ceil(rows.length / 8));
+  const ax = $('axis24'); ax.textContent = ''; rows.forEach((x, i) => ax.append(el('span', null, i % step === 0 ? x.lab : '')));
+  $('h24sum').textContent = fmtTok(rows.reduce((a, x) => a + x.input + x.output, 0));
 }
 
 async function loadStats() {
@@ -1381,6 +1438,9 @@ function logAdd(l) {
   if (LOG.stick) logBottom(false); else $('logJump').style.display = 'block';
 }
 function logBottom(force) { const b = $('logBody'); if (force) LOG.stick = true; if (LOG.stick) { b.scrollTop = b.scrollHeight; $('logJump').style.display = 'none'; } }
+/// Đổi ngôn ngữ: vẽ lại phần có tiền để đổi đơn vị ($ / ¥ / ₫) ngay.
+function onLangChange() { try { if (window.__lastUsage) renderUsage(window.__lastUsage); } catch (e) {} }
+
 function openLog() {
   openModal('logModal'); if (LOG.es) return;
   LOG.lines = []; logRender();

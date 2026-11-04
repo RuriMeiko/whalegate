@@ -10,6 +10,8 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 
+<p align="center"><b>English</b> · <a href="README.vi.md">Tiếng Việt</a> · <a href="README.zh-CN.md">简体中文</a></p>
+
 **whalegate** turns your own `chat.deepseek.com` web sessions into a standard OpenAI-style `/v1/chat/completions` endpoint. It pools several accounts, fails over between them, streams over SSE, reads images, and translates OpenAI `tools` to and from DeepSeek's DSML format. Agents like Cline, Continue, LiteLLM, the OpenAI SDKs and `dsh` can use it as if it were the real API.
 
 > [!WARNING]
@@ -197,26 +199,33 @@ systemctl --user daemon-reload && systemctl --user enable --now whalegate
 
 Accounts are stored in `~/.whalegate/accounts.json`, which you can override with `DS_ACCOUNTS_PATH`. Upgrading from ds-harness moves `~/.ds-harness` there automatically. That file holds **live session tokens**: never commit or share it.
 
-Every account is one "machine" to DeepSeek: a TLS/HTTP2 fingerprint (a real Chrome/Edge build emulated by wreq), a user agent, a device id, cookies, a timezone and languages. All of these stay fixed for the life of the account, because a live session suddenly showing up on a different machine is exactly what gets flagged. There are four ways to add an account (tabs in **+ Thêm**), and they differ in *which* machine the account lives on.
+Every account is one "machine" to DeepSeek: a TLS/HTTP2 fingerprint (a real Chrome/Edge build emulated by wreq), a user agent, a device id, cookies, a timezone and languages. All of these stay fixed for the life of the account, because a live session suddenly showing up on a different machine is exactly what gets flagged. There are four ways to add an account (the tabs in **+ Thêm**, in this order), and they differ in *which* machine the account lives on.
 
 | | Machine the account uses | Cookie refresh |
 |---|---|---|
-| **Extension** | Your own browser, with every cookie including HttpOnly ones | Click the extension again on a DeepSeek tab |
+| **Dedicated Chrome** | A new dedicated Chrome with its own generated fingerprint and profile | Automatic, every `DS_DEVICE_REFRESH_HOURS` (default 6h) |
 | **Bookmarklet** | Your own browser; `ds_session_id` is whalegate's own, not the browser's | Click the bookmarklet again on a DeepSeek tab |
-| **Chrome login** | A new dedicated Chrome with its own generated fingerprint and profile | Automatic, every `DS_DEVICE_REFRESH_HOURS` (default 6h) |
-| **Paste a token** | Derived from the token (fixed, but not a real browser) | None |
+| **Extension** | Your own browser, with every cookie including HttpOnly ones | Click the extension again on a DeepSeek tab |
+| **Paste a token** (legacy) | Derived from the token (fixed, but not a real browser) | None |
 
-### Option 1: browser extension (recommended)
+### Option 1: dedicated Chrome (recommended)
 
-The extension does what the bookmarklet does, and also reads HttpOnly cookies such as `ds_session_id`. A page's own JavaScript can never read those, but an extension with the `cookies` permission can, just as CDP does for Chrome login.
+```mermaid
+flowchart LR
+    A["Dashboard → Chrome riêng:<br/>Mở cửa sổ riêng để đăng nhập / đăng ký"] --> B["New seed → new fingerprint<br/>+ profile ~/.whalegate/profiles/&lt;seed&gt;"]
+    B --> C["Dedicated Chrome on a random<br/>CDP port, fingerprint applied to every tab"]
+    C --> D["You sign in<br/>(Google / email / passkey)"]
+    D --> E["Gateway watches the tab (up to 10 min)<br/>→ token + device id + cookies"]
+    E --> F["Save, close Chrome<br/>(profile is kept)"]
+    F --> G["Every DS_DEVICE_REFRESH_HOURS:<br/>reopen that Chrome headless → fresh cookies"]
+```
 
-> **About `ds_session_id`.** It is `HttpOnly; Secure; SameSite=Strict` with no expiry. DeepSeek's web server sets it on the first response outside `/api` (the favicon or a page) when the request does not carry one; `/api/v0/*` never sets it. Signing in with Google issues a new one, because the strict cookie is not sent when Google redirects back. Accounts added by bookmarklet or pasted token cannot read the browser's value, so whalegate gets its own the same way a browser does: one `GET /favicon.ico` through the account's client when the account is added, and once at startup for older accounts that lack it.
-
-1. In **+ Thêm → Tiện ích**, click **Tải tiện ích** and unzip it. The download already points at the dashboard you opened it from.
-2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the unzipped `whalegate-extension` folder.
-3. On a logged-in `chat.deepseek.com` tab, click the whalegate icon. The account is added (or refreshed, if it is already in the pool), and the result shows on the DeepSeek tab.
-
-The extension can read cookies only on `chat.deepseek.com` and talk only to the dashboard's host. It sends the token, device id, cookies and browser profile straight to `/api/accounts`, the same request the bookmarklet makes.
+- Log in **or sign up** right in that window. A brand-new DeepSeek account works too: the gateway only waits for the tab to get a token. This is the recommended way to log in with a password, because nothing is typed into the dashboard. The dashboard also has a collapsed **Tự điền email + mật khẩu** option that fills the form for you; it is less reliable because DeepSeek's login page changes.
+- Closing the window before you sign in cancels the login. Only one login window can be open at a time.
+- Under systemd the gateway picks up `DISPLAY` / `WAYLAND_DISPLAY` from the user session so the window can open.
+- If the same DeepSeek user logs in again, the existing account's token is replaced rather than duplicated. The account moves to the new Chrome device, and any bookmarklet profile it had is dropped.
+- The **thiết bị** button on an account refreshes its device cookies right away.
+- **Quét Chrome chính** (in the Chrome riêng tab) captures every logged-in `chat.deepseek.com` tab from a Chrome started with `--remote-debugging-port=9333`. Since Chrome 136 that flag is ignored for the default profile, so it only works with a separate `--user-data-dir`; for your everyday Chrome, use the extension instead.
 
 ### Option 2: bookmarklet
 
@@ -245,25 +254,19 @@ The bundle never touches the URL, browser history or the network: it goes tab-to
 
 If the bookmarklet can't run, the same collector is available under **Dán token**: copy the console command, run it in the DevTools console of the DeepSeek tab, and paste the result.
 
-### Option 3: Chrome login
+### Option 3: browser extension
 
-```mermaid
-flowchart LR
-    A["Dashboard:<br/>Đăng nhập qua Chrome"] --> B["New seed → new fingerprint<br/>+ profile ~/.whalegate/profiles/&lt;seed&gt;"]
-    B --> C["Dedicated Chrome on a random<br/>CDP port, fingerprint applied to every tab"]
-    C --> D["You sign in<br/>(Google / email / passkey)"]
-    D --> E["Gateway watches the tab (up to 10 min)<br/>→ token + device id + cookies"]
-    E --> F["Save, close Chrome<br/>(profile is kept)"]
-    F --> G["Every DS_DEVICE_REFRESH_HOURS:<br/>reopen that Chrome headless → fresh cookies"]
-```
+The extension does what the bookmarklet does, and also reads HttpOnly cookies such as `ds_session_id`. A page's own JavaScript can never read those, but an extension with the `cookies` permission can, just as CDP does for Chrome login.
 
-- Closing the window before you sign in cancels the login. Only one login window can be open at a time.
-- Under systemd the gateway picks up `DISPLAY` / `WAYLAND_DISPLAY` from the user session so the window can open.
-- If the same DeepSeek user logs in again, the existing account's token is replaced rather than duplicated. The account moves to the new Chrome device, and any bookmarklet profile it had is dropped.
-- The **thiết bị** button on an account refreshes its device cookies right away.
-- **Quét Chrome chính** (in the Chrome riêng tab) captures every logged-in `chat.deepseek.com` tab from a Chrome started with `--remote-debugging-port=9333`. Since Chrome 136 that flag is ignored for the default profile, so it only works with a separate `--user-data-dir`; for your everyday Chrome, use the extension instead.
+> **About `ds_session_id`.** It is `HttpOnly; Secure; SameSite=Strict` with no expiry. DeepSeek's web server sets it on the first response outside `/api` (the favicon or a page) when the request does not carry one; `/api/v0/*` never sets it. Signing in with Google issues a new one, because the strict cookie is not sent when Google redirects back. Accounts added by bookmarklet or pasted token cannot read the browser's value, so whalegate gets its own the same way a browser does: one `GET /favicon.ico` through the account's client when the account is added, and once at startup for older accounts that lack it.
 
-### Option 4: paste a token
+1. In **+ Thêm → Tiện ích**, click **Tải tiện ích** and unzip it. The download already points at the dashboard you opened it from.
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the unzipped `whalegate-extension` folder.
+3. On a logged-in `chat.deepseek.com` tab, click the whalegate icon. The account is added (or refreshed, if it is already in the pool), and the result shows on the DeepSeek tab.
+
+The extension can read cookies only on `chat.deepseek.com` and talk only to the dashboard's host. It sends the token, device id, cookies and browser profile straight to `/api/accounts`, the same request the bookmarklet makes.
+
+### Option 4: paste a token (legacy)
 
 On a logged-in `chat.deepseek.com` tab, open DevTools → Console and run:
 
@@ -536,7 +539,7 @@ Use `socks5h` rather than `socks5` when you can: it lets the proxy resolve DNS, 
 Open `http://127.0.0.1:8790/`. It is loopback-only.
 
 - **Accounts:** add, verify, reset, edit label or token, enable/disable in the pool, bulk verify/reset, and duplicate-user detection. **Verify** is not just an auth check: it sends one minimal real completion on a throwaway session, because a throttled account still passes the auth endpoint. The result is alive, throttled, auth_dead or unknown, and only alive clears a throttle label.
-- **Usage:** tokens per hour (cache miss / cache hit / output), and what the same traffic would cost on the official API. Prices are fetched live every 6h from DeepSeek's pricing page, peak hours are included, and there is a monthly projection. Data lives in `usage.json` next to `accounts.json`.
+- **Usage:** tokens per hour (cache miss / cache hit / output), and what the same traffic would cost on the official API, shown in $ (English), ¥ (Chinese) or ₫ (Vietnamese) using the rates in **Settings → Display**. Prices are fetched live every 6h from DeepSeek's pricing page, peak hours are included, and there is a monthly projection. Click the **Tokens**, **Saved** or chart label to switch between today / 7 days / 30 days / all time (the choice is remembered). Data lives in `usage.json` next to `accounts.json`.
 - **Latency:** p50/p90 over the last hour, plus the error count.
 - **Live logs:** SSE stream with filters and search. Useful tags include `[toolcall-invalid]`, `[toolcall-unparsed]`, `[conv]`, `[ds-stall]` and `[ds-fail]`.
 - **Settings:** verified knobs only. Saving waits until no request is in flight, then the process re-execs itself (same PID, picks up a new build) and the page reloads. **Hard reset** restarts immediately.
@@ -599,6 +602,8 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | ⚙️ `DS_PROMPT_MAX_CHARS` | `1822000` | Over budget: trim old tool results first, then drop the oldest turns |
 | ⚙️ `DS_MAX_CONC_PER_ACC` | `2` | In-flight requests per account. More than 2 tends to get rate-limited |
 | ⚙️ `DS_TZ_OFFSET` | `25200` | Timezone offset in seconds sent to the web app and used for daily stats |
+| ⚙️ `DS_FX_CNY` | `720` | Exchange rate for the dashboard in Chinese, in units of 0.01 ¥ per USD (`720` = 7.20 ¥). Costs are computed in USD and converted for display |
+| ⚙️ `DS_FX_VND` | `26000` | Exchange rate for the dashboard in Vietnamese: dong per USD |
 | ⚙️ `DS_PROXY_MODE` | `off` | Egress IP per account: `off` direct · `auto` use proxies when available, fall back to direct · `strict` fail instead of leaking the real IP |
 | ⚙️ `DS_PROXY_LIST` | – | Proxy list, one per line: `scheme://[user:pass@]host:port` with `http`, `https`, `socks5` or `socks5h` |
 | `DS_PROXY_FILE` | `~/.whalegate/proxies.txt` | Proxy list file (same format, `#` comments allowed) |
