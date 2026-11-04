@@ -834,7 +834,14 @@ fn run_chat(st: Arc<AppState>, ctx: ChatCtx, lease0: Lease) -> impl Stream<Item 
                             }
                         }
                         match res {
-                            Ok(id) => { st.file_cache.lk().insert(key, id.clone()); file_ids.push(id); }
+                            Ok(id) => {
+                                let mut fc = st.file_cache.lk();
+                                // chặn phình vô hạn: chỉ là cache tránh upload lại, xoá sạch khi quá ngưỡng là đủ
+                                if fc.len() >= 4096 { fc.clear(); }
+                                fc.insert(key, id.clone());
+                                drop(fc);
+                                file_ids.push(id);
+                            }
                             Err(e) => { up_err = Some(e); break; }
                         }
                     }

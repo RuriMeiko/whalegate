@@ -381,10 +381,13 @@ pub(crate) async fn write_store_atomic_pub(store: &Store) -> Result<()> {
 }
 
 async fn write_store_atomic(store: &Store) -> Result<()> {
+    write_store_bytes(serde_json::to_vec_pretty(store)?).await
+}
+
+async fn write_store_bytes(json: Vec<u8>) -> Result<()> {
     let path = std::path::PathBuf::from(creds_path());
     let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
     tokio::fs::create_dir_all(&dir).await?;
-    let json = serde_json::to_vec_pretty(store)?;
     let tmp = dir.join(format!(".accounts.json.tmp-{}", std::process::id()));
     {
         let mut f = tokio::fs::File::create(&tmp).await?;
@@ -410,8 +413,12 @@ pub(crate) async fn flush_store(st: &Arc<AppState>) {
     if ver <= st.store_written.load(std::sync::atomic::Ordering::Acquire) {
         return;
     }
-    let snap = st.store.read().await.clone();
-    match write_store_atomic(&snap).await {
+    // serialize ngay dưới read lock (không clone cả Store), nhả lock trước khi ghi file
+    let json = match serde_json::to_vec_pretty(&*st.store.read().await) {
+        Ok(j) => j,
+        Err(e) => { crate::elog!("[store] serialize accounts.json lỗi: {:#}", e); return; }
+    };
+    match write_store_bytes(json).await {
         Ok(()) => st.store_written.store(ver, std::sync::atomic::Ordering::Release),
         Err(e) => crate::elog!("[store] ghi accounts.json lỗi: {:#}", e),
     }

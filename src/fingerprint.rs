@@ -18,6 +18,25 @@ const BROWSERS: &[(Profile, u32, bool)] = &[
     (Profile::Edge142, 142, true), (Profile::Edge144, 144, true),
 ];
 
+/// Bản đã kiểm sec-ch-ua (test `brand_list_matches_chromium_grease_for_versions_seen_in_wreq`) nhưng ra sau BROWSERS.
+/// Tách riêng vì BROWSERS là bảng chọn của seed v1: đổi độ dài của nó sẽ đổi trình duyệt của mọi acc cũ.
+const BROWSERS_EXTRA: &[(Profile, u32, bool)] = &[(Profile::Edge147, 147, true), (Profile::Edge148, 148, true)];
+
+/// Bảng chọn cho seed v2 (acc mới): dồn về bản mới như lưu lượng thật, thay vì chia đều cả 10 bản.
+/// Lặp một mục = tăng trọng số. Tỉ lệ ~ Chrome 149: 40%, 148: 25%, 147: 10%, Edge 148: 15%, Edge 147: 10%.
+const BROWSERS_V2: &[(Profile, u32, bool)] = &[
+    (Profile::Chrome149, 149, false), (Profile::Chrome149, 149, false), (Profile::Chrome149, 149, false), (Profile::Chrome149, 149, false),
+    (Profile::Chrome149, 149, false), (Profile::Chrome149, 149, false), (Profile::Chrome149, 149, false), (Profile::Chrome149, 149, false),
+    (Profile::Chrome148, 148, false), (Profile::Chrome148, 148, false), (Profile::Chrome148, 148, false), (Profile::Chrome148, 148, false),
+    (Profile::Chrome148, 148, false),
+    (Profile::Chrome147, 147, false), (Profile::Chrome147, 147, false),
+    (Profile::Edge148, 148, true), (Profile::Edge148, 148, true), (Profile::Edge148, 148, true),
+    (Profile::Edge147, 147, true), (Profile::Edge147, 147, true),
+];
+
+/// Tiền tố seed của cách dẫn xuất v2. Seed không có tiền tố (acc cũ, hoặc token làm seed) giữ nguyên cách v1.
+const SEED_V2: &str = "v2:";
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Os { Windows, Mac, Linux }
 
@@ -126,7 +145,7 @@ pub fn device_for(token: &str) -> Option<String> {
     DEVICES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).get(token).cloned()
 }
 
-pub fn new_seed() -> String { uuid::Uuid::new_v4().to_string() }
+pub fn new_seed() -> String { format!("{SEED_V2}{}", uuid::Uuid::new_v4()) }
 
 struct Rng(u64);
 impl Rng {
@@ -192,7 +211,7 @@ fn chrome_major(ua: &str) -> Option<u32> {
 /// ngẫu nhiên: JA3/JA4 và sec-ch-ua chỉ đổi giữa các bản lớn.
 fn pick_profile_for(major: u32, edge: bool) -> Option<(Profile, u32, bool)> {
     let mut best: Option<(Profile, u32, bool)> = None;
-    for &(p, m, e) in BROWSERS {
+    for &(p, m, e) in BROWSERS.iter().chain(BROWSERS_EXTRA) {
         if e != edge {
             continue;
         }
@@ -258,6 +277,15 @@ impl Fingerprint {
         }
     }
 
+    /// x-client-locale: web lấy theo ngôn ngữ giao diện. Acc có danh sách ngôn ngữ thật (bookmarklet) dùng ngôn ngữ đầu
+    /// (`en-US` → `en_US`); còn lại `vi`, khớp accept-language mặc định "vi,en-US;…" bên dưới.
+    pub fn client_locale(&self) -> String {
+        match self.langs.as_ref().and_then(|l| l.first()) {
+            Some(l) => l.replace('-', "_"),
+            None => "vi".into(),
+        }
+    }
+
     /// Accept-Language như Chromium dựng từ danh sách ngôn ngữ: chèn ngôn ngữ gốc sau nhóm biến thể
     /// (`en-US` → thêm `en`), q giảm 0.1 mỗi mục, tối thiểu 0.1.
     pub fn accept_language(&self) -> String {
@@ -277,7 +305,7 @@ impl Fingerprint {
 
     pub fn from_seed(seed: &str) -> Self {
         let mut r = Rng::new(seed);
-        let (profile, major, edge) = r.pick(BROWSERS);
+        let (profile, major, edge) = r.pick(if seed.starts_with(SEED_V2) { BROWSERS_V2 } else { BROWSERS });
         let os = r.pick(&[Os::Windows, Os::Windows, Os::Windows, Os::Mac, Os::Linux]);
         let (gpu_vendor, gpu_renderer) = match os {
             Os::Windows => r.pick(WIN_GPU),
@@ -602,6 +630,8 @@ mod tests {
         assert_eq!(f(149, false), r#""Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24""#);
         assert_eq!(f(142, true), r#""Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99""#);
         assert_eq!(f(144, true), r#""Not(A:Brand";v="8", "Chromium";v="144", "Microsoft Edge";v="144""#);
+        assert_eq!(f(147, true), r#""Microsoft Edge";v="147", "Not.A/Brand";v="8", "Chromium";v="147""#);
+        assert_eq!(f(148, true), r#""Chromium";v="148", "Microsoft Edge";v="148", "Not/A)Brand";v="99""#);
     }
 
     #[test]
@@ -678,14 +708,14 @@ mod tests {
         let f = Fingerprint::from_profile(&p, "t");
         assert_eq!(f.profile, Profile::Chrome149);
         assert_eq!(f.major, 149);
-        // Edge 146 → Edge144 và UA ghi Edg/144
+        // Edge 146 → Edge147 (gần nhất; trước khi có BROWSERS_EXTRA là Edge144) và UA ghi Edg/147
         let p = BrowserProfile {
             user_agent: Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0".into()),
             ..Default::default()
         };
         let f = Fingerprint::from_profile(&p, "t");
-        assert_eq!((f.profile, f.major, f.edge), (Profile::Edge144, 144, true));
-        assert!(f.user_agent().ends_with("Edg/144.0.0.0"));
+        assert_eq!((f.profile, f.major, f.edge), (Profile::Edge147, 147, true));
+        assert!(f.user_agent().ends_with("Edg/147.0.0.0"));
     }
 
     #[test]
@@ -711,5 +741,36 @@ mod tests {
                 assert!(!js.contains(ph), "còn placeholder {ph}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod seed_v2_tests {
+    use super::*;
+
+    #[test]
+    fn old_seeds_keep_their_browser_new_seeds_lean_new() {
+        // seed v1 (không tiền tố) vẫn chọn từ BROWSERS như trước — acc cũ không đổi "máy"
+        for i in 0..200 {
+            let s = format!("legacy-{i}");
+            let mut r = Rng::new(&s);
+            let want = r.pick(BROWSERS);
+            assert_eq!(Fingerprint::from_seed(&s).major, want.1);
+        }
+        let n = 2000;
+        let new: Vec<_> = (0..n).map(|_| Fingerprint::from_seed(&new_seed())).collect();
+        assert!(new.iter().all(|f| f.major >= 147));
+        let c149 = new.iter().filter(|f| f.major == 149 && !f.edge).count();
+        assert!(c149 > n * 30 / 100 && c149 < n * 50 / 100, "{c149}");
+        assert!(new.iter().any(|f| f.edge && f.major == 148));
+    }
+
+    #[test]
+    fn locale_follows_browser_languages() {
+        let mut f = Fingerprint::from_seed("x");
+        assert_eq!(f.client_locale(), "vi");
+        f.langs = Some(vec!["en-US".into(), "en".into()]);
+        assert_eq!(f.client_locale(), "en_US");
+        assert!(f.accept_language().starts_with("en-US"));
     }
 }

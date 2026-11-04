@@ -25,6 +25,9 @@ fn read_timeout_secs() -> u64 {
     })
 }
 
+/// Phiên bản web DeepSeek mà mọi request giả lập (header x-client-version). Một chỗ duy nhất: web lên bản mới thì sửa ở đây.
+pub(crate) const WEB_VERSION: &str = "2.7.0";
+
 /// Giải PoW trên blocking pool: đây là CPU-bound (có thể vài trăm ms) — chạy thẳng trong
 /// async fn sẽ chặn tokio worker và làm chậm mọi request khác đang cùng runtime.
 async fn solve_pow_async(challenge_hex: String, salt: String, expire_at: u64, difficulty: u64) -> Option<u64> {
@@ -106,6 +109,8 @@ pub struct DsClient {
     /// x-client-timezone-offset / accept-language của acc: acc bookmarklet mang giá trị thật của trình duyệt gốc
     tz_offset: String,
     accept_language: String,
+    /// x-client-locale, cùng nguồn với accept-language
+    locale: String,
     /// `shumei_device_id` web gửi kèm completion/continue: "B" + giải mã cookie `.thumbcache_*` (SDK Shumei đặt, đổi mỗi lần tải trang)
     shumei_id: Option<String>,
 }
@@ -333,10 +338,10 @@ impl DsClient {
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-site")
             .header("x-client-bundle-id", "com.deepseek.chat")
-            .header("x-client-locale", "vi")
+            .header("x-client-locale", &self.locale)
             .header("x-client-platform", "web")
             .header("x-client-timezone-offset", &self.tz_offset)
-            .header("x-client-version", "2.7.0")
+            .header("x-client-version", WEB_VERSION)
             .timeout(t3)
             .send().await.ok()?;
         let ttl = resp.headers().get("x-hif-ttl").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(600);
@@ -426,7 +431,7 @@ impl DsClient {
         let device_id = crate::fingerprint::device_for(&token).unwrap_or_else(|| device_id_for(&crate::fingerprint::seed_for(&token)));
         let fp = crate::fingerprint::Fingerprint::for_token(&token);
         let shumei_id = shumei_id_from_cookies(&cookies);
-        Ok(Self { http, token, device_id, tz_offset: fp.tz_offset_header(), accept_language: fp.accept_language(), shumei_id })
+        Ok(Self { http, token, device_id, tz_offset: fp.tz_offset_header(), accept_language: fp.accept_language(), locale: fp.client_locale(), shumei_id })
     }
 
     /// Bảo đảm acc có `ds_session_id` như trình duyệt thật. Cookie này HttpOnly (bookmarklet không đọc được) và chỉ
@@ -475,8 +480,8 @@ impl DsClient {
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-origin")
             .header("x-client-platform", "web")
-            .header("x-client-version", "2.7.0")
-            .header("x-client-locale", "vi")
+            .header("x-client-version", WEB_VERSION)
+            .header("x-client-locale", &self.locale)
             .header("x-client-bundle-id", "com.deepseek.chat")
             .header("x-client-timezone-offset", &self.tz_offset)
             .header("x-device-model", "")
@@ -546,7 +551,7 @@ impl DsClient {
         let (w, h) = (fp.avail.0, fp.avail.1.saturating_sub(80));
         let body = serde_json::json!({
             "events": [{"event_name": "loadRemoteFeaturesSuccess", "event_params": {
-                "__appVersion": "2.7.0", "__commitId": "26090614", "__runtimeSessionId": session,
+                "__appVersion": WEB_VERSION, "__commitId": "26090614", "__runtimeSessionId": session,
                 "storageKey": key, "__windowWidth": w, "__windowHeight": h, "__documentHidden": "false",
                 "event_level": "info", "event_message": "成功加载并存储远程规则"}}],
             "extra": {"uid": uid, "ds_did": did}
@@ -1250,10 +1255,12 @@ async fn pump(resp: wreq::Response, st: &mut SseState, tx: &Tx, stats: &mut Pump
             }
         }
         // xử lý từng dòng hoàn chỉnh
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].trim_end_matches('\r').to_string();
-            let rest = buf[pos + 1..].to_string();
-            buf = rest;
+        // duyệt bằng con trỏ `start`, cắt buf một lần sau vòng lặp (trước đây mỗi dòng chép lại cả phần còn lại → O(n²) theo số dòng/chunk)
+        let mut start = 0;
+        while let Some(off) = buf[start..].find('\n') {
+            let pos = start + off;
+            let line = buf[start..pos].trim_end_matches('\r');
+            start = pos + 1;
             if line.starts_with("data: ") {
                 stats.sse_chars += line.chars().count() + 1;
                 if stats.raw_head.len() < RAW_KEEP { stats.raw_head.push_str(&line); stats.raw_head.push('\n'); }
@@ -1263,8 +1270,9 @@ async fn pump(resp: wreq::Response, st: &mut SseState, tx: &Tx, stats: &mut Pump
                 if stats.tail.len() >= 25 { stats.tail.pop_front(); }
                 stats.tail.push_back(line.chars().take(300).collect());
             }
-            st.handle_line(&line, tx);
+            st.handle_line(line, tx);
         }
+        buf.drain(..start);
     }
 }
 

@@ -71,7 +71,7 @@ struct Session {
 /// TLS/HTTP2/UA/sec-ch-ua, jar giữ ds_session_id + cookie WAF.
 fn build_session(mut st: RegState) -> Result<Session> {
     if st.fp_seed.is_empty() {
-        st.fp_seed = uuid::Uuid::new_v4().to_string();
+        st.fp_seed = crate::fingerprint::new_seed();
     }
     if st.did.is_empty() {
         st.did = uuid::Uuid::new_v4().to_string();
@@ -126,11 +126,13 @@ impl Session {
     }
 
     fn base_headers(&self) -> Vec<(&'static str, String)> {
+        // cùng một "máy" với lúc chat sau này: locale / múi giờ / ngôn ngữ lấy từ vân tay của seed, không cố định
+        let fp = crate::fingerprint::Fingerprint::for_token(&self.state.fp_seed);
         vec![
             ("origin", ORIGIN.into()),
             ("referer", format!("{}/sign_up", ORIGIN)),
             ("accept", "*/*".into()),
-            ("accept-language", "en-US,en;q=0.9".into()),
+            ("accept-language", fp.accept_language()),
             ("sec-fetch-dest", "empty".into()),
             ("sec-fetch-mode", "cors".into()),
             ("sec-fetch-site", "same-origin".into()),
@@ -138,9 +140,9 @@ impl Session {
             ("x-device-model", String::new()),
             ("x-client-bundle-id", "com.deepseek.chat".into()),
             ("x-client-platform", "web".into()),
-            ("x-client-version", "2.7.0".into()),
-            ("x-client-locale", "en_US".into()),
-            ("x-client-timezone-offset", "25200".into()),
+            ("x-client-version", crate::client::WEB_VERSION.into()),
+            ("x-client-locale", fp.client_locale()),
+            ("x-client-timezone-offset", fp.tz_offset_header()),
         ]
     }
 
