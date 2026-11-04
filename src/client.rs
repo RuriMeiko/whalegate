@@ -855,6 +855,9 @@ pub async fn chat_stream(
     use tokio::sync::mpsc;
 
     let t_req = std::time::Instant::now(); // mốc từ lúc nhận request (tạo session + PoW + chờ header đều tính)
+    // Luồng nền "giống web" (settings/telemetry) tính acc đang dùng theo MỖI request, không chỉ lúc tạo session mới:
+    // acc chỉ chạy nối tiếp trong phiên cũ vẫn phải được giữ vòng nền, và vòng chỉ dừng khi acc thật sự nghỉ.
+    self.web_boot_in_background();
     let sid = match session_id {
         Some(s) => s.to_string(),
         None => self.create_session().await?,

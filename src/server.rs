@@ -104,9 +104,25 @@ pub struct Account {
     /// đứng ngoài lịch chọn tới khi có token mới (đăng nhập lại, bookmarklet, sửa token) hoặc verify thấy sống lại.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_dead_at: Option<u64>,
+    /// Cách acc được nối vào whalegate lần gần nhất: "chrome" (Chrome riêng) | "scan" (quét Chrome chính) | "bookmarklet" |
+    /// "extension" | "paste" | "register" (đăng ký bằng CLI). None = acc cũ, suy ra từ dữ liệu có sẵn (xem `login_method_effective`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_method: Option<String>,
+}
+
+/// Chỉ nhận các giá trị đã biết từ client (tiện ích / bookmarklet / dán tay).
+fn clean_via(v: &Option<String>) -> Option<String> {
+    v.as_deref().map(str::trim).filter(|x| matches!(*x, "bookmarklet" | "extension" | "paste")).map(str::to_string)
 }
 
 impl Account {
+    /// Phương thức hiển thị: giá trị đã lưu, hoặc suy ra cho acc cũ — có `browser` = trình duyệt gốc (bookmarklet hoặc
+    /// tiện ích, không phân biệt được), có `fp_seed` = Chrome riêng, còn lại = dán token.
+    pub(crate) fn login_method_effective(&self) -> &str {
+        if let Some(m) = self.login_method.as_deref() { return m; }
+        if self.browser.is_some() { "browser" } else if self.fp_seed.is_some() { "chrome" } else { "paste" }
+    }
+
     pub(crate) fn set_auth_dead(&mut self) {
         if self.auth_dead_at.is_none() { self.auth_dead_at = Some(now()); }
         self.last_status = Some("DeepSeek đã đăng xuất token này (40003) — cần đăng nhập lại".into());
@@ -678,6 +694,9 @@ struct AddAccount {
     /// Có gói này thì acc dùng đúng máy đó; không có thì như acc dán token cũ (vân tay dẫn xuất từ token).
     #[serde(default)]
     browser: Option<crate::fingerprint::BrowserProfile>,
+    /// Cách thêm: "extension" | "bookmarklet" | "paste" (client tự khai; giá trị lạ bị bỏ)
+    #[serde(default)]
+    via: Option<String>,
 }
 
 /// Nhận token dán tay từ `localStorage.userToken`: JSON `{"value":"…","__version":"0"}`, chuỗi có nháy, `Bearer …` hoặc token trần.
@@ -711,6 +730,7 @@ async fn api_add_account(
     Json(mut p): Json<AddAccount>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     p.token = normalize_token(&p.token);
+    let via = clean_via(&p.via);
     if p.token.len() < 20 || p.token.chars().any(|c| c.is_whitespace()) {
         return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "không đọc được token — dán đúng giá trị localStorage.userToken"}))));
     }
@@ -774,6 +794,7 @@ async fn api_add_account(
         }
         let old_token = a.token.clone();
         let token_changed = apply_readd(a, p.token.clone(), p.cookies, browser, uid, p.label.trim());
+        if via.is_some() { a.login_method = via.clone(); }
         // registry vân tay: token cũ bỏ, token mới gắn theo đúng acc (kể cả khi lần verify đã gắn tạm thứ khác)
         if token_changed { crate::fingerprint::unbind(&old_token); crate::client::forget(&old_token); }
         crate::fingerprint::unbind(&a.token);
@@ -808,6 +829,7 @@ async fn api_add_account(
         device_refreshed_at: None,
         browser,
         auth_dead_at: None,
+        login_method: via,
     };
     let id = acc.id.clone();
     store.accounts.push(acc);
@@ -2701,6 +2723,8 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "fail_streak": a.stats.fail_streak,
                 "id": a.id,
                 "label": a.label,
+                "login_method": a.login_method_effective(),
+                "login_method_known": a.login_method.is_some(),
                 "available": a.auth_dead_at.is_none() && a.stats.available(now),
                 "cooldown_until": a.stats.cooldown_until,
                 "cooldown_left_secs": a.stats.cooldown_until.saturating_sub(now),
@@ -2849,6 +2873,7 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                         a.clear_auth_dead();
                         a.stats.reset();
                         a.thread_session_id = None;
+                        a.login_method = Some("scan".into());
                         refreshed += 1;
                     } else {
                         let acc = Account {
@@ -2870,6 +2895,7 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                             device_refreshed_at: None,
                             browser: None,
                             auth_dead_at: None,
+                            login_method: Some("scan".into()),
                         };
                         emails.push(s.email.clone().unwrap_or_else(|| "unknown".into()));
                         store.accounts.push(acc);
@@ -3040,6 +3066,7 @@ async fn login_auto_flow(
                 device_refreshed_at: session.fp_seed.as_ref().map(|_| now()),
                 browser: None,
                 auth_dead_at: None,
+                login_method: Some("chrome".into()),
             });
         }
     }
@@ -3216,6 +3243,7 @@ fn adopt_chrome_device(a: &mut Account, session: &crate::chrome_capture::Capture
     a.device_id = session.device_id.clone();
     a.device_refreshed_at = Some(now());
     a.browser = None;
+    a.login_method = Some("chrome".into());
     crate::fingerprint::unbind(&a.token);
     crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
     crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
@@ -3275,6 +3303,7 @@ async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capt
                 device_refreshed_at: session.fp_seed.as_ref().map(|_| now()),
                 browser: None,
                 auth_dead_at: None,
+                login_method: Some("chrome".into()),
             };
             store.accounts.push(acc);
         }
@@ -4298,5 +4327,49 @@ mod version_ui_tests {
         let v = env!("CARGO_PKG_VERSION");
         assert!(html.contains(&format!(">v{}</a>", v)));
         assert!(html.contains(&format!("/releases/tag/v{}", v)));
+    }
+}
+
+#[cfg(test)]
+mod login_method_tests {
+    use super::*;
+
+    fn base() -> Account {
+        serde_json::from_value(json!({"id": "x", "label": "x", "token": "t".repeat(24), "cookies": {}, "added_at": 0,
+            "last_verified": null, "last_status": null, "thread_session_id": null, "thread_parent_message_id": null})).unwrap()
+    }
+
+    #[test]
+    fn legacy_accounts_get_an_inferred_method() {
+        let mut a = base();
+        assert_eq!(a.login_method_effective(), "paste");
+        a.fp_seed = Some("seed".into());
+        assert_eq!(a.login_method_effective(), "chrome");
+        a.browser = Some(Default::default());
+        assert_eq!(a.login_method_effective(), "browser", "có hồ sơ trình duyệt gốc: bookmarklet hoặc tiện ích, chưa phân biệt được");
+        a.login_method = Some("extension".into());
+        assert_eq!(a.login_method_effective(), "extension", "giá trị đã lưu thắng suy luận");
+    }
+
+    #[test]
+    fn method_survives_export_and_old_bundles_still_load() {
+        let mut a = base();
+        a.login_method = Some("bookmarklet".into());
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["login_method"], "bookmarklet");
+        let back: Account = serde_json::from_value(v).unwrap();
+        assert_eq!(back.login_method.as_deref(), Some("bookmarklet"));
+        // acc chưa có phương thức không in trường (gói cũ y như trước)
+        assert!(serde_json::to_value(base()).unwrap().get("login_method").is_none());
+    }
+
+    #[test]
+    fn via_from_clients_is_whitelisted() {
+        assert_eq!(clean_via(&Some(" extension ".into())).as_deref(), Some("extension"));
+        assert_eq!(clean_via(&Some("bookmarklet".into())).as_deref(), Some("bookmarklet"));
+        assert_eq!(clean_via(&Some("paste".into())).as_deref(), Some("paste"));
+        assert_eq!(clean_via(&Some("chrome".into())), None, "chrome/scan/register do server tự đặt, client không được khai");
+        assert_eq!(clean_via(&Some("<script>".into())), None);
+        assert_eq!(clean_via(&None), None);
     }
 }

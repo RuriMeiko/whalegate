@@ -297,6 +297,13 @@
     ['Khoảng thời gian xuất', 'Export range', '导出范围'],
     ['Tải file debug: log + chi tiết nối lại / challenge / cuối luồng SSE (không có token hay cookie). Đã lưu sẵn ở thư mục logs/ trong thư mục dữ liệu.', 'Download a debug file: log + details of resumes / challenges / SSE tails (no tokens or cookies). Already saved in the logs/ folder of the data directory.', '下载调试文件：日志 + 续接 / 验证码 / SSE 尾部的详细记录（不含 Token 和 Cookie）。已保存在数据目录的 logs/ 文件夹中。'],
     ['Đang tạo file debug…', 'Preparing the debug file…', '正在生成调试文件…'],
+    ['Đăng nhập bằng Chrome riêng', 'Logged in with a dedicated Chrome', '通过专属 Chrome 登录'],
+    ['Quét từ Chrome chính', 'Scanned from the main Chrome', '从主 Chrome 扫描'],
+    ['Thêm bằng bookmarklet', 'Added with the bookmarklet', '通过书签脚本添加'],
+    ['Thêm bằng tiện ích', 'Added with the extension', '通过浏览器扩展添加'],
+    ['Thêm bằng cách dán token', 'Added by pasting a token', '通过粘贴 Token 添加'],
+    ['Trình duyệt gốc (bookmarklet hoặc tiện ích)', 'Original browser (bookmarklet or extension)', '原浏览器（书签脚本或扩展）'],
+    ['Đăng ký bằng dòng lệnh (register)', 'Signed up from the command line (register)', '通过命令行注册（register）'],
     /* alert() của bookmarklet / lệnh console (chạy ở tab khác, dịch lúc dựng mã) */
     ['chạy trên tab chat.deepseek.com', 'run this on a chat.deepseek.com tab', '请在 chat.deepseek.com 标签页中运行'],
     ['tab này chưa đăng nhập chat.deepseek.com (không thấy userToken).', 'this tab is not logged in to chat.deepseek.com (no userToken found).', '此标签页尚未登录 chat.deepseek.com（找不到 userToken）。'],

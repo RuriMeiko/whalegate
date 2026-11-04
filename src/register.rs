@@ -358,6 +358,7 @@ async fn cmd_add(label: Option<&str>) -> Result<()> {
         device_refreshed_at: None,
         browser: None,
         auth_dead_at: None,
+        login_method: Some("register".into()),
     };
     store.accounts.push(acc);
     crate::server::write_store_atomic_pub(&store).await?;
@@ -688,6 +689,7 @@ async fn cmd_login(email: &str, password: &str, label: Option<&str>, force_headl
             a.device_id = session.device_id.clone();
             a.device_refreshed_at = Some(now);
             a.browser = None;
+            a.login_method = Some("chrome".into());
             a.ds_uid = a.ds_uid.clone().or_else(|| session.uid.clone());
             crate::fingerprint::bind(&a.token, a.fp_seed.as_deref());
             crate::fingerprint::bind_device(&a.token, a.device_id.as_deref());
@@ -713,6 +715,7 @@ async fn cmd_login(email: &str, password: &str, label: Option<&str>, force_headl
                 device_refreshed_at: Some(now),
                 browser: None,
                 auth_dead_at: None,
+                login_method: Some("chrome".into()),
             };
             println!("thêm acc mới: {}", acc.label);
             store.accounts.push(acc);

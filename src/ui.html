@@ -145,7 +145,12 @@
   .tabs { display: flex; border-bottom: 1px solid var(--ink); }
   .tabs button { flex: 1; border: 0; border-right: 1px solid var(--hair); background: none; padding: 9px 6px; font: 12px/1 var(--mono); color: var(--mute); cursor: pointer; }
   .tabs button:last-child { border-right: 0; }
+  .tabs button { display: flex; align-items: center; justify-content: center; gap: 6px; }
   .tabs button[aria-selected="true"] { color: var(--bg); background: var(--ink); }
+  /* icon phương thức đăng nhập (tab thêm tài khoản + dòng tài khoản) */
+  .mi { display: inline-flex; flex: none; color: inherit; }
+  .acc .hd .mi { color: var(--mute); }
+  .acc.off .mi { opacity: .5; }
   .dlg section p { color: var(--mute); }
   .dlg section .btns { flex-wrap: wrap; align-items: center; }
   .dlg section .btns input { flex: 1 1 140px; min-width: 0; }
@@ -314,10 +319,10 @@
   <div class="dlg">
     <div class="top"><h2>Thêm tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeAdd()">×</button></div>
     <div class="tabs" role="tablist" aria-label="Cách thêm">
-      <button role="tab" data-t="chrome" onclick="addTab('chrome')">Chrome riêng</button>
-      <button role="tab" data-t="bm" onclick="addTab('bm')">Bookmarklet</button>
-      <button role="tab" data-t="ext" onclick="addTab('ext')">Tiện ích</button>
-      <button role="tab" data-t="paste" onclick="addTab('paste')">Dán token (legacy)</button>
+      <button role="tab" data-t="chrome" onclick="addTab('chrome')"><span class="mi" data-mi="chrome"></span>Chrome riêng</button>
+      <button role="tab" data-t="bm" onclick="addTab('bm')"><span class="mi" data-mi="bookmarklet"></span>Bookmarklet</button>
+      <button role="tab" data-t="ext" onclick="addTab('ext')"><span class="mi" data-mi="extension"></span>Tiện ích</button>
+      <button role="tab" data-t="paste" onclick="addTab('paste')"><span class="mi" data-mi="paste"></span>Dán token (legacy)</button>
     </div>
     <div class="inner">
       <section data-p="chrome">
@@ -500,6 +505,28 @@ const fmtMoney = (usd) => {
 /// Giá mỗi 1M token (số nhỏ, vd 0.28 USD): giữ 2 chữ số thập phân với ¥ và $, làm tròn nguyên với ₫.
 const fmtPrice = (usd) => { const l = curLang(); return l === 'vi' ? Math.round(usd * FX.vnd).toLocaleString('vi-VN') + ' ₫' : l === 'zh' ? '¥' + (usd * FX.cny).toFixed(2) : '$' + usd; };
 const fmtUsd = fmtMoney;
+
+/// Icon theo cách acc được nối vào whalegate (hiện dạng icon, tooltip nói rõ). `browser` = acc cũ thêm bằng bookmarklet hoặc tiện ích.
+const LI = {
+  chrome: '<path d="M2 3.5h12v9H2zM2 6.2h12M4.4 4.85h.1M6.2 4.85h.1"/>',
+  scan: '<circle cx="7" cy="7" r="3.9"/><path d="M9.9 9.9 14 14"/>',
+  bookmarklet: '<path d="M4 2h8v12l-4-3-4 3z"/>',
+  extension: '<path d="M2 5h3a2 2 0 1 1 4 0h3v3a2 2 0 1 1 0 4v2H2z"/>',
+  paste: '<rect x="3.2" y="3" width="9.6" height="11"/><path d="M6 3V1.8h4V3M5.5 7h5M5.5 9.5h5"/>',
+  browser: '<circle cx="8" cy="8" r="6"/><path d="M10.7 5.3 9.1 9.1 5.3 10.7 6.9 6.9z"/>',
+  register: '<rect x="1.7" y="2.7" width="12.6" height="10.6"/><path d="M4.6 6.2 7 8.2l-2.4 2M8.6 10.4h2.8"/>',
+};
+const LI_TITLE = {
+  chrome: 'Đăng nhập bằng Chrome riêng',
+  scan: 'Quét từ Chrome chính',
+  bookmarklet: 'Thêm bằng bookmarklet',
+  extension: 'Thêm bằng tiện ích',
+  paste: 'Thêm bằng cách dán token',
+  browser: 'Trình duyệt gốc (bookmarklet hoặc tiện ích)',
+  register: 'Đăng ký bằng dòng lệnh (register)',
+};
+const miSvg = (k) => '<svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square">' + (LI[k] || LI.paste) + '</svg>';
+document.querySelectorAll('[data-mi]').forEach((e) => { e.innerHTML = miSvg(e.dataset.mi); });
 
 /// Khoảng thời gian của ba ô (token / tiết kiệm / biểu đồ): nhớ lựa chọn theo trình duyệt.
 const RNG = {tok: 'today', save: 'today', chart: '24h'};
@@ -686,8 +713,9 @@ async function copyCmd() {
 }
 
 /// Nhận gói từ bookmarklet/lệnh console. Có token + browser thì acc giữ đúng "máy" của trình duyệt gốc.
-async function addPayload(d, label) {
+async function addPayload(d, label, via) {
   const body = {label: label || d.label || ''};
+  if (via) body.via = via;
   if (d.browser) { body.browser = d.browser; body.token = d.token || d.raw_token; body.cookies = d.cookies || {}; }
   else { body.token = d.token || d.raw_token || ''; body.cookies = d.cookies || {}; }
   if (d.device_id && body.browser) body.browser.device_id = d.device_id;
@@ -711,7 +739,7 @@ async function addManual() {
   if (raw.startsWith('{')) { try { const o = JSON.parse(raw); if (o && (o.token || o.browser)) d = o; } catch (e) {} }
   b.disabled = true;
   try {
-    const res = await addPayload(d, $('lblIn').value);
+    const res = await addPayload(d, $('lblIn').value, 'paste');
     say(addedText(res, !!d.browser), 'ok');
     $('tokIn').value = ''; $('lblIn').value = ''; closeAdd(); loadStats();
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
@@ -873,7 +901,9 @@ function accItem(a, perAcc) {
   const box = el('div', 'acc' + (OPEN_ACC === a.id ? ' open' : '') + (a.pool_enabled === false ? ' off' : ''));
   const hd = el('button', 'hd'); hd.setAttribute('aria-expanded', OPEN_ACC === a.id);
   const nm = el('span', 'nm', a.label); if (a.uid) nm.append(el('small', null, a.uid.slice(0, 6)));
-  hd.append(el('i', 'sq ' + (kind === 'off' ? 'off' : kind === 'bad' || kind === 'warn' || a.dup ? (a.dup ? 'bad' : kind) : '')), nm);
+  const mi = el('span', 'mi'); const lm = a.login_method || 'paste';
+  mi.innerHTML = miSvg(lm); mi.title = LI_TITLE[lm] || LI_TITLE.paste;
+  hd.append(el('i', 'sq ' + (kind === 'off' ? 'off' : kind === 'bad' || kind === 'warn' || a.dup ? (a.dup ? 'bad' : kind) : '')), mi, nm);
   if (a.dup) hd.append(el('span', 'dupe', 'trùng người dùng'));
   hd.append(el('span', 'st ' + kind, text));
   hd.onclick = () => { OPEN_ACC = OPEN_ACC === a.id ? null : a.id; document.querySelectorAll('.acc').forEach((n) => n.classList.remove('open')); if (OPEN_ACC) box.classList.add('open'); hd.setAttribute('aria-expanded', !!OPEN_ACC); };
@@ -1502,7 +1532,7 @@ document.addEventListener('keydown', (e) => {
     const d = e.data.whalegate;
     if (!d) return say('Bookmarklet không gom được dữ liệu' + (e.data.error ? ': ' + e.data.error : ''), 'err');
     const w = say('Đang thêm tài khoản…', 'wait');
-    addPayload(d, '')
+    addPayload(d, '', 'bookmarklet')
       .then((res) => { if (w) w.remove(); say(addedText(res, true), 'ok'); closeAdd(); loadStats(); })
       .catch((err) => { if (w) w.remove(); say(err.message, 'err'); addTab('paste'); $('tokIn').value = JSON.stringify(d, null, 1); });
   };

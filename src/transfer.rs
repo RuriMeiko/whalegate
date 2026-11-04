@@ -164,6 +164,7 @@ pub(crate) async fn api_import_accounts(
                 if u.fp_seed.is_some() { e.fp_seed = u.fp_seed.clone(); }
                 if u.device_id.is_some() { e.device_id = u.device_id.clone(); }
                 if u.browser.is_some() { e.browser = u.browser.clone(); }
+                if u.login_method.is_some() { e.login_method = u.login_method.clone(); }
                 if token_changed {
                     // token mới → phiên web cũ không còn dùng được, xoá sạch trạng thái.
                     e.thread_session_id = None;

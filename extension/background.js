@@ -19,7 +19,7 @@ async function addFromTab(tab) {
     const r = await fetch(WHALEGATE + "/api/accounts", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: d.token, cookies, browser: d.browser, label: "" }),
+      body: JSON.stringify({ token: d.token, cookies, browser: d.browser, label: "", via: "extension" }),
     });
     const res = await r.json().catch(() => ({}));
     if (!r.ok || res.error) throw new Error(res.error || "whalegate trả lỗi " + r.status);
