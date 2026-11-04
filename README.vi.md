@@ -534,7 +534,7 @@ DS_PROXY_LIST='socks5h://user:pass@203.0.113.7:1080
 http://198.51.100.4:8080'
 ```
 
-Hoặc đặt cùng các dòng đó vào `~/.whalegate/proxies.txt`, hay dán vào **Cài đặt → Proxy** trên dashboard (danh sách được kiểm tra từng dòng; một dòng sai là từ chối cả lần lưu, nên không bao giờ có chuyện một nửa số tài khoản âm thầm đi thẳng).
+Hoặc đặt cùng các dòng đó vào `~/.whalegate/proxies.txt`, hay dán vào **Cài đặt → IP đầu ra** trên dashboard (danh sách được kiểm tra từng dòng; một dòng sai là từ chối cả lần lưu, nên không bao giờ có chuyện một nửa số tài khoản âm thầm đi thẳng).
 
 Cách một proxy được gán:
 
@@ -549,6 +549,16 @@ Nên dùng `socks5h` thay vì `socks5` khi có thể: nó để proxy phân gi�
 `GET /api/proxy` hiện pool hiện tại và mọi liên kết; `POST /api/proxy` thay danh sách; `POST /api/proxy/unbind` với `{"fingerprint":"…"}` thả một liên kết để tài khoản đó nhận IP khác ở lần sau.
 
 <a id="dashboard"></a>
+### Worker Cloudflare làm đường đi ra
+
+Ngoài proxy, tài khoản còn đi ra được qua **Cloudflare Worker**: `worker/egress.js` mở đường hầm TCP (TLS vẫn đầu-cuối nên Worker chỉ thấy byte đã mã hoá), DeepSeek thấy IP Cloudflare thay vì IP của bạn. Bấm **Cloudflare** ở đầu dashboard: whalegate tự tìm hoặc tải Node.js (kiểm tra checksum), chạy `wrangler login` (bạn chỉ bấm *Allow*), tự đăng ký địa chỉ `workers.dev` nếu account chưa có, deploy Worker và đo IP của nó. Mọi cửa sổ Chrome của acc (đăng nhập, đăng ký, mở Chrome, làm mới thiết bị) dùng cùng đường hầm này.
+
+Có thể thêm Worker trên **nhiều account Cloudflare** (*+ Thêm Worker bằng account Cloudflare khác*, tối đa 8). Mỗi acc DeepSeek được ghim cố định vào một Worker theo seed vân tay nên IP không nhảy. Popup hiện IP, trạm và hạn mức theo từng Worker.
+
+Mỗi acc lấy đường đầu tiên áp dụng được: **① proxy riêng** (chế độ khác `off` và có proxy) → **② Worker Cloudflare** (đang bật và có ít nhất một Worker) → **③ đi thẳng** bằng IP của bạn. Có thể dùng cả ba cùng lúc. Đích nằm trên chính Cloudflare (hCaptcha) luôn đi thẳng vì Worker không nối được tới địa chỉ Cloudflare. Cửa sổ Chrome của acc hiện chỉ đi ② hoặc ③, chưa đi qua proxy riêng ①. Điều khoản của Cloudflare áp dụng cho cách bạn dùng Worker; hãy tự kiểm tra cho trường hợp của bạn.
+
+Cài đặt (**Cài đặt → IP đầu ra**): `DS_EGRESS_ON`, `DS_EGRESS_WORKERS` (mỗi dòng `địa-chỉ khoá`, nút tự ghi), `DS_EGRESS_DAILY_LIMIT` (hạn mức hiện trong popup, tính cho từng Worker; Free là 100.000/ngày).
+
 ## Dashboard
 
 Mở `http://127.0.0.1:8790/`. Chỉ truy cập được từ loopback.
@@ -625,6 +635,9 @@ Thứ tự ưu tiên: giá trị đã lưu trên dashboard → biến môi trư�
 | ⚙️ `DS_FX_VND` | `26000` | Tỷ giá khi dashboard ở tiếng Việt: số đồng cho mỗi USD |
 | ⚙️ `DS_PROXY_MODE` | `off` | IP đầu ra theo tài khoản: `off` đi thẳng · `auto` dùng proxy khi có, không thì đi thẳng · `strict` báo lỗi thay vì lộ IP thật |
 | ⚙️ `DS_PROXY_LIST` | – | Danh sách proxy, mỗi dòng một cái: `scheme://[user:pass@]host:port` với `http`, `https`, `socks5` hoặc `socks5h` |
+| ⚙️ `DS_EGRESS_ON` | `1` | Dùng các Worker Cloudflare trong `DS_EGRESS_WORKERS` (tắt thì giữ danh sách nhưng không dùng) |
+| ⚙️ `DS_EGRESS_WORKERS` | – | Các Worker Cloudflare, mỗi dòng `địa-chỉ khoá` (tối đa 8), nút trên dashboard tự ghi; mỗi acc được ghim vào một Worker |
+| ⚙️ `DS_EGRESS_DAILY_LIMIT` | `100000` | Hạn mức request mỗi ngày hiện theo từng Worker trong popup Cloudflare (Free = 100.000) |
 | `DS_PROXY_FILE` | `~/.whalegate/proxies.txt` | File danh sách proxy (cùng định dạng, cho phép chú thích `#`) |
 | `DS_CONV_TTL` | `1800` | Xoá hội thoại web nhàn rỗi sau chừng này giây |
 | `DS_CONV_MAX_CHARS` | `1200000` | Kích thước tối đa của một hội thoại stateful |

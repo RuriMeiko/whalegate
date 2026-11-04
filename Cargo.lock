@@ -2478,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "whalegate"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "aes",
  "anyhow",

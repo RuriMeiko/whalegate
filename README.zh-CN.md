@@ -538,7 +538,7 @@ DS_PROXY_LIST='socks5h://user:pass@203.0.113.7:1080
 http://198.51.100.4:8080'
 ```
 
-也可以把同样的行放进 `~/.whalegate/proxies.txt`，或粘贴到控制面板的 **Cài đặt → Proxy**（设置 → 代理）中（列表会逐行校验；只要有一行有误，整次保存都会被拒绝，因此不会出现一半账号悄悄直连的情况）。
+也可以把同样的行放进 `~/.whalegate/proxies.txt`，或粘贴到控制面板的 **Cài đặt → IP đầu ra**（设置 → 出口 IP）中（列表会逐行校验；只要有一行有误，整次保存都会被拒绝，因此不会出现一半账号悄悄直连的情况）。
 
 代理的分配方式：
 
@@ -553,6 +553,16 @@ http://198.51.100.4:8080'
 `GET /api/proxy` 显示当前的代理池和所有绑定；`POST /api/proxy` 替换列表；带 `{"fingerprint":"…"}` 的 `POST /api/proxy/unbind` 会释放一个绑定，让该账号下次得到不同的 IP。
 
 <a id="dashboard"></a>
+### 用 Cloudflare Worker 作为出口路线
+
+除了代理，账号还可以经由 **Cloudflare Worker** 出去：`worker/egress.js` 打开 TCP 隧道（TLS 仍是端到端，Worker 只能看到加密字节），DeepSeek 看到的是 Cloudflare 的 IP 而不是你的。点击控制面板顶部的 **Cloudflare**：whalegate 会自动查找或下载 Node.js（校验 checksum），运行 `wrangler login`（你只需点 *Allow*），在账号没有 `workers.dev` 地址时自动注册，部署 Worker 并测出它的 IP。每个账号的 Chrome 窗口（登录、注册、打开 Chrome、刷新设备）都使用同一条隧道。
+
+可以在**多个 Cloudflare 账号**上各加一个 Worker（*+ 用另一个 Cloudflare 账号添加 Worker*，最多 8 个）。每个 DeepSeek 账号按指纹种子固定绑定到一个 Worker，IP 不会来回跳。弹窗按 Worker 分别显示 IP、节点和额度。
+
+每个账号采用第一条适用的路线：**① 自有代理**（模式不是 `off` 且有可用代理）→ **② Cloudflare Worker**（已开启且至少有一个 Worker）→ **③ 直连**你的 IP。三者可同时使用。目标本身在 Cloudflare 上（hCaptcha）时一律直连，因为 Worker 连不上 Cloudflare 地址。账号的 Chrome 窗口目前只走 ② 或 ③，不走自有代理 ①。使用 Worker 须遵守 Cloudflare 的条款，请自行确认是否适用于你的用法。
+
+设置（**Cài đặt → IP đầu ra**，即 设置 → 出口 IP）：`DS_EGRESS_ON`、`DS_EGRESS_WORKERS`（每行 `地址 密钥`，由按钮自动写入）、`DS_EGRESS_DAILY_LIMIT`（弹窗里显示的额度，按每个 Worker 计；免费版为每天 10 万）。
+
 ## 控制面板
 
 打开 `http://127.0.0.1:8790/`。仅限本机回环访问。
@@ -629,6 +639,9 @@ curl -fsSL https://raw.githubusercontent.com/RuriMeiko/whalegate/main/install.sh
 | ⚙️ `DS_FX_VND` | `26000` | 控制面板为越南语时使用的汇率：每美元兑多少越南盾 |
 | ⚙️ `DS_PROXY_MODE` | `off` | 每个账号的出口 IP：`off` 直连 · `auto` 有代理就用，否则直连 · `strict` 宁可失败也不泄露真实 IP |
 | ⚙️ `DS_PROXY_LIST` | – | 代理列表，每行一个：`scheme://[user:pass@]host:port`，支持 `http`、`https`、`socks5` 或 `socks5h` |
+| ⚙️ `DS_EGRESS_ON` | `1` | 使用 `DS_EGRESS_WORKERS` 中的 Cloudflare Worker（关闭则保留列表但不使用） |
+| ⚙️ `DS_EGRESS_WORKERS` | – | Cloudflare Worker 列表，每行 `地址 密钥`（最多 8 个），由控制面板按钮自动写入；每个账号固定绑定一个 |
+| ⚙️ `DS_EGRESS_DAILY_LIMIT` | `100000` | Cloudflare 弹窗中按每个 Worker 显示的每日请求额度（免费版 = 10 万） |
 | `DS_PROXY_FILE` | `~/.whalegate/proxies.txt` | 代理列表文件（格式相同，允许 `#` 注释） |
 | `DS_CONV_TTL` | `1800` | 闲置网页对话在这么多秒之后删除 |
 | `DS_CONV_MAX_CHARS` | `1200000` | 单个有状态对话的最大体积 |

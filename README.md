@@ -521,7 +521,7 @@ DS_PROXY_LIST='socks5h://user:pass@203.0.113.7:1080
 http://198.51.100.4:8080'
 ```
 
-Or put the same lines in `~/.whalegate/proxies.txt`, or paste them into **Settings → Proxy** on the dashboard (the list is validated line by line; one bad line rejects the whole save, so you never end up with half your accounts silently going direct).
+Or put the same lines in `~/.whalegate/proxies.txt`, or paste them into **Settings → IP đầu ra** on the dashboard (the list is validated line by line; one bad line rejects the whole save, so you never end up with half your accounts silently going direct).
 
 How a proxy is assigned:
 
@@ -534,6 +534,16 @@ Modes: `off` (direct, default) · `auto` (use a proxy when one is configured; lo
 Use `socks5h` rather than `socks5` when you can: it lets the proxy resolve DNS, so the name lookup for `chat.deepseek.com` doesn't happen on your machine either.
 
 `GET /api/proxy` shows the current pool and every binding; `POST /api/proxy` replaces the list; `POST /api/proxy/unbind` with `{"fingerprint":"…"}` releases one binding so that account gets a different IP next time.
+
+### Cloudflare Worker as an egress route
+
+Besides proxies, an account can leave through a **Cloudflare Worker**: `worker/egress.js` opens a TCP tunnel (TLS stays end-to-end, so the Worker only sees encrypted bytes) and DeepSeek sees a Cloudflare IP instead of yours. Click **Cloudflare** at the top of the dashboard: whalegate finds or downloads Node.js (checksum verified), runs `wrangler login` (you only press *Allow*), registers a `workers.dev` address if the account has none, deploys the Worker and measures its IP. Every account Chrome window (login, sign-up, open Chrome, device refresh) uses the same tunnel.
+
+You can add Workers on **several Cloudflare accounts** (*+ Add a Worker with another Cloudflare account*, up to 8). Each DeepSeek account is pinned to one Worker by its fingerprint seed, so its IP does not jump around. The popup shows IP, colo and quota per Worker.
+
+Each account takes the first route that applies: **① own proxy** (mode not `off` and a proxy is available) → **② Cloudflare Worker** (switched on and at least one Worker) → **③ direct** from your IP. All three can be in use at once. Targets that sit on Cloudflare itself (hCaptcha) always go direct, because a Worker cannot connect to Cloudflare addresses. An account's Chrome window currently uses ② or ③, not the own proxy ①. Cloudflare's terms apply to how you use Workers; check them for your use.
+
+Settings (**Settings → IP đầu ra**): `DS_EGRESS_ON`, `DS_EGRESS_WORKERS` (one `address key` per line, written by the button), `DS_EGRESS_DAILY_LIMIT` (the quota shown in the popup, per Worker; Free is 100,000/day).
 
 ## Dashboard
 
@@ -609,6 +619,9 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | ⚙️ `DS_FX_VND` | `26000` | Exchange rate for the dashboard in Vietnamese: dong per USD |
 | ⚙️ `DS_PROXY_MODE` | `off` | Egress IP per account: `off` direct · `auto` use proxies when available, fall back to direct · `strict` fail instead of leaking the real IP |
 | ⚙️ `DS_PROXY_LIST` | – | Proxy list, one per line: `scheme://[user:pass@]host:port` with `http`, `https`, `socks5` or `socks5h` |
+| ⚙️ `DS_EGRESS_ON` | `1` | Use the Cloudflare Workers in `DS_EGRESS_WORKERS` (off keeps the list but does not use it) |
+| ⚙️ `DS_EGRESS_WORKERS` | – | Cloudflare Workers, one `address key` per line (max 8), written by the dashboard button; each account is pinned to one |
+| ⚙️ `DS_EGRESS_DAILY_LIMIT` | `100000` | Daily request quota shown per Worker in the Cloudflare popup (Free = 100,000) |
 | `DS_PROXY_FILE` | `~/.whalegate/proxies.txt` | Proxy list file (same format, `#` comments allowed) |
 | `DS_CONV_TTL` | `1800` | Delete idle web conversations after this many seconds |
 | `DS_CONV_MAX_CHARS` | `1200000` | Maximum size of one stateful conversation |
