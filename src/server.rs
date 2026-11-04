@@ -677,12 +677,12 @@ async fn export_header(st: &Arc<AppState>) -> String {
         let v = crate::settings::get(d.key);
         // danh sách proxy có thể chứa user:pass → chỉ ghi số dòng
         let shown = if d.key == "DS_PROXY_LIST" { format!("<{} dòng>", v.lines().filter(|l| !l.trim().is_empty()).count()) }
-            else if d.key == "DS_EGRESS_KEY" { (if v.trim().is_empty() { "<chưa đặt>" } else { "<đã đặt>" }).to_string() }
+            else if d.key == "DS_EGRESS_WORKERS" { format!("<{} Worker, khoá đã ẩn>", crate::egress::parse_workers(&v).len()) }
             else { v };
         h.push_str(&format!("{}={}\n", d.key, shown));
     }
     h.push_str("\n===== CÀI ĐẶT ẨN / NÂNG CAO (không hiện trên giao diện; giá trị đang áp dụng) =====\n");
-    for d in crate::settings::DEFS.iter().filter(|d| !d.show && d.key != "DS_PROXY_LIST") {
+    for d in crate::settings::DEFS.iter().filter(|d| !d.show && d.key != "DS_PROXY_LIST" && d.key != "DS_EGRESS_KEY") {
         h.push_str(&format!("{}={}\n", d.key, crate::settings::get(d.key)));
     }
     h.push_str("\n===== TÀI KHOẢN (id 8 ký tự khớp với dòng log [route]; không token/cookie/nhãn) =====\n");
@@ -3881,7 +3881,8 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/accounts/{id}/reset", post(api_reset_account))
         .route("/api/accounts/{id}/device", post(api_account_device))
         .route("/api/cf", get(|| async { Json(crate::cloudflare::status()) }))
-        .route("/api/cf/setup", post(|| async { cf_result(crate::cloudflare::start_setup()) }))
+        .route("/api/cf/setup", post(|| async { cf_result(crate::cloudflare::start_setup(false)) }))
+        .route("/api/cf/add", post(|| async { cf_result(crate::cloudflare::start_setup(true)) }))
         .route("/api/cf/remove", post(|| async { cf_result(crate::cloudflare::start_remove()) }))
         .route("/api/cf/refresh", post(|| async { cf_result(crate::cloudflare::start_refresh()) }))
         .route("/api/accounts/{id}/relogin", post(api_account_relogin))

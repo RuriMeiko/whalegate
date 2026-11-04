@@ -22,11 +22,12 @@ struct State {
     logged_in: Option<bool>,
     email: String,
     accounts: Vec<(String, String)>,
-    ip: String,
-    colo: String,
-    probe_ms: u64,
-    probed_at: u64,
+    /// kết quả đo từng Worker, khoá = URL
+    probes: std::collections::BTreeMap<String, Probe>,
 }
+
+#[derive(Default, Clone)]
+struct Probe { ip: String, colo: String, ms: u64, at: u64 }
 
 static ST: Mutex<Option<State>> = Mutex::new(None);
 
@@ -192,29 +193,34 @@ async fn refresh_login() -> Result<bool> {
     Ok(logged)
 }
 
-async fn probe_ip() {
-    let Some((url, key)) = crate::egress::config() else { return };
-    let t = std::time::Instant::now();
-    let c = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build() { Ok(c) => c, Err(_) => return };
-    // trạm Cloudflare phục vụ Worker (gọi HTTP thường)
-    let mut colo = String::new();
-    let mut worker_ok = false;
-    if let Ok(resp) = c.get(format!("{url}/__ip")).header("x-wg-key", key).send().await {
-        if let Ok(v) = resp.json::<Value>().await { colo = v["colo"].as_str().unwrap_or("").to_string(); worker_ok = v.get("egress").is_some(); }
-    }
-    // IP mà DeepSeek/Chrome thật sự thấy: đo qua chính đường hầm TCP (khác IP của lần gọi HTTP thường ở trên).
-    // Dùng dịch vụ không nằm sau Cloudflare vì Worker không được mở socket tới IP Cloudflare.
-    let mut ip = String::new();
-    if let Some(p) = crate::egress::proxy_url() {
-        if let Ok(pc) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(25)).proxy(reqwest::Proxy::all(&p).unwrap_or_else(|_| reqwest::Proxy::all("http://127.0.0.1:9").unwrap())).build() {
-            if let Ok(r) = pc.get("https://checkip.amazonaws.com").send().await { ip = r.text().await.unwrap_or_default().trim().to_string(); }
+/// Đo từng Worker đang bật; trả số Worker trả lời được.
+async fn probe_ip() -> usize {
+    let mut good = 0;
+    for (i, w) in crate::egress::workers().into_iter().enumerate() {
+        let t = std::time::Instant::now();
+        let c = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build() { Ok(c) => c, Err(_) => continue };
+        // trạm Cloudflare phục vụ Worker (gọi HTTP thường)
+        let mut colo = String::new();
+        let mut worker_ok = false;
+        if let Ok(resp) = c.get(format!("{}/__ip", w.url)).header("x-wg-key", &w.key).send().await {
+            if let Ok(v) = resp.json::<Value>().await { colo = v["colo"].as_str().unwrap_or("").to_string(); worker_ok = v.get("egress").is_some(); }
         }
+        // IP mà DeepSeek/Chrome thật sự thấy: đo qua chính đường hầm TCP (khác IP của lần gọi HTTP thường ở trên).
+        // Dùng dịch vụ không nằm sau Cloudflare vì Worker không được mở socket tới IP Cloudflare.
+        let mut ip = String::new();
+        if let Some(p) = crate::egress::proxy_url_idx(i) {
+            if let Ok(px) = reqwest::Proxy::all(&p) {
+                if let Ok(pc) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(25)).proxy(px).build() {
+                    if let Ok(r) = pc.get("https://checkip.amazonaws.com").send().await { ip = r.text().await.unwrap_or_default().trim().to_string(); }
+                }
+            }
+        }
+        if ip.is_empty() && !worker_ok { continue; }
+        good += 1;
+        with(|s| { s.probes.insert(w.url.clone(), Probe { ip, colo, ms: t.elapsed().as_millis() as u64, at: now() }); });
     }
-    if ip.is_empty() && !worker_ok { return; }
-    with(|s| { s.ip = ip; s.colo = colo; s.probe_ms = t.elapsed().as_millis() as u64; s.probed_at = now(); });
+    good
 }
-
-// ---------- các việc nền ----------
 
 fn begin(op: &str) -> bool {
     with(|s| {
@@ -253,9 +259,14 @@ async fn register_subdomain(acc_id: &str) -> Result<()> {
     bail!("không đăng ký được workers.dev — mở dash.cloudflare.com → Workers & Pages để tạo thủ công rồi bấm lại")
 }
 
-async fn setup_flow() -> Result<()> {
+async fn setup_flow(other_account: bool) -> Result<()> {
     if find_npx().is_none() {
         install_node().await?;
+    }
+    if other_account {
+        say("Đăng xuất account Cloudflare hiện tại để đăng nhập account khác…");
+        let _ = wrangler(&["logout"], None, None, 60, None).await?;
+        with(|s| { s.logged_in = Some(false); s.email.clear(); s.accounts.clear(); });
     }
     say("Kiểm tra đăng nhập Cloudflare…");
     if !refresh_login().await? {
@@ -283,22 +294,28 @@ async fn setup_flow() -> Result<()> {
     if !ok { bail!("deploy Worker thất bại — xem nhật ký"); }
     let url = parse_workers_url(&text).context("deploy xong nhưng không đọc được địa chỉ workers.dev")?;
 
-    let key = { let k = crate::settings::get("DS_EGRESS_KEY"); if k.trim().is_empty() { new_key() } else { k.trim().to_string() } };
+    // mỗi account Cloudflare một Worker, mỗi Worker một khoá riêng; deploy lại thì giữ khoá cũ
+    let mut list = crate::egress::all_workers();
+    let key = list.iter().find(|w| w.url == url || w.tag == acc_id).map(|w| w.key.clone()).unwrap_or_else(new_key);
     say("Đặt khoá bí mật cho Worker…");
     let (ok, _) = wrangler(&["secret", "put", "EGRESS_KEY", "--config", "wrangler.toml"], Some(&dir), Some(&key), 120, Some(&acc_id)).await?;
     if !ok { bail!("đặt khoá Worker thất bại"); }
 
-    crate::settings::set("DS_EGRESS_URL", Some(&url)).map_err(|e| anyhow::anyhow!(e))?;
-    crate::settings::set("DS_EGRESS_KEY", Some(&key)).map_err(|e| anyhow::anyhow!(e))?;
+    list.retain(|w| w.url != url && w.tag != acc_id);
+    list.push(crate::egress::Worker { url: url.clone(), key, tag: acc_id.clone() });
+    if list.len() > crate::egress::MAX_WORKERS { bail!("tối đa {} Worker — gỡ bớt trước khi thêm", crate::egress::MAX_WORKERS); }
+    crate::settings::set("DS_EGRESS_WORKERS", Some(&crate::egress::format_workers(&list))).map_err(|e| anyhow::anyhow!(e))?;
+    crate::settings::forget("DS_EGRESS_URL");
+    crate::settings::forget("DS_EGRESS_KEY");
     crate::settings::set("DS_EGRESS_ON", Some("1")).map_err(|e| anyhow::anyhow!(e))?;
     say("Chờ Worker sẵn sàng và đo IP đầu ra…");
     for _ in 0..12 {
         probe_ip().await;
-        if !with(|s| s.ip.clone()).is_empty() { break; }
+        if with(|s| s.probes.get(&url).map(|p| !p.ip.is_empty()).unwrap_or(false)) { break; }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
-    if with(|s| s.ip.clone()).is_empty() { bail!("Worker đã deploy nhưng chưa trả lời — thử bấm “Kiểm tra” sau vài giây"); }
-    say("Xong. Mọi request và cửa sổ Chrome của acc giờ đi qua Worker.");
+    if !with(|s| s.probes.get(&url).map(|p| !p.ip.is_empty()).unwrap_or(false)) { bail!("Worker đã deploy nhưng chưa trả lời — thử bấm “Kiểm tra” sau vài giây"); }
+    say(&format!("Xong. Giờ có {} Worker; mỗi acc được ghim vào một Worker.", list.len()));
     Ok(())
 }
 
@@ -310,18 +327,27 @@ async fn remove_flow() -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("wrangler.toml"), format!("name = \"{WORKER_NAME}\"\nmain = \"egress.js\"\ncompatibility_date = \"2024-09-01\"\n"))?;
     std::fs::write(dir.join("egress.js"), EGRESS_JS)?;
-    say("Đang gỡ Worker khỏi Cloudflare…");
+    say("Đang gỡ Worker của account đang đăng nhập khỏi Cloudflare…");
     let (ok, text) = wrangler(&["delete", "--config", "wrangler.toml", "--force"], Some(&dir), None, 120, acc.as_deref()).await?;
     if !ok && !text.contains("not found") && !text.contains("does not exist") { bail!("gỡ Worker thất bại — xem nhật ký"); }
-    for k in ["DS_EGRESS_URL", "DS_EGRESS_KEY"] { let _ = crate::settings::set(k, None); }
-    with(|s| { s.ip.clear(); s.colo.clear(); });
-    say("Đã gỡ Worker và xoá cấu hình cổng ra.");
+    // bỏ đúng dòng của account này; Worker cũ chưa có tag mà chỉ còn một Worker duy nhất thì coi là của account này
+    let mut list = crate::egress::all_workers();
+    let before = list.len();
+    let tag = acc.clone().unwrap_or_default();
+    list.retain(|w| w.tag != tag || tag.is_empty());
+    if list.len() == before && before == 1 && list[0].tag.is_empty() { list.clear(); }
+    crate::settings::set("DS_EGRESS_WORKERS", Some(&crate::egress::format_workers(&list))).map_err(|e| anyhow::anyhow!(e))?;
+    crate::settings::forget("DS_EGRESS_URL");
+    crate::settings::forget("DS_EGRESS_KEY");
+    with(|s| { let urls: Vec<String> = list.iter().map(|w| w.url.clone()).collect(); s.probes.retain(|k, _| urls.contains(k)); });
+    say(&format!("Đã gỡ Worker. Còn {} Worker trong danh sách.", list.len()));
     Ok(())
 }
 
-pub fn start_setup() -> Result<(), String> {
+/// `other_account`: đăng xuất wrangler rồi đăng nhập account Cloudflare khác để thêm Worker thứ hai.
+pub fn start_setup(other_account: bool) -> Result<(), String> {
     if !begin("setup") { return Err("đang có một việc khác chạy".into()); }
-    tokio::spawn(async { let r = setup_flow().await; finish(r); });
+    tokio::spawn(async move { let r = setup_flow(other_account).await; finish(r); });
     Ok(())
 }
 
@@ -343,8 +369,16 @@ pub fn start_refresh() -> Result<(), String> {
 /// Trạng thái cho dashboard.
 pub fn status() -> Value {
     let s = with(|s| s.clone());
-    let url = crate::settings::get("DS_EGRESS_URL");
-    let has_key = !crate::settings::get("DS_EGRESS_KEY").trim().is_empty();
+    let usage = crate::egress::stats();
+    let on = crate::settings::boolean("DS_EGRESS_ON");
+    let workers: Vec<Value> = crate::egress::all_workers().iter().map(|w| {
+        let p = s.probes.get(&w.url).cloned().unwrap_or_default();
+        let u = usage["workers"].as_array().and_then(|a| a.iter().find(|x| x["url"] == w.url.as_str())).cloned().unwrap_or(Value::Null);
+        json!({
+            "url": w.url, "tag": w.tag, "ip": p.ip, "colo": p.colo, "probe_ms": p.ms, "probed_at": p.at,
+            "today": u["today"], "d7": u["d7"], "d30": u["d30"],
+        })
+    }).collect();
     json!({
         "node": find_npx().is_some(),
         "node_auto": own_node_bin().is_some(),
@@ -352,13 +386,9 @@ pub fn status() -> Value {
         "op": s.op, "log": s.log, "login_url": s.login_url, "error": s.error,
         "logged_in": s.logged_in, "email": s.email,
         "accounts": s.accounts.iter().map(|a| json!({"name": a.0, "id": a.1})).collect::<Vec<_>>(),
-        "worker": {
-            "name": WORKER_NAME, "url": url.trim(), "has_key": has_key,
-            "on": crate::settings::boolean("DS_EGRESS_ON"),
-            "ready": crate::egress::config().is_some(),
-            "ip": s.ip, "colo": s.colo, "probe_ms": s.probe_ms, "probed_at": s.probed_at,
-        },
-        "usage": crate::egress::stats(),
+        "name": WORKER_NAME, "on": on, "max_workers": crate::egress::MAX_WORKERS,
+        "workers": workers,
+        "usage": usage,
     })
 }
 

@@ -701,7 +701,7 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
         } else {
             for (k, v) in gui_env() { cmd.env(k, v); }
         }
-        for a in crate::egress::chrome_args() { cmd.arg(a); }
+        for a in crate::egress::chrome_args(&fp.seed) { cmd.arg(a); }
         let stderr = std::fs::File::create(&err_log).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null());
         child = cmd
             .arg(format!("--remote-debugging-port={}", port))

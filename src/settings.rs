@@ -44,8 +44,8 @@ pub static DEFS: &[Def] = &[
     shown(b("DS_POW_PREFETCH", "Tốc độ", "1", "Dự đoán PoW: tải + giải sẵn cho request kế tiếp"), "Dự đoán PoW", "Tải và giải sẵn cho request kế tiếp"),
     shown(b("DS_WEB_BOOT", "Mạng", "1", "Traffic nền giả lập trang web (settings, telemetry, report) cho từng acc đang dùng"), "Traffic nền như web", "Tắt nếu nghi DeepSeek đánh dấu acc vì các request nền này"),
     Def { key: "DS_DEFAULT_EFFORT", group: "Tốc độ", kind: Kind::Choice, default: "none", min: 0, max: 0, choices: &["none", "auto", "max"], unit: "", label: "Mức suy nghĩ mặc định", hint: "Khi client không chỉ định. none nhanh · auto nghĩ lượt người dùng · max luôn nghĩ", show: true, live: true },
-    shown(n("DS_CONTEXT_TOKENS", "Tốc độ", "512000", 8000, 1000000, "token", "Cửa sổ ngữ cảnh báo cho client (/v1/models)"), "Cửa sổ ngữ cảnh", "Số báo cho client; web nhận ≥512K token"),
-    shown(n("DS_PROMPT_MAX_CHARS", "Tốc độ", "1822000", 10000, 5000000, "ký tự", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"), "Trần prompt", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"),
+    shown(n("DS_CONTEXT_TOKENS", "Tốc độ", "256000", 8000, 1000000, "token", "Cửa sổ ngữ cảnh báo cho client (/v1/models)"), "Cửa sổ ngữ cảnh", "Số báo cho client · mặc định 256K: web nhận được ≥512K nhưng prompt càng lớn càng dễ bị chú ý"),
+    shown(n("DS_PROMPT_MAX_CHARS", "Tốc độ", "912000", 10000, 5000000, "ký tự", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"), "Trần prompt", "Vượt thì cắt tool_result cũ rồi bỏ lượt cũ"),
     n("DS_MAX_IMAGE_MB", "Tốc độ", "20", 1, 100, "MB", "Ảnh tối đa mỗi tấm"),
     // pool
     shown(n("DS_MAX_CONC_PER_ACC", "Pool", "2", 1, 6, "request", "Đồng thời tối đa trên một tài khoản"), "Đồng thời mỗi tài khoản", "Cao hơn 2 dễ bị DeepSeek giới hạn"),
@@ -62,13 +62,15 @@ pub static DEFS: &[Def] = &[
     // hiển thị tiền: chi phí tính gốc bằng USD, dashboard đổi sang ¥ (tiếng Trung) / ₫ (tiếng Việt) theo tỷ giá này
     shown(n("DS_FX_CNY", "Hiển thị", "720", 100, 2000, "×0,01 ¥", "Tỷ giá USD → CNY"), "Tỷ giá USD → CNY", "Tính bằng 0,01 ¥: 720 = 7,20 ¥ cho 1 USD. Dùng khi dashboard ở tiếng Trung"),
     shown(n("DS_FX_VND", "Hiển thị", "26000", 1000, 100000, "đồng", "Tỷ giá USD → VND"), "Tỷ giá USD → VND", "Số đồng cho 1 USD. Dùng khi dashboard ở tiếng Việt"),
-    // proxy đầu ra: mỗi vân tay (mỗi acc) đi ra DS qua một IP khác
-    Def { key: "DS_PROXY_MODE", group: "Proxy", kind: Kind::Choice, default: "off", min: 0, max: 0, choices: &["off", "auto", "strict"], unit: "", label: "IP đầu ra", hint: "off = đi thẳng · auto = có proxy thì dùng, chết thì đi thẳng · strict = proxy chết thì báo lỗi, không lộ IP thật", show: true, live: true },
-    Def { key: "DS_EGRESS_URL", group: "Proxy", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Worker Cloudflare (IP đầu ra)", hint: "Địa chỉ Worker (nút Cloudflare trên đầu trang tự cài). Mọi request và mọi cửa sổ Chrome của acc đi qua đường hầm của Worker, DeepSeek thấy IP Cloudflare", show: true, live: true },
-    Def { key: "DS_EGRESS_KEY", group: "Proxy", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Khoá Worker", hint: "Khoá bí mật của Worker (tự điền khi cài bằng nút Cloudflare)", show: true, live: true },
-    Def { key: "DS_EGRESS_ON", group: "Proxy", kind: Kind::Bool, default: "1", min: 0, max: 1, choices: &[], unit: "", label: "Dùng Worker Cloudflare", hint: "Tắt để đi thẳng bằng IP nhà (hoặc proxy riêng của từng acc) mà không phải xoá Worker", show: true, live: true },
-    shown(n("DS_EGRESS_DAILY_LIMIT", "Proxy", "100000", 0, 1000000000, "request", "Hạn mức request mỗi ngày của gói Cloudflare (Free = 100000)"), "Hạn mức Worker/ngày", "Mỗi kết nối qua Worker tính 1 request · Free 100.000/ngày, gói trả phí tính theo tháng nên đặt số bạn muốn theo dõi"),
-    Def { key: "DS_PROXY_LIST", group: "Proxy", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Danh sách proxy", hint: "Mỗi dòng một proxy: scheme://[user:pass@]host:port (http | https | socks5 | socks5h)", show: true, live: true },
+    // IP đầu ra: ba đường — ① proxy riêng, ② Worker Cloudflare, ③ đi thẳng bằng IP nhà
+    Def { key: "DS_PROXY_MODE", group: "IP đầu ra", kind: Kind::Choice, default: "off", min: 0, max: 0, choices: &["off", "auto", "strict"], unit: "", label: "① Proxy riêng — chế độ", hint: "off = không dùng proxy · auto = có proxy thì dùng, chết thì đi tiếp đường ②/③ · strict = proxy chết thì báo lỗi, không lộ IP thật", show: true, live: true },
+    Def { key: "DS_PROXY_LIST", group: "IP đầu ra", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "① Proxy riêng — danh sách", hint: "Mỗi dòng một proxy: scheme://[user:pass@]host:port (http | https | socks5 | socks5h). Mỗi acc được ghim cố định vào một proxy", show: true, live: true },
+    Def { key: "DS_EGRESS_ON", group: "IP đầu ra", kind: Kind::Bool, default: "1", min: 0, max: 1, choices: &[], unit: "", label: "② Worker Cloudflare — bật/tắt", hint: "Tắt = không đi qua Worker nhưng vẫn giữ danh sách bên dưới", show: true, live: true },
+    Def { key: "DS_EGRESS_WORKERS", group: "IP đầu ra", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "② Worker Cloudflare — danh sách", hint: "Mỗi dòng: địa-chỉ-Worker khoá (nút Cloudflare trên đầu trang tự thêm, tối đa 8). Nhiều Worker = nhiều account Cloudflare: mỗi acc DeepSeek được ghim cố định vào một Worker", show: true, live: true },
+    // cấu hình một-Worker cũ: vẫn đọc được, tự chuyển sang danh sách khi khởi động
+    Def { key: "DS_EGRESS_URL", group: "IP đầu ra", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Worker Cloudflare (cũ)", hint: "", show: false, live: true },
+    Def { key: "DS_EGRESS_KEY", group: "IP đầu ra", kind: Kind::Text, default: "", min: 0, max: 0, choices: &[], unit: "", label: "Khoá Worker (cũ)", hint: "", show: false, live: true },
+    shown(n("DS_EGRESS_DAILY_LIMIT", "IP đầu ra", "100000", 0, 1000000000, "request", "Hạn mức request mỗi ngày của gói Cloudflare (Free = 100000)"), "② Worker Cloudflare — hạn mức/ngày", "Tính cho từng Worker, mỗi kết nối tính 1 request · Free 100.000/ngày, gói trả phí tính theo tháng nên đặt số bạn muốn theo dõi"),
     restart(n("DS_READ_TIMEOUT_SECS", "Mạng", "120", 30, 900, "giây", "Timeout mỗi lần đọc socket (cần restart)")),
     b("DS_DEBUG_SSE", "Mạng", "0", "Ghi SSE thô vào /tmp/ds_debug_sse.log (chỉ để gỡ lỗi)"),
 ];
@@ -85,8 +87,11 @@ fn file_path() -> std::path::PathBuf {
 fn load() -> HashMap<String, String> {
     let m: HashMap<String, String> = std::fs::read_to_string(file_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     // bỏ khoá lạ hoặc giá trị sai kiểu (file sửa tay)
-    m.into_iter().filter(|(k, v)| find(k).is_some_and(|d| d.show && validate(d, v).is_ok())).collect()
+    m.into_iter().filter(|(k, v)| find(k).is_some_and(|d| (d.show || LEGACY.contains(&d.key)) && validate(d, v).is_ok())).collect()
 }
+
+/// Khoá cũ đã ẩn nhưng vẫn phải nạp từ settings.json để chuyển sang khoá mới (không được làm mất khi ghi lại file).
+const LEGACY: &[&str] = &["DS_EGRESS_URL", "DS_EGRESS_KEY"];
 
 fn find(key: &str) -> Option<&'static Def> { DEFS.iter().find(|d| d.key == key) }
 
@@ -139,6 +144,12 @@ pub fn import_overrides(m: &HashMap<String, String>, overwrite: bool, dry: bool)
         ok += 1;
     }
     (ok, skip)
+}
+
+/// Bỏ giá trị đã đặt của một khoá (kể cả khoá ẩn) và ghi đĩa — dùng khi chuyển cấu hình cũ sang chỗ mới.
+pub fn forget(key: &str) {
+    overrides().write().unwrap_or_else(|e| e.into_inner()).remove(key);
+    persist();
 }
 
 /// Đặt giá trị (None = bỏ override, quay về env/mặc định) và ghi đĩa.
@@ -200,9 +211,14 @@ mod tests {
     }
 
     #[test]
+    fn legacy_worker_keys_survive_loading() {
+        for k in LEGACY { assert!(find(k).is_some_and(|d| !d.show), "{k} phải là khoá ẩn nhưng còn nạp được"); }
+    }
+
+    #[test]
     fn only_verified_settings_are_exposed() {
         let shown: Vec<&str> = DEFS.iter().filter(|d| d.show).map(|d| d.key).collect();
-        assert_eq!(shown, ["DS_STATEFUL", "DS_POW_PREFETCH", "DS_WEB_BOOT", "DS_DEFAULT_EFFORT", "DS_CONTEXT_TOKENS", "DS_PROMPT_MAX_CHARS", "DS_MAX_CONC_PER_ACC", "DS_HOURLY_LIMIT", "DS_MAX_RPM", "DS_DEVICE_REFRESH_HOURS", "DS_TZ_OFFSET", "DS_FX_CNY", "DS_FX_VND", "DS_PROXY_MODE", "DS_EGRESS_URL", "DS_EGRESS_KEY", "DS_EGRESS_ON", "DS_EGRESS_DAILY_LIMIT", "DS_PROXY_LIST"]);
+        assert_eq!(shown, ["DS_STATEFUL", "DS_POW_PREFETCH", "DS_WEB_BOOT", "DS_DEFAULT_EFFORT", "DS_CONTEXT_TOKENS", "DS_PROMPT_MAX_CHARS", "DS_MAX_CONC_PER_ACC", "DS_HOURLY_LIMIT", "DS_MAX_RPM", "DS_DEVICE_REFRESH_HOURS", "DS_TZ_OFFSET", "DS_FX_CNY", "DS_FX_VND", "DS_PROXY_MODE", "DS_PROXY_LIST", "DS_EGRESS_ON", "DS_EGRESS_WORKERS", "DS_EGRESS_DAILY_LIMIT"]);
         assert!(set("DS_BURST_LIMIT", Some("5")).is_err(), "mục ẩn không được đặt qua API");
     }
 

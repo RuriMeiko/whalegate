@@ -601,8 +601,8 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | ⚙️ `DS_STATEFUL` | `1` | Continue web conversations and send deltas only |
 | ⚙️ `DS_POW_PREFETCH` | `1` | Fetch and solve the next PoW ahead of time |
 | ⚙️ `DS_DEFAULT_EFFORT` | `none` | Effort when the client doesn't specify one |
-| ⚙️ `DS_CONTEXT_TOKENS` | `512000` | `context_length` advertised in `/v1/models`. The web app accepts ≥512K, while ~1.1M returns an empty stream |
-| ⚙️ `DS_PROMPT_MAX_CHARS` | `1822000` | Over budget: trim old tool results first, then drop the oldest turns |
+| ⚙️ `DS_CONTEXT_TOKENS` | `256000` | `context_length` advertised in `/v1/models`. The web app accepts ≥512K (and ~1.1M returns an empty stream), but 256K keeps prompts smaller and less conspicuous |
+| ⚙️ `DS_PROMPT_MAX_CHARS` | `912000` | Over budget: trim old tool results first, then drop the oldest turns |
 | ⚙️ `DS_MAX_CONC_PER_ACC` | `2` | In-flight requests per account. More than 2 tends to get rate-limited |
 | ⚙️ `DS_TZ_OFFSET` | `25200` | Timezone offset in seconds sent to the web app and used for daily stats |
 | ⚙️ `DS_FX_CNY` | `720` | Exchange rate for the dashboard in Chinese, in units of 0.01 ¥ per USD (`720` = 7.20 ¥). Costs are computed in USD and converted for display |
@@ -677,7 +677,7 @@ Either way the config is idempotent, backs up `cordis.patch.yml` to `.bak.<times
         compat: { supportsDeveloperRole: false, supportsReasoningEffort: true, supportsUsageInStreaming: true }
         models:
           - id: deepseek-web
-            contextWindow: 512000        # derived, see below
+            contextWindow: 256000        # derived, see below
             maxTokens: 32768
             input: [text, image]
             reasoningEfforts: { off: none, low: auto, max: max }
@@ -688,7 +688,7 @@ Either way the config is idempotent, backs up `cordis.patch.yml` to `.bak.<times
 ```
 
 - **The key goes straight into `headers`.** dsh's OpenAI transport refuses to send a request without a credential, even to a keyless local server. Writing it inline means there's no `apiKeyEnv` or `.env` to set, which also fixes `no credential for provider route`.
-- **`contextWindow` is chosen so history never overflows.** dsh compacts at 80% of the window, while whalegate has to trim history itself once a prompt passes `DS_PROMPT_MAX_CHARS` (1.822M characters). Assuming a worst case of ~4 characters per token plus 10% headroom for the tool spec, the window is `DS_PROMPT_MAX_CHARS × 0.9 ÷ 4 ÷ 0.8`, capped by `DS_CONTEXT_TOKENS`. That gives ≈512K by default, so dsh always summarizes before the gateway would cut anything. Change *Prompt cap* on the dashboard and run the setup again to follow it.
+- **`contextWindow` is chosen so history never overflows.** dsh compacts at 80% of the window, while whalegate has to trim history itself once a prompt passes `DS_PROMPT_MAX_CHARS` (912K characters). Assuming a worst case of ~4 characters per token plus 10% headroom for the tool spec, the window is `DS_PROMPT_MAX_CHARS × 0.9 ÷ 4 ÷ 0.8`, capped by `DS_CONTEXT_TOKENS`. That gives ≈256K by default, so dsh always summarizes before the gateway would cut anything. Change *Prompt cap* on the dashboard and run the setup again to follow it.
 
 ```mermaid
 flowchart LR

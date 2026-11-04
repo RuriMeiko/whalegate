@@ -185,9 +185,10 @@ impl<'a> CompletionBody<'a> {
 ///
 /// Trả (proxy để gắn vào client, chuỗi gốc để so cache).
 fn pick_proxy(token: &str) -> Result<(Option<wreq::Proxy>, Option<String>)> {
+    let fp_seed = crate::fingerprint::seed_for(token);
     // Cổng ra qua Cloudflare Worker (đường hầm TCP, TLS đi nguyên vẹn): dùng cho acc không có proxy riêng
     let egress = || -> Result<(Option<wreq::Proxy>, Option<String>)> {
-        match crate::egress::proxy_url() {
+        match crate::egress::proxy_url_for(&fp_seed) {
             Some(u) => Ok((Some(wreq::Proxy::all(&u)?), Some(format!("egress:{u}")))),
             None => Ok((None, None)),
         }
@@ -202,10 +203,9 @@ fn pick_proxy(token: &str) -> Result<(Option<wreq::Proxy>, Option<String>)> {
         }
     }
     // ghim theo SEED của vân tay, không theo token: acc bị xoá rồi thêm lại (token mới) vẫn giữ nguyên IP
-    let fp_seed = crate::fingerprint::seed_for(token);
     let entry = crate::proxypool::proxy_for(&fp_seed, &pool);
     let Some(entry) = entry else {
-        if crate::egress::proxy_url().is_some() { return egress(); }
+        if crate::egress::proxy_url_for(&fp_seed).is_some() { return egress(); }
         return match pool.mode {
             crate::proxypool::Mode::Strict => Err(anyhow::anyhow!(
                 "chế độ proxy=strict nhưng không có proxy nào dùng được ({})",

@@ -621,8 +621,8 @@ curl -fsSL https://raw.githubusercontent.com/RuriMeiko/whalegate/main/install.sh
 | ⚙️ `DS_STATEFUL` | `1` | 延续网页对话，只发送增量 |
 | ⚙️ `DS_POW_PREFETCH` | `1` | 提前获取并解算下一个 PoW |
 | ⚙️ `DS_DEFAULT_EFFORT` | `none` | 客户端未指定时的推理强度 |
-| ⚙️ `DS_CONTEXT_TOKENS` | `512000` | `/v1/models` 中公布的 `context_length`。网页应用接受 ≥512K，而约 1.1M 会返回空流 |
-| ⚙️ `DS_PROMPT_MAX_CHARS` | `1822000` | 超出预算：先裁剪旧的工具结果，再丢弃最早的回合 |
+| ⚙️ `DS_CONTEXT_TOKENS` | `256000` | `/v1/models` 中公布的 `context_length`。网页应用接受 ≥512K（约 1.1M 会返回空流），但 256K 能让 prompt 更小、更不显眼 |
+| ⚙️ `DS_PROMPT_MAX_CHARS` | `912000` | 超出预算：先裁剪旧的工具结果，再丢弃最早的回合 |
 | ⚙️ `DS_MAX_CONC_PER_ACC` | `2` | 每个账号同时处理的请求数。超过 2 往往会被限速 |
 | ⚙️ `DS_TZ_OFFSET` | `25200` | 发送给网页应用并用于按日统计的时区偏移（秒） |
 | ⚙️ `DS_FX_CNY` | `720` | 控制面板为中文时使用的汇率，单位为每美元 0.01 ¥（`720` = 7.20 ¥）。费用以美元计算，显示时再换算 |
@@ -699,7 +699,7 @@ dsh（`@deepseek-ai/dsh`，支持 Linux、macOS 和 Windows）从 profile 的补
         compat: { supportsDeveloperRole: false, supportsReasoningEffort: true, supportsUsageInStreaming: true }
         models:
           - id: deepseek-web
-            contextWindow: 512000        # 推导而来，见下文
+            contextWindow: 256000        # 推导而来，见下文
             maxTokens: 32768
             input: [text, image]
             reasoningEfforts: { off: none, low: auto, max: max }
@@ -710,7 +710,7 @@ dsh（`@deepseek-ai/dsh`，支持 Linux、macOS 和 Windows）从 profile 的补
 ```
 
 - **密钥直接写进 `headers`。** dsh 的 OpenAI 传输层在没有凭据时拒绝发送请求，哪怕对象是不需要密钥的本地服务器。直接写在里面，就不需要 `apiKeyEnv` 或 `.env`，同时也解决了 `no credential for provider route` 的报错。
-- **`contextWindow` 的取值保证历史永远不会溢出。** dsh 在窗口用到 80% 时压缩，而当 prompt 超过 `DS_PROMPT_MAX_CHARS`（182.2 万字符）时，whalegate 必须自己裁剪历史。按最坏情况每个 Token 约 4 个字符，再给工具说明留出 10% 余量，窗口为 `DS_PROMPT_MAX_CHARS × 0.9 ÷ 4 ÷ 0.8`，并受 `DS_CONTEXT_TOKENS` 限制。默认得到约 512K，所以 dsh 总是先做摘要，网关无需裁剪任何内容。在控制面板中修改 *Trần prompt*（Prompt 上限）后，重新运行配置即可同步。
+- **`contextWindow` 的取值保证历史永远不会溢出。** dsh 在窗口用到 80% 时压缩，而当 prompt 超过 `DS_PROMPT_MAX_CHARS`（91.2 万字符）时，whalegate 必须自己裁剪历史。按最坏情况每个 Token 约 4 个字符，再给工具说明留出 10% 余量，窗口为 `DS_PROMPT_MAX_CHARS × 0.9 ÷ 4 ÷ 0.8`，并受 `DS_CONTEXT_TOKENS` 限制。默认得到约 256K，所以 dsh 总是先做摘要，网关无需裁剪任何内容。在控制面板中修改 *Trần prompt*（Prompt 上限）后，重新运行配置即可同步。
 
 ```mermaid
 flowchart LR

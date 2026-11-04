@@ -83,7 +83,7 @@ fn build_session(mut st: RegState) -> Result<Session> {
         .cookie_provider(jar.clone())
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(30));
-    if let Some(u) = crate::egress::proxy_url() { builder = builder.proxy(wreq::Proxy::all(&u)?); }
+    if let Some(u) = crate::egress::proxy_url_for(&st.fp_seed) { builder = builder.proxy(wreq::Proxy::all(&u)?); }
     let client = builder.build()?;
     // nạp cookie đã lưu từ pha trước
     let url: wreq::Uri = format!("{}/", ORIGIN).parse().expect("static url");
@@ -534,7 +534,7 @@ async fn cmd_capture(email: Option<&str>) -> Result<()> {
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg(&url)
-        .args(crate::egress::chrome_args())
+        .args(crate::egress::chrome_args("capture"))
         .stdout(std::process::Stdio::null());
     // stderr vào file: Chrome chết lúc khởi động (thiếu màn hình, profile bị khoá) thì lý do nằm ở đây
     let err_log = profile.join("chrome-stderr.log");

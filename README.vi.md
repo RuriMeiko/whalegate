@@ -617,8 +617,8 @@ Thứ tự ưu tiên: giá trị đã lưu trên dashboard → biến môi trư�
 | ⚙️ `DS_STATEFUL` | `1` | Tiếp tục hội thoại web và chỉ gửi phần delta |
 | ⚙️ `DS_POW_PREFETCH` | `1` | Tải và giải trước PoW kế tiếp |
 | ⚙️ `DS_DEFAULT_EFFORT` | `none` | Mức suy nghĩ khi client không chỉ định |
-| ⚙️ `DS_CONTEXT_TOKENS` | `512000` | `context_length` báo trong `/v1/models`. Ứng dụng web nhận ≥512K, còn ~1.1M trả stream rỗng |
-| ⚙️ `DS_PROMPT_MAX_CHARS` | `1822000` | Quá ngân sách: cắt kết quả tool cũ trước, rồi bỏ các lượt cũ nhất |
+| ⚙️ `DS_CONTEXT_TOKENS` | `256000` | `context_length` báo trong `/v1/models`. Ứng dụng web nhận ≥512K (~1.1M thì trả stream rỗng), nhưng 256K giữ prompt nhỏ hơn, đỡ gây chú ý |
+| ⚙️ `DS_PROMPT_MAX_CHARS` | `912000` | Quá ngân sách: cắt kết quả tool cũ trước, rồi bỏ các lượt cũ nhất |
 | ⚙️ `DS_MAX_CONC_PER_ACC` | `2` | Số request đang chạy trên mỗi tài khoản. Hơn 2 dễ bị giới hạn tốc độ |
 | ⚙️ `DS_TZ_OFFSET` | `25200` | Độ lệch múi giờ (giây) gửi cho ứng dụng web và dùng cho thống kê theo ngày |
 | ⚙️ `DS_FX_CNY` | `720` | Tỷ giá khi dashboard ở tiếng Trung, tính bằng 0,01 ¥ cho mỗi USD (`720` = 7,20 ¥). Chi phí được tính gốc bằng USD rồi đổi khi hiển thị |
@@ -695,7 +695,7 @@ Cách nào thì cấu hình cũng idempotent, sao lưu `cordis.patch.yml` thành
         compat: { supportsDeveloperRole: false, supportsReasoningEffort: true, supportsUsageInStreaming: true }
         models:
           - id: deepseek-web
-            contextWindow: 512000        # suy ra, xem bên dưới
+            contextWindow: 256000        # suy ra, xem bên dưới
             maxTokens: 32768
             input: [text, image]
             reasoningEfforts: { off: none, low: auto, max: max }
@@ -706,7 +706,7 @@ Cách nào thì cấu hình cũng idempotent, sao lưu `cordis.patch.yml` thành
 ```
 
 - **Key được ghi thẳng vào `headers`.** Transport OpenAI của dsh từ chối gửi request nếu không có thông tin xác thực, kể cả tới một server cục bộ không cần key. Ghi sẵn như vậy thì không cần `apiKeyEnv` hay `.env`, và cũng sửa luôn lỗi `no credential for provider route`.
-- **`contextWindow` được chọn để lịch sử không bao giờ tràn.** dsh nén ở 80% cửa sổ, còn whalegate phải tự cắt lịch sử khi prompt vượt `DS_PROMPT_MAX_CHARS` (1,822M ký tự). Giả định xấu nhất ~4 ký tự mỗi token cộng 10% dự phòng cho phần đặc tả tool, cửa sổ là `DS_PROMPT_MAX_CHARS × 0.9 ÷ 4 ÷ 0.8`, bị chặn bởi `DS_CONTEXT_TOKENS`. Mặc định ra ≈512K, nên dsh luôn tóm tắt trước khi gateway phải cắt bất cứ thứ gì. Đổi *Trần prompt* trên dashboard rồi chạy lại setup để theo kịp.
+- **`contextWindow` được chọn để lịch sử không bao giờ tràn.** dsh nén ở 80% cửa sổ, còn whalegate phải tự cắt lịch sử khi prompt vượt `DS_PROMPT_MAX_CHARS` (912K ký tự). Giả định xấu nhất ~4 ký tự mỗi token cộng 10% dự phòng cho phần đặc tả tool, cửa sổ là `DS_PROMPT_MAX_CHARS × 0.9 ÷ 4 ÷ 0.8`, bị chặn bởi `DS_CONTEXT_TOKENS`. Mặc định ra ≈256K, nên dsh luôn tóm tắt trước khi gateway phải cắt bất cứ thứ gì. Đổi *Trần prompt* trên dashboard rồi chạy lại setup để theo kịp.
 
 ```mermaid
 flowchart LR

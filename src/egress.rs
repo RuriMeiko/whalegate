@@ -11,59 +11,128 @@ use std::sync::OnceLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
-static PORT: OnceLock<u16> = OnceLock::new();
+/// Mỗi Worker có một proxy cục bộ riêng (cổng riêng) để Chrome — vốn không gắn được thông tin đăng nhập vào proxy — vẫn chọn được Worker.
+static PORTS: OnceLock<Vec<u16>> = OnceLock::new();
 static ACTIVE: AtomicU64 = AtomicU64::new(0);
 static TOTAL: AtomicU64 = AtomicU64::new(0);
 static FAILED: AtomicU64 = AtomicU64::new(0);
 static DIRECT: AtomicU64 = AtomicU64::new(0);
 static LAST_ERR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
-/// Cấu hình đang hiệu lực: (URL Worker chuẩn hoá, khoá). None nếu chưa đặt, tắt, hoặc URL sai.
-pub fn config() -> Option<(String, String)> {
-    if !crate::settings::boolean("DS_EGRESS_ON") { return None; }
-    let u = crate::settings::get("DS_EGRESS_URL");
-    let u = u.trim().trim_end_matches('/');
-    let k = crate::settings::get("DS_EGRESS_KEY").trim().to_string();
-    if (u.starts_with("https://") || u.starts_with("http://")) && !k.is_empty() { Some((u.to_string(), k)) } else { None }
+pub const MAX_WORKERS: usize = 8;
+
+/// Một Worker cổng ra. `tag` là id account Cloudflare đã deploy nó (để gỡ đúng Worker), có thể trống.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Worker { pub url: String, pub key: String, pub tag: String }
+
+/// Mỗi dòng: `địa-chỉ khoá [# tag]`. Bỏ dòng sai, trùng địa chỉ, và quá `MAX_WORKERS`.
+pub(crate) fn parse_workers(text: &str) -> Vec<Worker> {
+    let mut out: Vec<Worker> = Vec::new();
+    for line in text.lines() {
+        let (body, tag) = match line.split_once('#') { Some((b, t)) => (b, t.trim()), None => (line, "") };
+        let mut it = body.split_whitespace();
+        let (Some(u), Some(k)) = (it.next(), it.next()) else { continue };
+        let u = u.trim_end_matches('/');
+        if !(u.starts_with("https://") || u.starts_with("http://")) || out.iter().any(|w| w.url == u) { continue; }
+        out.push(Worker { url: u.to_string(), key: k.to_string(), tag: tag.to_string() });
+        if out.len() >= MAX_WORKERS { break; }
+    }
+    out
 }
 
-/// `http://127.0.0.1:cổng` của proxy cục bộ khi cổng ra đang bật.
-pub fn proxy_url() -> Option<String> {
-    if config().is_none() { return None; }
-    PORT.get().map(|p| format!("http://127.0.0.1:{p}"))
+pub(crate) fn format_workers(ws: &[Worker]) -> String {
+    ws.iter().map(|w| if w.tag.is_empty() { format!("{} {}", w.url, w.key) } else { format!("{} {} # {}", w.url, w.key, w.tag) }).collect::<Vec<_>>().join("\n")
+}
+
+/// Mọi Worker đã cấu hình, kể cả khi công tắc tổng đang tắt. Cấu hình cũ (một Worker ở DS_EGRESS_URL/KEY) vẫn được đọc.
+pub fn all_workers() -> Vec<Worker> {
+    let mut v = parse_workers(&crate::settings::get("DS_EGRESS_WORKERS"));
+    let (u, k) = (crate::settings::get("DS_EGRESS_URL"), crate::settings::get("DS_EGRESS_KEY"));
+    if !u.trim().is_empty() && !k.trim().is_empty() {
+        let old = parse_workers(&format!("{} {}", u.trim(), k.trim()));
+        if let Some(w) = old.into_iter().next() { if !v.iter().any(|x| x.url == w.url) { v.insert(0, w); v.truncate(MAX_WORKERS); } }
+    }
+    v
+}
+
+/// Các Worker đang có hiệu lực (công tắc tổng bật).
+pub fn workers() -> Vec<Worker> {
+    if crate::settings::boolean("DS_EGRESS_ON") { all_workers() } else { Vec::new() }
+}
+
+/// Worker của một acc, ghim cố định theo seed vân tay (FNV-1a) để IP không nhảy giữa các lần chạy.
+pub(crate) fn worker_index(seed: &str, n: usize) -> usize {
+    if n == 0 { return 0; }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in seed.bytes() { h ^= b as u64; h = h.wrapping_mul(0x100000001b3); }
+    (h % n as u64) as usize
+}
+
+fn port_url(idx: usize) -> Option<String> { PORTS.get().and_then(|p| p.get(idx)).map(|p| format!("http://127.0.0.1:{p}")) }
+
+/// Proxy cục bộ dẫn tới Worker số `idx` (dùng khi đo IP từng Worker).
+pub fn proxy_url_idx(idx: usize) -> Option<String> {
+    if idx >= workers().len() { return None; }
+    port_url(idx)
+}
+
+/// `http://127.0.0.1:cổng` của proxy cục bộ dành cho acc có vân tay `seed`, khi có Worker đang bật.
+pub fn proxy_url_for(seed: &str) -> Option<String> {
+    let n = workers().len();
+    if n == 0 { return None; }
+    port_url(worker_index(seed, n))
 }
 
 /// Cờ Chrome: đi qua proxy cục bộ và chặn WebRTC lộ IP thật qua UDP.
-pub fn chrome_args() -> Vec<String> {
-    match proxy_url() {
+pub fn chrome_args(seed: &str) -> Vec<String> {
+    match proxy_url_for(seed) {
         Some(u) => vec![format!("--proxy-server={u}"), "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into()],
         None => Vec::new(),
     }
 }
 
-/// Mở cổng proxy cục bộ (luôn mở, rẻ); có dùng hay không do `config()` quyết định mỗi lần có kết nối.
-pub async fn start() {
-    if PORT.get().is_some() { return; }
-    let l = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
-        Ok(l) => l,
-        Err(e) => { crate::elog!("[egress] không mở được proxy cục bộ: {e}"); return; }
-    };
-    let Ok(addr) = l.local_addr() else { return };
-    let _ = PORT.set(addr.port());
-    loop {
-        let Ok((s, _)) = l.accept().await else { continue };
-        tokio::spawn(async move {
-            ACTIVE.fetch_add(1, Ordering::Relaxed);
-            let r = handle(s).await;
-            ACTIVE.fetch_sub(1, Ordering::Relaxed);
-            if let Err(e) = r {
-                FAILED.fetch_add(1, Ordering::Relaxed);
-                let msg = format!("{e:#}");
-                crate::elog!("[egress] {msg}");
-                *LAST_ERR.lock().unwrap_or_else(|p| p.into_inner()) = msg;
-            }
-        });
+/// Chuyển cấu hình một-Worker cũ (DS_EGRESS_URL/KEY) sang danh sách mới rồi xoá cấu hình cũ.
+fn migrate_legacy() {
+    let (u, k) = (crate::settings::get("DS_EGRESS_URL"), crate::settings::get("DS_EGRESS_KEY"));
+    if u.trim().is_empty() && k.trim().is_empty() { return; }
+    let all = all_workers();
+    if crate::settings::set("DS_EGRESS_WORKERS", Some(&format_workers(&all))).is_ok() {
+        crate::settings::forget("DS_EGRESS_URL");
+        crate::settings::forget("DS_EGRESS_KEY");
     }
+}
+
+/// Mở các cổng proxy cục bộ (luôn mở, rẻ); dùng Worker nào do `workers()` quyết định mỗi lần có kết nối.
+pub async fn start() {
+    if PORTS.get().is_some() { return; }
+    migrate_legacy();
+    let mut listeners = Vec::new();
+    for _ in 0..MAX_WORKERS {
+        match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(l) => listeners.push(l),
+            Err(e) => { crate::elog!("[egress] không mở được proxy cục bộ: {e}"); return; }
+        }
+    }
+    let ports: Vec<u16> = listeners.iter().filter_map(|l| l.local_addr().ok().map(|a| a.port())).collect();
+    if ports.len() != listeners.len() { return; }
+    let _ = PORTS.set(ports);
+    let tasks = listeners.into_iter().enumerate().map(|(idx, l)| async move {
+        loop {
+            let Ok((s, _)) = l.accept().await else { continue };
+            tokio::spawn(async move {
+                ACTIVE.fetch_add(1, Ordering::Relaxed);
+                let r = handle(s, idx).await;
+                ACTIVE.fetch_sub(1, Ordering::Relaxed);
+                if let Err(e) = r {
+                    FAILED.fetch_add(1, Ordering::Relaxed);
+                    let msg = format!("{e:#}");
+                    crate::elog!("[egress] {msg}");
+                    *LAST_ERR.lock().unwrap_or_else(|p| p.into_inner()) = msg;
+                }
+            });
+        }
+    });
+    futures::future::join_all(tasks).await;
 }
 
 fn parse_connect(head: &str) -> Result<(String, u16)> {
@@ -103,7 +172,7 @@ fn ws_url(base: &str, host: &str, port: u16) -> String {
     format!("{b}/__tunnel?host={host}&port={port}")
 }
 
-async fn handle(mut tcp: tokio::net::TcpStream) -> Result<()> {
+async fn handle(mut tcp: tokio::net::TcpStream, idx: usize) -> Result<()> {
     let mut buf: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 2048];
     let head_end = loop {
@@ -118,10 +187,12 @@ async fn handle(mut tcp: tokio::net::TcpStream) -> Result<()> {
         Ok(x) => x,
         Err(_) => { let _ = tcp.write_all(b"HTTP/1.1 501 Not Implemented\r\n\r\n").await; return Ok(()); } // http:// thường (kiểm tra mạng của Chrome…): không hỗ trợ, không phải lỗi
     };
-    let Some((base, key)) = config() else {
+    let ws_list = workers();
+    if ws_list.is_empty() {
         let _ = tcp.write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n").await;
         bail!("cổng ra đang tắt");
-    };
+    }
+    let Worker { url: base, key, .. } = ws_list[idx % ws_list.len()].clone();
     // đích nằm trên IP Cloudflare (vd hCaptcha): Worker không nối tới được → đi thẳng từ máy này
     let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port)).await.map(|i| i.collect()).unwrap_or_default();
     if addrs.iter().any(|a| is_cloudflare_ip(a.ip())) {
@@ -143,7 +214,7 @@ async fn handle(mut tcp: tokio::net::TcpStream) -> Result<()> {
         Err(_) => { let _ = tcp.write_all(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n").await; bail!("Worker không trả lời khi mở đường hầm tới {host}:{port}"); }
     };
     TOTAL.fetch_add(1, Ordering::Relaxed);
-    bump_usage();
+    bump_usage(&base);
     tcp.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await?;
 
     let (mut wtx, mut wrx) = ws.split();
@@ -180,41 +251,57 @@ async fn handle(mut tcp: tokio::net::TcpStream) -> Result<()> {
 fn usage_path() -> std::path::PathBuf { std::path::Path::new(&crate::server::data_dir()).join("egress-usage.json") }
 fn day() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 86400).unwrap_or(0) }
 
-static DAYS: std::sync::Mutex<Option<std::collections::BTreeMap<u64, u64>>> = std::sync::Mutex::new(None);
+type Days = std::collections::BTreeMap<u64, u64>;
+static DAYS: std::sync::Mutex<Option<std::collections::BTreeMap<String, Days>>> = std::sync::Mutex::new(None);
 static LAST_SAVE: AtomicU64 = AtomicU64::new(0);
 
-fn with_days<R>(f: impl FnOnce(&mut std::collections::BTreeMap<u64, u64>) -> R) -> R {
+/// Số đường hầm mỗi ngày theo từng Worker (khoá = URL). File cũ (chỉ có ngày → số) được gán cho Worker đầu tiên.
+fn load_days() -> std::collections::BTreeMap<String, Days> {
+    let Ok(t) = std::fs::read_to_string(usage_path()) else { return Default::default() };
+    if let Ok(m) = serde_json::from_str(&t) { return m; }
+    let mut out = std::collections::BTreeMap::new();
+    if let Ok(old) = serde_json::from_str::<Days>(&t) {
+        out.insert(all_workers().first().map(|w| w.url.clone()).unwrap_or_default(), old);
+    }
+    out
+}
+
+fn with_days<R>(f: impl FnOnce(&mut std::collections::BTreeMap<String, Days>) -> R) -> R {
     let mut g = DAYS.lock().unwrap_or_else(|p| p.into_inner());
-    let m = g.get_or_insert_with(|| std::fs::read_to_string(usage_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default());
+    let m = g.get_or_insert_with(load_days);
     f(m)
 }
 
-fn bump_usage() {
+fn bump_usage(url: &str) {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let snapshot = with_days(|m| {
-        *m.entry(day()).or_insert(0) += 1;
         let d = day();
-        m.retain(|k, _| d.saturating_sub(*k) < 60);
+        let e = m.entry(url.to_string()).or_default();
+        *e.entry(d).or_insert(0) += 1;
+        for v in m.values_mut() { v.retain(|k, _| d.saturating_sub(*k) < 60); }
         if now.saturating_sub(LAST_SAVE.load(Ordering::Relaxed)) >= 10 { LAST_SAVE.store(now, Ordering::Relaxed); serde_json::to_string(m).ok() } else { None }
     });
     if let Some(s) = snapshot { let _ = std::fs::write(usage_path(), s); }
 }
 
-/// Tổng đường hầm đã mở trong `n` ngày UTC gần nhất (Cloudflare đặt lại hạn mức Free lúc 00:00 UTC).
-pub fn used_days(n: u64) -> u64 {
+/// Đường hầm của một Worker (url) trong `n` ngày UTC gần nhất; `url = None` = cộng mọi Worker.
+/// (Cloudflare đặt lại hạn mức Free lúc 00:00 UTC.)
+pub fn used_days(url: Option<&str>, n: u64) -> u64 {
     let d = day();
-    with_days(|m| m.iter().filter(|(k, _)| d.saturating_sub(**k) < n).map(|(_, v)| *v).sum())
+    with_days(|m| m.iter().filter(|(u, _)| url.map_or(true, |x| x == u.as_str()))
+        .flat_map(|(_, v)| v.iter()).filter(|(k, _)| d.saturating_sub(**k) < n).map(|(_, v)| *v).sum())
 }
 
 pub fn stats() -> serde_json::Value {
     serde_json::json!({
-        "port": PORT.get(),
+        "ports": PORTS.get(),
         "active": ACTIVE.load(Ordering::Relaxed),
         "total": TOTAL.load(Ordering::Relaxed),
         "failed": FAILED.load(Ordering::Relaxed),
         "direct": DIRECT.load(Ordering::Relaxed),
         "last_error": LAST_ERR.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-        "today": used_days(1), "d7": used_days(7), "d30": used_days(30),
+        "today": used_days(None, 1), "d7": used_days(None, 7), "d30": used_days(None, 30),
+        "workers": workers().iter().map(|w| serde_json::json!({"url": w.url, "today": used_days(Some(&w.url), 1), "d7": used_days(Some(&w.url), 7), "d30": used_days(Some(&w.url), 30)})).collect::<Vec<_>>(),
         "daily_limit": crate::settings::uint("DS_EGRESS_DAILY_LIMIT"),
     })
 }
@@ -251,8 +338,31 @@ mod tests {
 
     #[test]
     fn off_without_url_and_key() {
-        assert!(config().is_none());
-        assert!(proxy_url().is_none());
-        assert!(chrome_args().is_empty());
+        assert!(workers().is_empty());
+        assert!(proxy_url_for("seed").is_none());
+        assert!(chrome_args("seed").is_empty());
+    }
+
+    #[test]
+    fn parses_worker_lines() {
+        let t = "https://a.example.workers.dev/ k1 # acc1\n\nbad line\nftp://x k\nhttps://a.example.workers.dev k2\nhttps://b.example.workers.dev k3";
+        let w = parse_workers(t);
+        assert_eq!(w.len(), 2, "dòng sai và trùng địa chỉ bị bỏ");
+        assert_eq!((w[0].url.as_str(), w[0].key.as_str(), w[0].tag.as_str()), ("https://a.example.workers.dev", "k1", "acc1"));
+        assert_eq!(w[1].tag, "");
+        assert_eq!(parse_workers(&format_workers(&w)), w, "ghi ra rồi đọc lại phải giữ nguyên");
+        let many: String = (0..20).map(|i| format!("https://w{i}.example.workers.dev k\n")).collect();
+        assert_eq!(parse_workers(&many).len(), MAX_WORKERS);
+    }
+
+    #[test]
+    fn accounts_are_pinned_to_a_worker() {
+        for n in 1..=MAX_WORKERS {
+            let i = worker_index("2216de35-a20a-4238-a004-94d67e2f9b27", n);
+            assert!(i < n);
+            assert_eq!(i, worker_index("2216de35-a20a-4238-a004-94d67e2f9b27", n), "cùng seed phải ra cùng Worker");
+        }
+        let spread: std::collections::HashSet<usize> = (0..64).map(|i| worker_index(&format!("seed-{i}"), 4)).collect();
+        assert_eq!(spread.len(), 4, "các acc phải rải đều ra cả 4 Worker");
     }
 }

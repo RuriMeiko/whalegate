@@ -105,6 +105,35 @@
   @media (prefers-reduced-motion: reduce) { .modal.open, .dlg.shake { animation: none; } }
   .dlg { background: var(--bg); border: 1px solid var(--ink); width: min(540px, 100%); max-height: 100%; display: flex; flex-direction: column; box-shadow: 6px 6px 0 var(--ink); }
   .dlg.log { width: min(1280px, 100%); height: 100%; }
+  * { scrollbar-width: thin; scrollbar-color: var(--ink) var(--hair); }
+  *::-webkit-scrollbar { width: 12px; height: 12px; }
+  *::-webkit-scrollbar-track { background: var(--hair); border-left: 1px solid var(--ink); }
+  *::-webkit-scrollbar:horizontal { height: 12px; } *::-webkit-scrollbar-track:horizontal { border-left: 0; border-top: 1px solid var(--ink); }
+  *::-webkit-scrollbar-thumb { background: var(--ink); border: 3px solid var(--hair); }
+  *::-webkit-scrollbar-thumb:hover { background: var(--mute); }
+  *::-webkit-scrollbar-corner { background: var(--hair); }
+  .q { flex: none; width: 18px; height: 18px; min-height: 0; padding: 0; margin-left: 6px; border: 1px solid var(--ink); background: transparent; font: 600 11px/1 var(--mono); vertical-align: middle; }
+  .q:hover, .q[aria-expanded=true] { background: var(--ink); color: var(--bg); }
+  .help { margin: 6px 0 2px; padding: 8px 10px; border: 1px solid var(--hair); border-left: 3px solid var(--ink); background: rgba(29, 27, 23, .05); font: 11px/1.5 var(--mono); color: var(--mute); }
+  .dlg.set { width: min(900px, 100%); height: min(760px, 100%); }
+  .dlg.set .inner { padding: 0; display: flex; flex-direction: column; }
+  .stabs { display: flex; gap: 0; border-bottom: 1px solid var(--ink); overflow-x: auto; flex: none; background: var(--bg); -webkit-overflow-scrolling: touch; }
+  .stabs button { border: 0; border-right: 1px solid var(--hair); background: transparent; height: 40px; padding: 0 14px; font: 600 12px/1 var(--mono); white-space: nowrap; flex: none; position: relative; }
+  .stabs button.on { background: var(--ink); color: var(--bg); }
+  .stabs button.dot::after { content: ''; position: absolute; top: 8px; right: 6px; width: 6px; height: 6px; background: #b4541a; }
+  .spane { padding: 14px 16px; overflow: auto; flex: 1; }
+  .sub-h { display: flex; align-items: center; gap: 10px; margin: 16px 0 2px; padding: 8px 10px; border: 1px solid var(--ink); background: var(--hair); font: 600 12px/1.2 var(--mono); }
+  .sub-h:first-child, .routes + .sub-h { margin-top: 12px; }
+  .sub-h .sp { flex: 1; }
+  .routes { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); gap: 6px; align-items: stretch; }
+  .routes .rt { border: 1px solid var(--ink); padding: 8px 10px; min-width: 0; }
+  .routes .rt b { display: block; font: 600 12px/1.3 var(--mono); }
+  .routes .rt span { display: block; font: 11px/1.4 var(--mono); color: var(--mute); margin-top: 3px; }
+  .routes .rt.use { background: var(--ink); color: var(--bg); } .routes .rt.use span { color: inherit; opacity: .8; }
+  .routes .ar { align-self: center; font: 14px/1 var(--mono); color: var(--mute); }
+  .row { flex-wrap: wrap; } .row > .help { flex: 1 1 100%; order: 9; margin: 0 0 4px; }
+  .row.wide { flex-wrap: wrap; align-items: stretch; } .row.wide .ctl { flex: 1 1 100%; margin-left: 0; }
+  @media (max-width: 640px) { .routes { grid-template-columns: 1fr; } .routes .ar { display: none; } }
   .dlg .top { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--ink); flex-wrap: wrap; }
   .dlg .top h2 { margin: 0; font: 600 13px/1 var(--mono); flex: 1; white-space: nowrap; }
   .dlg .inner { padding: 14px; overflow: auto; flex: 1; -webkit-overflow-scrolling: touch; }
@@ -418,7 +447,7 @@
   <div class="dlg">
     <div class="top"><h2>Cloudflare Worker — IP đầu ra</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('cfModal')">×</button></div>
     <div class="inner" id="cfBody"><div class="sub">Đang tải…</div></div>
-    <div class="foot"><span class="sub">Mọi request và cửa sổ Chrome của acc đi qua Worker, DeepSeek thấy IP Cloudflare thay vì IP nhà.</span></div>
+    <div class="foot"><span class="sub">Request và cửa sổ Chrome của acc đi qua Worker, DeepSeek thấy IP Cloudflare thay vì IP nhà. Có thể dùng nhiều Worker (nhiều account Cloudflare).</span></div>
   </div>
 </div>
 
@@ -477,7 +506,7 @@
 
 <!-- cài đặt -->
 <div id="setModal" class="modal">
-  <div class="dlg">
+  <div class="dlg set">
     <div class="top"><h2>Cài đặt</h2><button class="sm solid" aria-label="Đóng" onclick="closeSettings()">×</button></div>
     <div class="inner" id="cfg"></div>
     <div class="foot" id="cfgFoot"></div>
@@ -875,7 +904,7 @@ async function cfToggle(on) {
   cfLoad();
 }
 async function cfRemove() {
-  if (!(await ask('Gỡ Worker?', 'Xoá Worker ds-egress khỏi Cloudflare và xoá khoá. Từ giờ mọi acc đi thẳng bằng IP nhà (hoặc proxy riêng của từng acc).', 'Gỡ', true))) return;
+  if (!(await ask('Gỡ Worker?', 'Xoá Worker ds-egress của account Cloudflare đang đăng nhập và bỏ nó khỏi danh sách. Acc đang ghim vào Worker đó sẽ được chia lại cho các Worker còn lại; hết Worker thì đi thẳng bằng IP nhà (hoặc proxy riêng).', 'Gỡ', true))) return;
   cfDo('remove');
 }
 function cfRow(ok, title, sub) {
@@ -889,15 +918,20 @@ function cfBar(label, used, limit) {
   w.append(head, bar); return w;
 }
 function cfRender() {
-  const d = CF, box = $('cfBody'), w = d.worker || {}, u = d.usage || {};
+  const d = CF, box = $('cfBody'), ws = d.workers || [], u = d.usage || {}, lim = u.daily_limit || 0;
   box.textContent = '';
   box.append(
     cfRow(d.node, 'Node.js', d.node ? (d.node_auto ? 'whalegate đã tự cài vào thư mục dữ liệu' : 'đã có trên máy') : `chưa có — whalegate sẽ tự tải ${d.node_target || 'Node.js'} (~30 MB) từ nodejs.org và kiểm tra checksum`),
-    cfRow(d.logged_in === true ? true : d.logged_in === false ? false : null, 'Đăng nhập Cloudflare', d.logged_in === null ? 'đang kiểm tra…' : d.logged_in ? (d.email || 'đã đăng nhập') : 'chưa đăng nhập — sẽ mở trình duyệt để bạn bấm Allow'),
-    cfRow(w.ready ? true : (w.url ? false : null), 'Worker ds-egress', w.url ? w.url : 'chưa cài'));
+    cfRow(d.logged_in === true ? true : d.logged_in === false ? false : null, 'Account Cloudflare đang đăng nhập', d.logged_in === null ? 'đang kiểm tra…' : d.logged_in ? (d.email || 'đã đăng nhập') : 'chưa đăng nhập — sẽ mở trình duyệt để bạn bấm Allow'));
   const act = el('div', 'cfhd'); act.style.marginTop = '12px';
-  const main = el('button', 'solid sm', w.url ? 'Cài lại / cập nhật Worker' : 'Cài đặt & đăng nhập');
+  const full = ws.length >= (d.max_workers || 8);
+  const main = el('button', 'solid sm', ws.length ? 'Cài lại / cập nhật Worker (account này)' : 'Cài đặt & đăng nhập');
   main.disabled = !!d.op; main.onclick = () => cfDo('setup'); act.append(main);
+  if (ws.length) {
+    const add = el('button', 'sm', '+ Thêm Worker bằng account Cloudflare khác'); add.disabled = !!d.op || full; add.onclick = () => cfDo('add'); act.append(add);
+    const rm = el('button', 'sm del', 'Gỡ Worker của account này'); rm.disabled = !!d.op; rm.onclick = cfRemove; act.append(rm);
+    const chk = el('button', 'sm', 'Kiểm tra tất cả'); chk.disabled = !!d.op; chk.onclick = () => cfDo('refresh'); act.append(chk);
+  }
   if (d.op) act.append(el('span', 'sub', 'đang chạy: ' + ({setup: 'cài đặt', remove: 'gỡ Worker', refresh: 'kiểm tra'}[d.op] || d.op) + '…'));
   box.append(act);
   if (d.login_url) {
@@ -908,26 +942,25 @@ function cfRender() {
   if (d.error) { const e = el('div', 'sub bad', d.error); e.style.marginTop = '8px'; box.append(e); }
   if (d.log && d.log.length && (d.op || d.error)) box.append(el('pre', 'cflog', d.log.join('\n')));
 
-  if (w.url && w.has_key) {
-    const card = el('div', 'cfbox'), hd = el('div', 'cfhd');
-    const nm = el('b', null, 'Cloudflare Worker · ' + w.name); hd.append(nm, el('span', 'sp'));
-    const sw = el('div', 'seg2 mini'); sw.setAttribute('role', 'radiogroup');
-    for (const [val, txt] of [[false, 'TẮT'], [true, 'BẬT']]) {
-      const on = !!w.on === val, b = el('button', on ? 'on' : '', txt); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', on);
-      b.onclick = () => { if (!on) cfToggle(val); }; sw.append(b);
-    }
-    const chk = el('button', 'sm', 'kiểm tra'); chk.disabled = !!d.op; chk.onclick = () => cfDo('refresh');
-    const rm = el('button', 'sm del', 'gỡ'); rm.disabled = !!d.op; rm.onclick = cfRemove;
-    hd.append(sw, chk, rm); card.append(hd);
-    const ipTxt = w.ip ? `IP đầu ra ${w.ip}${w.colo ? ' · trạm ' + w.colo : ''} · phản hồi ${w.probe_ms} ms` : 'chưa đo IP — bấm “kiểm tra”';
-    card.append(el('div', 'sub', (w.on ? 'đang dùng · ' : 'đang tắt · ') + ipTxt));
-    const lim = u.daily_limit || 0;
-    card.append(cfBar('Hôm nay (UTC)', u.today || 0, lim), cfBar('7 ngày', u.d7 || 0, lim ? lim * 7 : 0), cfBar('30 ngày', u.d30 || 0, 0));
-    card.append(el('div', 'sub', `Đường hầm: ${u.active || 0} đang mở · ${u.total || 0} đã mở · ${u.failed || 0} lỗi` + (u.direct ? ` · ${u.direct} đi thẳng (đích nằm trên Cloudflare, vd hCaptcha)` : '') + (u.last_error ? ' · lỗi gần nhất: ' + u.last_error : '')));
-    const note = el('div', 'sub', 'Số liệu do whalegate đếm các kết nối nó mở qua Worker (mỗi kết nối tính 1 request). Cloudflare tính hạn mức riêng — Free là 100.000 request/ngày, đặt lại lúc 00:00 UTC; số chính xác xem trên dash.cloudflare.com. Đổi hạn mức trong Cài đặt nếu bạn dùng gói trả phí.');
-    note.style.marginTop = '6px'; card.append(note);
-    box.append(card);
+  if (!ws.length) return;
+  const head = el('div', 'cfhd'); head.style.marginTop = '14px';
+  head.append(el('b', null, `${ws.length} Worker · mỗi acc DeepSeek được ghim cố định vào một Worker`), el('span', 'sp'));
+  const sw = el('div', 'seg2 mini'); sw.setAttribute('role', 'radiogroup');
+  for (const [val, txt] of [[false, 'TẮT'], [true, 'BẬT']]) {
+    const on = !!d.on === val, b = el('button', on ? 'on' : '', txt); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', on);
+    b.onclick = () => { if (!on) cfToggle(val); }; sw.append(b);
   }
+  head.append(sw); box.append(head);
+  ws.forEach((w, i) => {
+    const card = el('div', 'cfbox');
+    const ipTxt = w.ip ? `IP đầu ra ${w.ip}${w.colo ? ' · trạm ' + w.colo : ''} · phản hồi ${w.probe_ms} ms` : 'chưa đo IP — bấm “Kiểm tra tất cả”';
+    card.append(el('b', null, `Worker ${i + 1} · ${w.url.replace(/^https?:\/\//, '')}`), el('div', 'sub', (d.on ? 'đang dùng · ' : 'đang tắt · ') + ipTxt));
+    card.append(cfBar('Hôm nay (UTC)', w.today || 0, lim), cfBar('7 ngày', w.d7 || 0, lim ? lim * 7 : 0), cfBar('30 ngày', w.d30 || 0, 0));
+    box.append(card);
+  });
+  box.append(el('div', 'sub', `Đường hầm (tất cả Worker): ${u.active || 0} đang mở · ${u.total || 0} đã mở · ${u.failed || 0} lỗi` + (u.direct ? ` · ${u.direct} đi thẳng (đích nằm trên Cloudflare, vd hCaptcha)` : '') + (u.last_error ? ' · lỗi gần nhất: ' + u.last_error : '')));
+  const note = el('div', 'sub', 'Số liệu do whalegate đếm các kết nối nó mở qua từng Worker (mỗi kết nối tính 1 request). Cloudflare tính hạn mức riêng cho mỗi account — Free là 100.000 request/ngày, đặt lại lúc 00:00 UTC; số chính xác xem trên dash.cloudflare.com. Đổi hạn mức trong Cài đặt → IP đầu ra.');
+  note.style.marginTop = '6px'; box.append(note);
 }
 
 const OPENING = new Set(); // acc đang chờ Chrome lên: nút hiện "đang mở…" và không bấm lần hai được
@@ -1192,7 +1225,10 @@ function cfgSet(key, val) {
   const c = CFG.find((x) => x.key === key);
   if (!c) return;
   if (val === c.value) delete PENDING[key]; else PENDING[key] = val;
-  cfgRow(c);
+  const r = document.querySelector('#cfg [data-key="' + key + '"]'); // không dựng lại hàng: đang gõ trong ô thì mất con trỏ
+  if (r) r.classList.toggle('dirty', key in PENDING);
+  cfgTabDots();
+  cfgRoutes();
   cfgFoot();
 }
 
@@ -1213,26 +1249,83 @@ async function loadCfg() {
   }
   box.textContent = '';
   if (!CFG.length) { box.append(el('div', 'empty', 'Không có mục nào.')); return; }
-  const groups = [];
-  for (const c of CFG) { let g = groups.find((x) => x.name === c.group); if (!g) groups.push(g = {name: c.group, items: []}); g.items.push(c); }
-  for (const g of groups) {
-    const lab = el('div', 'lab', g.name); lab.style.marginTop = box.children.length ? '18px' : '0';
-    box.append(lab);
-    for (const c of g.items) box.append(cfgRow(c));
-  }
-  cfgFoot();
+  cfgRender();
 }
 
-function cfgRow(c) {
-  const row = el('div', 'row');
+// nút "?" bung/thu đoạn giải thích: giao diện gọn, chữ dài chỉ hiện khi cần
+function qHelp(text, host) {
+  const b = el('button', 'q', '?'); b.type = 'button'; b.title = text; b.setAttribute('aria-expanded', 'false'); b.setAttribute('aria-label', 'Giải thích');
+  let box = null;
+  b.onclick = () => {
+    if (box) { box.remove(); box = null; b.setAttribute('aria-expanded', 'false'); return; }
+    box = el('div', 'help', text); host().after(box); b.setAttribute('aria-expanded', 'true');
+  };
+  return b;
+}
+let CFG_TAB = '';
+try { CFG_TAB = localStorage.getItem('wg_cfg_tab') || ''; } catch (e) { /* không có storage: bỏ qua */ }
+const cfgGroups = () => { const gs = []; for (const c of CFG) { let g = gs.find((x) => x.name === c.group); if (!g) gs.push(g = {name: c.group, items: []}); g.items.push(c); } return gs; };
+function cfgTabDots() {
+  document.querySelectorAll('#cfg .stabs button').forEach((b) => b.classList.toggle('dot', Object.keys(PENDING).some((k) => (CFG.find((c) => c.key === k) || {}).group === b.dataset.g)));
+}
+function cfgRender() {
+  const box = $('cfg'), gs = cfgGroups();
+  if (!gs.some((g) => g.name === CFG_TAB)) CFG_TAB = (gs.find((g) => g.name === 'IP đầu ra') || gs[0]).name;
+  box.textContent = '';
+  const tabs = el('div', 'stabs'); tabs.setAttribute('role', 'tablist');
+  for (const g of gs) {
+    const b = el('button', g.name === CFG_TAB ? 'on' : null, g.name); b.type = 'button'; b.dataset.g = g.name;
+    b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', g.name === CFG_TAB);
+    b.onclick = () => { CFG_TAB = g.name; try { localStorage.setItem('wg_cfg_tab', g.name); } catch (e) { /* bỏ qua */ } cfgRender(); };
+    tabs.append(b);
+  }
+  const pane = el('div', 'spane'); pane.setAttribute('role', 'tabpanel');
+  box.append(tabs, pane);
+  const g = gs.find((x) => x.name === CFG_TAB);
+  if (g.name === 'IP đầu ra') {
+    const lh = el('div', 'lab', 'Đường đi của mỗi acc'); lh.style.justifyContent = 'flex-start'; lh.style.marginBottom = '8px';
+    const hdr = el('span'); lh.append(hdr);
+    lh.append(qHelp('Mỗi acc đi ra DeepSeek bằng MỘT trong ba đường, chọn theo thứ tự: ① proxy riêng (nếu bật và có proxy) → ② Worker Cloudflare (nếu bật và có Worker) → ③ đi thẳng bằng IP nhà. Dùng cả ba cùng lúc được: acc không có proxy thì đi Worker, không có gì thì đi thẳng. Cửa sổ Chrome của acc hiện chỉ đi ② hoặc ③, chưa đi qua proxy riêng.', () => lh));
+    const rt = el('div', 'routes'); rt.id = 'cfgRoutes'; pane.append(lh, rt);
+  }
+  let sec = '';
+  for (const c of g.items) {
+    const m = /^([①②③]) (.+?) — (.+)$/.exec(c.label || '');
+    if (m && m[1] + m[2] !== sec) {
+      sec = m[1] + m[2];
+      const h = el('div', 'sub-h', m[1] + ' ' + m[2]);
+      if (m[1] === '②') { h.append(el('span', 'sp')); const bt = el('button', 'sm', 'Cài / quản lý Worker'); bt.type = 'button'; bt.onclick = () => { closeSettings(); openCf(); }; h.append(bt); }
+      pane.append(h);
+    }
+    pane.append(cfgRow(c, m ? m[3] : null));
+  }
+  cfgTabDots(); cfgRoutes(); cfgFoot();
+}
+// sơ đồ ba đường: đang bật hay không, có bao nhiêu proxy / Worker (theo giá trị đang gõ)
+function cfgRoutes() {
+  const box = $('cfgRoutes'); if (!box) return;
+  const v = (k) => eff(CFG.find((c) => c.key === k) || {});
+  const lines = (s) => String(s || '').split('\n').filter((l) => l.trim() && !l.trim().startsWith('#')).length;
+  const np = v('DS_PROXY_MODE') === 'off' ? 0 : lines(v('DS_PROXY_LIST')), nw = v('DS_EGRESS_ON') === '1' ? lines(v('DS_EGRESS_WORKERS')) : 0;
+  box.textContent = '';
+  const card = (n, title, sub, live) => { const d = el('div', 'rt' + (live ? ' use' : '')); d.append(el('b', null, n + ' ' + title), el('span', null, sub)); return d; };
+  box.append(
+    card('①', 'Proxy riêng', np ? np + ' proxy · ghim theo acc' : 'tắt / chưa có proxy', np > 0), el('i', 'ar', '→'),
+    card('②', 'Worker Cloudflare', nw ? nw + ' Worker · ghim theo acc' : 'tắt / chưa có Worker', nw > 0), el('i', 'ar', '→'),
+    card('③', 'IP nhà', 'đi thẳng khi hai đường trên không có', true));
+}
+
+function cfgRow(c, label) {
+  const row = el('div', 'row' + (c.kind === 'text' ? ' wide' : ''));
   row.dataset.key = c.key;
   const t = el('div', 't');
-  t.append(el('span', null, c.label || c.key));
+  const nm = el('span', null, label || c.label || c.key);
+  t.append(nm);
   const notes = [];
   if (c.hint) notes.push(c.hint);
   if (c.env) notes.push('đang đặt bằng biến môi trường');
   if (!c.live) notes.push('cần khởi động lại');
-  if (notes.length) t.append(el('small', null, notes.join(' · ')));
+  if (notes.length) nm.append(qHelp(notes.join(' · '), () => t));
   row.append(t);
 
   const ctl = el('div', 'ctl');
@@ -1273,7 +1366,7 @@ function cfgRow(c) {
   const undo = el('button', 'undo', '↺');
   undo.type = 'button'; undo.title = 'Bỏ thay đổi chưa lưu';
   undo.setAttribute('aria-label', 'Bỏ thay đổi ' + (c.label || c.key));
-  undo.onclick = () => { delete PENDING[c.key]; cfgRow(c); cfgFoot(); };
+  undo.onclick = () => { delete PENDING[c.key]; cfgRender(); };
   ctl.append(undo);
   row.append(ctl);
   row.classList.toggle('dirty', c.key in PENDING);
