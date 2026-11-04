@@ -1116,6 +1116,7 @@ async fn api_delete_account(
         (before != store.accounts.len(), seed)
     };
     if removed {
+        *st.login_notice.lk() = None;
         // profile Chrome riêng của acc (hàng trăm MB) chỉ phục vụ acc này — xoá cùng lúc
         if let Some(seed) = profile_seed {
             crate::creds::remove(&seed);
@@ -2848,7 +2849,7 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
             "total": store.accounts.len(),
             "available": available,
             "logged_out": store.accounts.iter().filter(|a| a.auth_dead_at.is_some()).count(),
-            "login_notice": st.login_notice.lk().as_ref().map(|(t, m)| json!({"at": t, "msg": m})),
+            "login_notice": live_login_notice(st.login_notice.lk().as_ref(), now),
             "logged_out_last_at": latest_dead,
             "logged_out_last_burst": logged_out_burst,
             "capacity_now_rpm_hint": available as u64 * (AccStats::burst_limit() as u64),
@@ -3207,6 +3208,13 @@ fn extension_zip(host: &str) -> Result<Vec<u8>> {
     Ok(z.finish()?.into_inner())
 }
 
+/// Thông báo "DeepSeek từ chối đăng nhập" chỉ hiện trong chừng này giây: nó là sự kiện vừa xảy ra, không phải trạng thái lâu dài.
+const LOGIN_NOTICE_TTL_SECS: u64 = 120;
+
+fn live_login_notice(n: Option<&(u64, String)>, now: u64) -> Option<Value> {
+    n.filter(|(t, _)| now.saturating_sub(*t) <= LOGIN_NOTICE_TTL_SECS).map(|(t, m)| json!({"at": t, "msg": m}))
+}
+
 /// Đăng nhập lại acc DS đã đăng xuất, mở đúng Chrome riêng của nó (profile `profiles/<seed>`, còn phiên Google)
 /// với đúng vân tay cũ. Người dùng tự bấm đăng nhập trong cửa sổ — whalegate không tự điền gì. Đăng nhập xong,
 /// `login_flow` nhận ra cùng người dùng qua uid và thay token vào chính acc này.
@@ -3343,6 +3351,7 @@ async fn open_flow(st: Arc<AppState>, acc_id: String, seed: String, browser: cra
 }
 
 async fn start_login(st: Arc<AppState>, seed: String, expect_uid: Option<String>, target_id: Option<String>) -> Json<Value> {
+    *st.login_notice.lk() = None;
     // chặn double-start
     {
         let mut watching = st.login_watching.lk();
@@ -4664,6 +4673,15 @@ mod version_ui_tests {
 #[cfg(test)]
 mod login_refusal_tests {
     use super::*;
+
+    #[test]
+    fn login_notice_expires() {
+        let n = (1000u64, "x".to_string());
+        assert!(live_login_notice(Some(&n), 1000).is_some());
+        assert!(live_login_notice(Some(&n), 1000 + LOGIN_NOTICE_TTL_SECS).is_some());
+        assert!(live_login_notice(Some(&n), 1000 + LOGIN_NOTICE_TTL_SECS + 1).is_none(), "F5 sau vài phút không hiện lại");
+        assert!(live_login_notice(None, 5).is_none());
+    }
 
     #[test]
     fn a_successful_login_lifts_the_suspension_mark() {
