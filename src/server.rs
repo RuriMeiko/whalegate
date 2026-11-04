@@ -104,6 +104,10 @@ pub struct Account {
     /// đứng ngoài lịch chọn tới khi có token mới (đăng nhập lại, bookmarklet, sửa token) hoặc verify thấy sống lại.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_dead_at: Option<u64>,
+    /// DeepSeek đã đình chỉ acc (đăng nhập trả USER_IS_BANNED / chat trả 40012): thời điểm phát hiện. Acc bị tắt khỏi pool,
+    /// dashboard gạch ngang tên. Gỡ khi đăng nhập/verify lại thành công (`clear_auth_dead`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banned_at: Option<u64>,
     /// Cách acc được nối vào whalegate lần gần nhất: "chrome" (Chrome riêng) | "scan" (quét Chrome chính) | "bookmarklet" |
     /// "extension" | "paste" | "register" (đăng ký bằng CLI). None = acc cũ, suy ra từ dữ liệu có sẵn (xem `login_method_effective`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,7 +131,7 @@ impl Account {
         if self.auth_dead_at.is_none() { self.auth_dead_at = Some(now()); }
         self.last_status = Some("DeepSeek đã đăng xuất token này (40003) — cần đăng nhập lại".into());
     }
-    pub(crate) fn clear_auth_dead(&mut self) { self.auth_dead_at = None; }
+    pub(crate) fn clear_auth_dead(&mut self) { self.auth_dead_at = None; self.banned_at = None; }
 }
 
 fn default_true() -> bool {
@@ -450,6 +454,8 @@ pub(crate) struct AppState {
     pub(crate) in_flight: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
     // đang canh 1 tab login (chặn double-start)
     pub(crate) login_watching: std::sync::Mutex<bool>,
+    /// lý do DeepSeek từ chối lần đăng nhập gần nhất trong cửa sổ Chrome (thời điểm, nội dung) — dashboard hiện lên
+    pub(crate) login_notice: std::sync::Mutex<Option<(u64, String)>>,
     // (acc_id, sha256 ảnh) -> file id DS đã upload (id gắn theo acc nên cache theo acc)
     // hội thoại stateful: dấu vân tay prefix -> phiên web đang giữ ngữ cảnh
     pub(crate) convs: std::sync::Mutex<std::collections::HashMap<u64, Conv>>,
@@ -905,6 +911,7 @@ async fn api_add_account(
         device_refreshed_at: None,
         browser,
         auth_dead_at: None,
+                banned_at: None,
         login_method: via,
     };
     let id = acc.id.clone();
@@ -2826,6 +2833,7 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
                 "browser": a.browser.is_some(),
                 "device_refreshed_at": a.device_refreshed_at,
                 "auth_dead_at": a.auth_dead_at,
+                "banned": a.banned_at.is_some(),
                 "dup": a.ds_uid.as_ref().is_some_and(|u| store.accounts.iter().filter(|b| b.ds_uid.as_ref() == Some(u)).count() > 1),
             })
         })
@@ -2840,6 +2848,7 @@ async fn api_stats(State(st): State<Arc<AppState>>) -> Json<Value> {
             "total": store.accounts.len(),
             "available": available,
             "logged_out": store.accounts.iter().filter(|a| a.auth_dead_at.is_some()).count(),
+            "login_notice": st.login_notice.lk().as_ref().map(|(t, m)| json!({"at": t, "msg": m})),
             "logged_out_last_at": latest_dead,
             "logged_out_last_burst": logged_out_burst,
             "capacity_now_rpm_hint": available as u64 * (AccStats::burst_limit() as u64),
@@ -2980,6 +2989,7 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
                             device_refreshed_at: None,
                             browser: None,
                             auth_dead_at: None,
+                banned_at: None,
                             login_method: Some("scan".into()),
                         };
                         emails.push(s.email.clone().unwrap_or_else(|| "unknown".into()));
@@ -3010,7 +3020,7 @@ async fn api_capture_from_chrome(State(st): State<Arc<AppState>>) -> Json<Value>
 // Chỉ 1 login đang canh tại 1 thời điểm (flag in-flight).
 async fn api_login_start(State(st): State<Arc<AppState>>) -> Json<Value> {
     // Mỗi acc mới = một "máy" mới: seed riêng → profile Chrome riêng + vân tay riêng.
-    start_login(st, crate::fingerprint::new_seed()).await
+    start_login(st, crate::fingerprint::new_seed(), None, None).await
 }
 /// Đăng nhập TỰ ĐỘNG: nhận email + mật khẩu, mở Chrome riêng của một seed mới, tự điền form
 /// `sign_in` và bấm nút, rồi chờ token như luồng login tay. Mật khẩu chỉ dùng một lần trong
@@ -3151,6 +3161,7 @@ async fn login_auto_flow(
                 device_refreshed_at: session.fp_seed.as_ref().map(|_| now()),
                 browser: None,
                 auth_dead_at: None,
+                banned_at: None,
                 login_method: Some("chrome".into()),
             });
         }
@@ -3207,17 +3218,24 @@ async fn api_account_relogin(
     State(st): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Json<Value> {
-    let acc = st.store.read().await.accounts.iter().find(|a| a.id == id).map(|a| (a.fp_seed.clone(), a.browser.is_some(), a.label.clone()));
-    let Some((seed, has_browser, label)) = acc else { return Json(json!({"ok": false, "error": "không tìm thấy tài khoản"})) };
+    let (acc, shared) = {
+        let store = st.store.read().await;
+        let acc = store.accounts.iter().find(|a| a.id == id).map(|a| (a.fp_seed.clone(), a.browser.is_some(), a.label.clone(), a.ds_uid.clone()));
+        // profile này đang là "máy" của một acc KHÁC (vd lần đăng nhập nhầm trước đó đã gán nó cho người dùng khác)
+        let shared = acc.as_ref().and_then(|a| a.0.clone()).is_some_and(|seed| store.accounts.iter().any(|o| o.id != id && o.fp_seed.as_deref() == Some(seed.as_str())));
+        (acc, shared)
+    };
+    let Some((seed, has_browser, label, uid)) = acc else { return Json(json!({"ok": false, "error": "không tìm thấy tài khoản"})) };
     if has_browser {
         return Json(json!({"ok": false, "error": "acc này dùng trình duyệt gốc: đăng nhập lại trên trình duyệt đó rồi bấm tiện ích/bookmarklet trên tab chat.deepseek.com"}));
     }
-    // acc dán token chưa từng có Chrome riêng: mở một máy mới — session cũ đã chết nên không có gì để "giữ máy"
-    let seed = seed
+    // acc dán token chưa từng có Chrome riêng: mở một máy mới — session cũ đã chết nên không có gì để "giữ máy".
+    // Profile đang dùng chung với acc khác thì cũng mở máy mới: hai người dùng không thể chung một profile Chrome.
+    let seed = if shared { None } else { seed }
         .filter(|s| std::path::Path::new(&crate::chrome_capture::account_profile_dir(s)).is_dir())
         .unwrap_or_else(crate::fingerprint::new_seed);
-    crate::elog!("[login-flow] đăng nhập lại {} (profile {})", label, &seed[..8.min(seed.len())]);
-    start_login(st, seed).await
+    crate::elog!("[login-flow] đăng nhập lại {} (profile {}{})", label, &seed[..8.min(seed.len())], if shared { ", profile cũ đang dùng chung với acc khác → máy mới" } else { "" });
+    start_login(st, seed, uid, Some(id)).await
 }
 
 /// Nút "mở Chrome" trên dashboard: mở ĐÚNG Chrome của acc (profile `profiles/<seed>` với phiên, cookie, mật khẩu đã lưu,
@@ -3324,7 +3342,7 @@ async fn open_flow(st: Arc<AppState>, acc_id: String, seed: String, browser: cra
     Ok(())
 }
 
-async fn start_login(st: Arc<AppState>, seed: String) -> Json<Value> {
+async fn start_login(st: Arc<AppState>, seed: String, expect_uid: Option<String>, target_id: Option<String>) -> Json<Value> {
     // chặn double-start
     {
         let mut watching = st.login_watching.lk();
@@ -3347,7 +3365,7 @@ async fn start_login(st: Arc<AppState>, seed: String) -> Json<Value> {
     crate::elog!("[login-flow] Chrome riêng của acc đã mở (cổng {})", browser.port);
     let st2 = st.clone();
     tokio::spawn(async move {
-        let res = login_flow(st2.clone(), seed, browser, ws_url).await;
+        let res = login_flow(st2.clone(), seed, browser, ws_url, expect_uid, target_id).await;
         *st2.login_watching.lk() = false;
         if let Err(e) = res {
             crate::elog!("[login-flow] lỗi: {:#}", e);
@@ -3443,7 +3461,28 @@ fn adopt_chrome_device(a: &mut Account, session: &crate::chrome_capture::Capture
     crate::client::forget(&a.token);
 }
 
-async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capture::AccountBrowser, ws_url: String) -> Result<()> {
+/// Câu dễ hiểu cho mã từ chối của /users/login (mã như luồng đăng nhập tự động); lạ thì giữ nguyên thông điệp của DeepSeek.
+fn login_refusal_text(code: i64, msg: &str) -> String {
+    let known = match code {
+        2 => Some("sai email hoặc mật khẩu"),
+        // bắt từ DeepSeek thật: biz_code 10 + biz_msg USER_IS_BANNED, web hiện "Do vi phạm, tài khoản của bạn đã tạm thời bị đình chỉ"
+        10 => Some("DeepSeek đã tạm thời đình chỉ tài khoản này (vi phạm) — đăng nhập lại không giúp được, cần chờ hoặc khiếu nại trên DeepSeek"),
+        11 => Some("DeepSeek đánh dấu thiết bị này là rủi ro"),
+        12 => Some("số điện thoại bị hạn chế"),
+        13 => Some("cần chữ ký thiết bị"),
+        14 => Some("tài khoản bật xác thực 2 lớp"),
+        _ => None,
+    };
+    match (known, msg.trim()) {
+        (Some(k), "") => k.to_string(),
+        (Some(k), m) if m == "USER_IS_BANNED" => format!("{k} [{m}]"),
+        (Some(k), m) => format!("{k} ({m})"),
+        (None, "") => format!("biz_code {code}"),
+        (None, m) => m.to_string(),
+    }
+}
+
+async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capture::AccountBrowser, ws_url: String, expect_uid: Option<String>, target_id: Option<String>) -> Result<()> {
     // Điền sẵn email/mật khẩu đã nhớ (không bấm đăng nhập) và ghi lại những gì bạn gõ để lần sau khỏi gõ lại.
     let (known_email, known_pw) = {
         let saved = crate::creds::get(&seed);
@@ -3454,21 +3493,83 @@ async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capt
         (email, saved.map(|c| c.1))
     };
     let typed: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>> = Default::default();
+    let (ban_tx, ban_rx) = tokio::sync::oneshot::channel::<String>();
     let helper = {
-        let (ws, typed) = (ws_url.clone(), typed.clone());
+        let mut ban_tx = Some(ban_tx);
+        let (ws, typed, st_h, target_h) = (ws_url.clone(), typed.clone(), st.clone(), target_id.clone());
         tokio::spawn(async move {
             if let Err(e) = crate::chrome_capture::prepare_login_page(&ws, known_email.as_deref(), known_pw.as_deref()).await {
                 crate::elog!("[login-flow] điền sẵn form lỗi: {:#}", e);
             }
+            let mut last_notice = String::new();
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 if let Some(c) = crate::chrome_capture::read_typed_creds(&ws).await { *typed.lock().unwrap_or_else(|p| p.into_inner()) = Some(c); }
+                // bắt phản hồi /users/login: DeepSeek từ chối (đình chỉ, sai mật khẩu, rủi ro thiết bị…) thì báo lên dashboard ngay
+                let _ = crate::chrome_capture::install_login_response_hook(&ws).await;
+                if let Some((code, msg)) = crate::chrome_capture::login_result(&ws).await {
+                    if code != 0 {
+                        let text = login_refusal_text(code, &msg);
+                        if text != last_notice {
+                            last_notice = text.clone();
+                            crate::elog!("[login-flow] DeepSeek từ chối đăng nhập: {text} (biz_code {code})");
+                            *st_h.login_notice.lk() = Some((now(), text.clone()));
+                            // tài khoản bị đình chỉ: không còn gì để chờ trong cửa sổ này
+                            if code == 10 { if let Some(tx) = ban_tx.take() { let _ = tx.send(text.clone()); } }
+                            if let Some(tid) = &target_h {
+                                let mut store = st_h.store.write().await;
+                                if let Some(a) = store.accounts.iter_mut().find(|a| &a.id == tid) { a.last_status = Some(format!("Đăng nhập bị từ chối: {text}")); }
+                                drop(store);
+                                mark_dirty(&st_h);
+                            }
+                        }
+                    }
+                }
             }
         })
     };
     // canh login tới 10 phút, xong thì tắt Chrome (giữ profile)
-    let res = crate::chrome_capture::watch_login_tab(ws_url, 600, browser.port, &seed).await;
+    let res = tokio::select! {
+        r = crate::chrome_capture::watch_login_tab(ws_url.clone(), 600, browser.port, &seed) => r,
+        Ok(why) = ban_rx => Err(anyhow::anyhow!("BANNED:{why}")),
+    };
     helper.abort();
+    // DeepSeek từ chối vì tài khoản bị đình chỉ: đóng cửa sổ NGAY, đánh dấu acc (tắt khỏi pool, gạch ngang), không lưu gì
+    if let Err(e) = &res {
+        if let Some(why) = format!("{e:#}").strip_prefix("BANNED:") {
+            let why = why.to_string();
+            browser.close().await;
+            if let Some(tid) = &target_id {
+                let mut store = st.store.write().await;
+                if let Some(a) = store.accounts.iter_mut().find(|a| &a.id == tid) {
+                    a.banned_at = Some(now());
+                    a.pool_enabled = false;
+                    a.last_status = Some("DeepSeek đã đình chỉ tài khoản này (USER_IS_BANNED)".into());
+                    crate::elog!("[login-flow] acc {} bị DeepSeek đình chỉ — đã đóng cửa sổ, tắt khỏi pool", &a.id[..8]);
+                }
+            }
+            mark_dirty(&st);
+            flush_store(&st).await;
+            anyhow::bail!("tài khoản bị đình chỉ — {why}");
+        }
+    }
+    // Đang đăng nhập lại một acc cụ thể mà phiên bắt được là của NGƯỜI DÙNG KHÁC: không lưu gì, không nhớ mật khẩu,
+    // xoá phiên DeepSeek sai khỏi profile (nếu không lần mở sau tự vào lại tài khoản sai), báo lên dashboard.
+    if let (Ok(s), Some(exp)) = (&res, &expect_uid) {
+        if s.uid.as_deref().is_some_and(|u| u != exp) {
+            let got = s.email.clone().unwrap_or_else(|| "tài khoản khác".into());
+            if let Err(e) = crate::chrome_capture::clear_ds_site_data(&ws_url).await { crate::elog!("[login-flow] không xoá được phiên sai: {:#}", e); }
+            browser.close().await;
+            if let Some(tid) = &target_id {
+                let mut store = st.store.write().await;
+                if let Some(a) = store.accounts.iter_mut().find(|a| &a.id == tid) {
+                    a.last_status = Some(format!("Đăng nhập nhầm: cửa sổ vào {} chứ không phải acc này — bấm đăng nhập lại và chọn đúng tài khoản", got));
+                }
+            }
+            mark_dirty(&st);
+            anyhow::bail!("đăng nhập nhầm tài khoản ({got}) — không lưu, đã xoá phiên sai khỏi profile");
+        }
+    }
     browser.close().await;
     if res.is_ok() {
         let c = typed.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -3523,6 +3624,7 @@ async fn login_flow(st: Arc<AppState>, seed: String, browser: crate::chrome_capt
                 device_refreshed_at: session.fp_seed.as_ref().map(|_| now()),
                 browser: None,
                 auth_dead_at: None,
+                banned_at: None,
                 login_method: Some("chrome".into()),
             };
             store.accounts.push(acc);
@@ -3749,6 +3851,7 @@ pub async fn run(port: u16) -> Result<()> {
         store_dirty: tokio::sync::Notify::new(),
         in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
         login_watching: std::sync::Mutex::new(false),
+        login_notice: std::sync::Mutex::new(None),
         file_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         convs: std::sync::Mutex::new(std::collections::HashMap::new()),
         sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -4555,6 +4658,32 @@ mod version_ui_tests {
         let v = env!("CARGO_PKG_VERSION");
         assert!(html.contains(&format!(">v{}</a>", v)));
         assert!(html.contains(&format!("/releases/tag/v{}", v)));
+    }
+}
+
+#[cfg(test)]
+mod login_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_successful_login_lifts_the_suspension_mark() {
+        let mut a: Account = serde_json::from_str(r#"{"id":"x","label":"l","token":"t","cookies":{},"added_at":1,"banned_at":5,"auth_dead_at":6,"pool_enabled":false}"#).unwrap();
+        assert!(a.banned_at.is_some());
+        a.clear_auth_dead();
+        assert!(a.banned_at.is_none() && a.auth_dead_at.is_none());
+        // acc cũ không có trường banned_at vẫn đọc được
+        let old: Account = serde_json::from_str(r#"{"id":"x","label":"l","token":"t","cookies":{},"added_at":1}"#).unwrap();
+        assert!(old.banned_at.is_none());
+    }
+
+    #[test]
+    fn refusal_texts_are_readable() {
+        assert_eq!(login_refusal_text(12, ""), "số điện thoại bị hạn chế");
+        // phản hồi thật bắt được khi đăng nhập một tài khoản bị đình chỉ
+        assert!(login_refusal_text(10, "USER_IS_BANNED").starts_with("DeepSeek đã tạm thời đình chỉ tài khoản này"));
+        assert!(login_refusal_text(10, "USER_IS_BANNED").ends_with("[USER_IS_BANNED]"));
+        assert_eq!(login_refusal_text(99, "Do vi phạm, tài khoản của bạn đã tạm thời bị đình chỉ."), "Do vi phạm, tài khoản của bạn đã tạm thời bị đình chỉ.");
+        assert_eq!(login_refusal_text(99, ""), "biz_code 99");
     }
 }
 

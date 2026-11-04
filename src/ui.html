@@ -59,6 +59,7 @@
   .acc > .hd:hover:not(:disabled) { background: none; }
   .acc .nm { flex: 1; min-width: 0; font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acc .st { font: 12px/1 var(--mono); color: var(--mute); white-space: nowrap; }
+  .acc.banned .nm, .acc.banned .mi, .acc.banned .sq { opacity: .55; } .acc.banned .nm { text-decoration: line-through; text-decoration-thickness: 1.5px; }
   .acc.off .nm, .acc.off .sq { opacity: .5; } .acc .st.off { color: var(--mute); text-decoration: line-through; }
   .sq.off { background: transparent; border: 1px solid var(--mute); }
   .seg2.mini button { height: 30px; min-width: 46px; flex: none; padding: 0 10px; }
@@ -1051,7 +1052,8 @@ function accItem(a, perAcc) {
   else if (!/ok/.test(a.last_status || '')) { kind = 'bad'; text = a.last_status || 'lỗi'; }
   else if (a.in_flight > 0) { kind = 'run'; text = `đang chạy ${a.in_flight}/${perAcc}`; }
   if (a.pool_enabled === false) { kind = 'off'; text = 'đã tắt'; }
-  const box = el('div', 'acc' + (OPEN_ACC === a.id ? ' open' : '') + (a.pool_enabled === false ? ' off' : ''));
+  if (a.banned) { kind = 'bad'; text = 'bị đình chỉ'; }
+  const box = el('div', 'acc' + (OPEN_ACC === a.id ? ' open' : '') + (a.pool_enabled === false ? ' off' : '') + (a.banned ? ' banned' : ''));
   const hd = el('button', 'hd'); hd.setAttribute('aria-expanded', OPEN_ACC === a.id);
   const nm = el('span', 'nm', a.label); if (a.uid) nm.append(el('small', null, a.uid.slice(0, 6)));
   const mi = el('span', 'mi'); const lm = a.login_method || 'paste';
@@ -1077,7 +1079,7 @@ function accItem(a, perAcc) {
   // mở đúng Chrome của acc (phiên, vân tay, mật khẩu đã lưu) để tự giải hCaptcha / thao tác tay; đóng cửa sổ là phiên mới được lưu lại
   if (a.device && !a.auth_dead_at) { const opening = OPENING.has(a.id), b = mk(opening ? 'đang mở…' : 'mở Chrome', a.last_status && /hCaptcha/.test(a.last_status) ? 'solid' : '', () => openChrome(a)); b.disabled = opening; b.title = 'Mở đúng Chrome của acc này (cùng phiên, vân tay, mật khẩu đã lưu) để bạn tự giải captcha hoặc thao tác; đóng cửa sổ thì phiên được lưu lại'; more.append(b); }
   // DS đã đăng xuất acc: acc Chrome/dán token → mở lại Chrome riêng của nó để bạn tự đăng nhập; acc bookmarklet → làm trên trình duyệt gốc
-  if (a.auth_dead_at && !a.browser) { const b = mk('đăng nhập lại', 'solid', () => reloginAcc(a)); b.title = 'Mở Chrome riêng của acc này (giữ vân tay và phiên Google cũ) để bạn đăng nhập lại; xong tự thay token vào acc'; more.append(b); }
+  if (a.auth_dead_at && !a.browser && !a.banned) { const b = mk('đăng nhập lại', 'solid', () => reloginAcc(a)); b.title = 'Mở Chrome riêng của acc này (giữ vân tay và phiên Google cũ) để bạn đăng nhập lại; xong tự thay token vào acc'; more.append(b); }
   more.append(mk('sửa', '', () => openEdit(a)), mk('verify', '', () => verify(a.id, a.label)), mk('reset', '', () => reset(a.id, a.label)), mk('xoá', 'del', () => del(a.id, a.label)));
   box.append(hd, more);
   return box;
@@ -1150,6 +1152,8 @@ async function loadStats() {
     $('empty').style.display = d.accounts.length ? 'none' : 'block';
     for (const a of d.accounts) list.append(accItem(a, p.max_conc_per_acc));
     window.__lastPool = p; renderAuthBar(p);
+    // DeepSeek từ chối đăng nhập trong cửa sổ Chrome (đình chỉ, sai mật khẩu…): hiện đúng một lần cho mỗi lần xảy ra
+    if (p.login_notice && p.login_notice.at !== window.__lastLoginNotice) { window.__lastLoginNotice = p.login_notice.at; say('DeepSeek từ chối đăng nhập: ' + p.login_notice.msg, 'err'); }
     if (u && u.pricing) renderUsage(u);
     $('dot').className = 'dot'; $('liveTxt').textContent = new Date().toLocaleTimeString([], {hour12: false});
   } catch (e) { $('dot').className = 'dot off'; $('liveTxt').textContent = 'mất kết nối'; }

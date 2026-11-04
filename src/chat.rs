@@ -652,6 +652,7 @@ pub(crate) async fn note_acc_error(st: &Arc<AppState>, acc_id: &str, e: &anyhow:
             if let Some(a) = store.accounts.iter_mut().find(|a| a.id == acc_id) {
                 a.stats.total_error += 1;
                 a.pool_enabled = false;
+                a.banned_at = Some(now());
                 a.last_status = Some("DeepSeek đã khoá tài khoản này (40012) — đã tắt khỏi pool".into());
             }
             drop(store);
@@ -1623,6 +1624,7 @@ mod auth_dead_tests {
             store_dirty: tokio::sync::Notify::new(),
             in_flight: Default::default(),
             login_watching: Default::default(),
+            login_notice: Default::default(),
             file_cache: Default::default(),
             convs: Default::default(),
             sessions: Default::default(),

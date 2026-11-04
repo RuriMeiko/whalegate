@@ -24,6 +24,7 @@ pub fn set(seed: &str, email: &str, password: &str) {
     m.insert(seed.to_string(), (email.to_string(), password.to_string()));
     let Ok(text) = serde_json::to_string(&m) else { return };
     let p = path();
+    if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
     let tmp = p.with_extension("json.tmp");
     if std::fs::write(&tmp, text).is_err() { return; }
     #[cfg(unix)]

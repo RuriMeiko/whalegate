@@ -359,6 +359,7 @@ async fn cmd_add(label: Option<&str>) -> Result<()> {
         device_refreshed_at: None,
         browser: None,
         auth_dead_at: None,
+        banned_at: None,
         login_method: Some("register".into()),
     };
     store.accounts.push(acc);
@@ -717,6 +718,7 @@ async fn cmd_login(email: &str, password: &str, label: Option<&str>, force_headl
                 device_refreshed_at: Some(now),
                 browser: None,
                 auth_dead_at: None,
+        banned_at: None,
                 login_method: Some("chrome".into()),
             };
             println!("thêm acc mới: {}", acc.label);

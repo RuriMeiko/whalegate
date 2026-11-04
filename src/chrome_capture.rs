@@ -389,6 +389,14 @@ pub async fn read_typed_creds(ws_url: &str) -> Option<(String, String)> {
     if e.is_empty() || p.is_empty() || e.contains('*') { None } else { Some((e, p)) }
 }
 
+/// Xoá phiên DeepSeek (cookie, localStorage…) khỏi profile của tab đang mở — dùng khi cửa sổ đăng nhập nhầm sang người dùng
+/// khác, để lần mở sau hiện lại form đăng nhập thay vì tự vào tài khoản sai. Không đụng phiên Google/trang khác.
+pub async fn clear_ds_site_data(ws_url: &str) -> Result<()> {
+    let mut c = CdpConn::connect(ws_url).await?;
+    c.call("Storage.clearDataForOrigin", json!({"origin": "https://chat.deepseek.com", "storageTypes": "all"})).await?;
+    Ok(())
+}
+
 /// Cài hook bắt kết quả `/users/login` vào sessionStorage trước khi bấm nút.
 ///
 /// Toast lỗi của DeepSeek tự tắt sau vài giây, nên đọc DOM lúc timeout thường không còn gì.
