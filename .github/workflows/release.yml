@@ -34,6 +34,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # cache registry + target: BoringSSL của wreq build rất lâu, lần sau dùng lại
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rel-${{ matrix.target }}
+
       # wreq nhúng BoringSSL: cần cmake + (trên Windows) NASM + LLVM/clang cho bindgen.
       # Linux build trong container của cross → xem Cross.toml (pre-build cài cmake/clang).
       - name: Install build deps (macOS)

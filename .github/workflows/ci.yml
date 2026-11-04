@@ -24,6 +24,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # cache registry + target: BoringSSL của wreq build rất lâu, lần sau dùng lại
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ matrix.os }}
+
       # wreq nhúng BoringSSL: cần cmake + (trên Windows) NASM + LLVM/clang cho bindgen — giống release.yml
       - name: Install build deps (macOS)
         if: runner.os == 'macOS'
