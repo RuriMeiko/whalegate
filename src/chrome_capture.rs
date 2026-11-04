@@ -180,7 +180,7 @@ impl CdpConn {
 }
 
 pub(crate) async fn browser_ws_url(port: u16) -> Result<String> {
-    let d: Value = reqwest::get(format!("{}/json/version", cdp_http(port)))
+    let d: Value = crate::http::client().get(format!("{}/json/version", cdp_http(port))).timeout(std::time::Duration::from_secs(5)).send()
         .await?
         .json()
         .await
@@ -192,7 +192,7 @@ pub(crate) async fn browser_ws_url(port: u16) -> Result<String> {
 }
 
 pub(crate) async fn list_pages(port: u16) -> Result<Vec<Value>> {
-    let body = reqwest::get(format!("{}/json/list", cdp_http(port))).await?.text().await?;
+    let body = crate::http::client().get(format!("{}/json/list", cdp_http(port))).timeout(std::time::Duration::from_secs(5)).send().await?.text().await?;
     Ok(serde_json::from_str(&body)?)
 }
 
@@ -265,7 +265,7 @@ pub async fn watch_login_tab(ws_url: String, timeout_secs: u64, port: u16, fp_se
             bail!("hết {}s mà chưa login xong trong tab", timeout_secs);
         }
         // user tự đóng cửa sổ: dừng canh ngay, không giữ khoá login thêm tới hết 10 phút
-        if reqwest::get(format!("{}/json/version", cdp_http(port))).await.is_err() {
+        if crate::http::client().get(format!("{}/json/version", cdp_http(port))).timeout(std::time::Duration::from_secs(5)).send().await.is_err() {
             bail!("cửa sổ đăng nhập đã bị đóng trước khi login xong");
         }
         // 1) thử tab watch trước
@@ -581,7 +581,7 @@ impl AccountBrowser {
 
 /// Cổng CDP còn trả lời không (cửa sổ Chrome chưa bị đóng).
 pub async fn cdp_alive(port: u16) -> bool {
-    reqwest::get(format!("{}/json/version", cdp_http(port))).await.is_ok()
+    crate::http::client().get(format!("{}/json/version", cdp_http(port))).timeout(std::time::Duration::from_secs(5)).send().await.is_ok()
 }
 
 /// Đọc nhanh phiên đang có trong các tab DeepSeek của Chrome riêng (token, cookie kể cả httpOnly, device id) mà không gọi
@@ -719,7 +719,7 @@ pub async fn launch_account_chrome(fp: &crate::fingerprint::Fingerprint, start_u
         let mut ready = false;
         exited = None;
         for _ in 0..40 {
-            if let Ok(resp) = reqwest::get(format!("{}/json/version", cdp_http(port))).await {
+            if let Ok(resp) = crate::http::client().get(format!("{}/json/version", cdp_http(port))).timeout(std::time::Duration::from_secs(5)).send().await {
                 if resp.status().is_success() { ready = true; break; }
             }
             // Chrome thoát luôn (thiếu màn hình, profile bị khoá…) thì báo ngay, không đợi đủ 20s

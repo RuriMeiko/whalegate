@@ -96,10 +96,11 @@ async fn install_node() -> Result<()> {
     let file = format!("{stem}.{ext}");
     let base = format!("https://nodejs.org/dist/{NODE_VER}");
     say(&format!("Đang tải Node.js {NODE_VER} từ nodejs.org ({file})…"));
-    let c = reqwest::Client::builder().timeout(std::time::Duration::from_secs(600)).build()?;
-    let sums = c.get(format!("{base}/SHASUMS256.txt")).send().await?.error_for_status()?.text().await?;
+    let c = crate::http::client();
+    let t = std::time::Duration::from_secs(600);
+    let sums = c.get(format!("{base}/SHASUMS256.txt")).timeout(t).send().await?.error_for_status()?.text().await?;
     let want = sha_for(&sums, &file).with_context(|| format!("SHASUMS256.txt không có {file}"))?;
-    let bytes = c.get(format!("{base}/{file}")).send().await?.error_for_status()?.bytes().await?;
+    let bytes = c.get(format!("{base}/{file}")).timeout(t).send().await?.error_for_status()?.bytes().await?;
     let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     if got != want { bail!("checksum Node.js không khớp (nhận {got}, cần {want}) — không cài"); }
     say("Đã xác minh checksum, đang giải nén…");
@@ -198,21 +199,20 @@ async fn probe_ip() -> usize {
     let mut good = 0;
     for (i, w) in crate::egress::workers().into_iter().enumerate() {
         let t = std::time::Instant::now();
-        let c = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build() { Ok(c) => c, Err(_) => continue };
+        let c = crate::http::client();
         // trạm Cloudflare phục vụ Worker (gọi HTTP thường)
         let mut colo = String::new();
         let mut worker_ok = false;
-        if let Ok(resp) = c.get(format!("{}/__ip", w.url)).header("x-wg-key", &w.key).send().await {
+        if let Ok(resp) = c.get(format!("{}/__ip", w.url)).header("x-wg-key", &w.key).timeout(std::time::Duration::from_secs(20)).send().await {
             if let Ok(v) = resp.json::<Value>().await { colo = v["colo"].as_str().unwrap_or("").to_string(); worker_ok = v.get("egress").is_some(); }
         }
         // IP mà DeepSeek/Chrome thật sự thấy: đo qua chính đường hầm TCP (khác IP của lần gọi HTTP thường ở trên).
         // Dùng dịch vụ không nằm sau Cloudflare vì Worker không được mở socket tới IP Cloudflare.
         let mut ip = String::new();
         if let Some(p) = crate::egress::proxy_url_idx(i) {
-            if let Ok(px) = reqwest::Proxy::all(&p) {
-                if let Ok(pc) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(25)).proxy(px).build() {
-                    if let Ok(r) = pc.get("https://checkip.amazonaws.com").send().await { ip = r.text().await.unwrap_or_default().trim().to_string(); }
-                }
+            if let Ok(px) = wreq::Proxy::all(p.as_str()) {
+                let req = c.get("https://checkip.amazonaws.com").proxy(px).timeout(std::time::Duration::from_secs(25));
+                if let Ok(r) = req.send().await { ip = r.text().await.unwrap_or_default().trim().to_string(); }
             }
         }
         if ip.is_empty() && !worker_ok { continue; }
@@ -246,11 +246,11 @@ async fn register_subdomain(acc_id: &str) -> Result<()> {
     let raw = out.lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("").to_string();
     let token = if raw.starts_with('{') { serde_json::from_str::<Value>(&raw).ok().and_then(|v| v["token"].as_str().map(String::from)).unwrap_or_default() } else { raw };
     if !ok || token.is_empty() || token.contains(' ') { bail!("không lấy được token wrangler để đăng ký workers.dev"); }
-    let http = reqwest::Client::new();
+    let http = crate::http::client();
     let url = format!("https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/subdomain");
     for _ in 0..4 {
         let name = format!("wg-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let r = http.put(&url).bearer_auth(&token).json(&json!({"subdomain": name})).send().await?;
+        let r = http.put(&url).bearer_auth(&token).timeout(std::time::Duration::from_secs(30)).json(&json!({"subdomain": name})).send().await?;
         let ok = r.status().is_success();
         let body: Value = r.json().await.unwrap_or(Value::Null);
         if ok && body["success"].as_bool() == Some(true) { say(&format!("Đã đăng ký {name}.workers.dev")); return Ok(()); }

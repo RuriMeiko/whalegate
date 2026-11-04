@@ -8,6 +8,7 @@ mod creds;
 mod egress;
 mod client;
 mod fingerprint;
+mod http;
 mod chrome_capture;
 mod pow;
 mod proxypool;

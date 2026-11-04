@@ -1,12 +1,10 @@
 [package]
 name = "whalegate"
-version = "0.5.38"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
 async-stream = "0.3"
-# "cookies" không dùng: cookie truyền tay qua header (mỗi acc một bộ cookie riêng)
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "multipart", "rustls-tls", "charset"] }
 # Giả lập trình duyệt: TLS (BoringSSL như Chrome) + HTTP/2 + header đúng từng phiên bản, mỗi acc một profile
 # "socks": proxy đầu ra socks5/socks5h (mỗi acc một IP khác) — xem src/proxypool.rs
 wreq = { version = "6.0.0-rc.31", features = ["json", "multipart", "stream", "gzip", "brotli", "zstd", "deflate", "cookies", "socks"] }

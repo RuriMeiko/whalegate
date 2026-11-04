@@ -238,16 +238,9 @@ pub(crate) async fn fetch_latest() -> UpdateInfo {
         current: current.clone(), latest: None, has_update: false, notes: None, url: None,
         error: Some(e), checked_at: server::now(),
     };
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .user_agent(format!("whalegate/{}", current))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return mk_err(e.to_string()),
-    };
     let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
-    let resp = client.get(&url).header("accept", "application/vnd.github+json").send().await;
+    let resp = crate::http::client().get(&url).header("accept", "application/vnd.github+json")
+        .header("user-agent", crate::http::ua()).timeout(std::time::Duration::from_secs(12)).send().await;
     let v: Value = match resp {
         Ok(r) if r.status().is_success() => match r.json().await {
             Ok(v) => v,
@@ -340,17 +333,14 @@ async fn download_and_install(tag: &str) -> Result<String> {
     let base = format!("https://github.com/{}/releases/download/{}", REPO, tag);
     let is_win = cfg!(windows);
     let archive = format!("whalegate-{}.{}", target, if is_win { "zip" } else { "tar.gz" });
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .user_agent(format!("whalegate/{}", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let get = |u: String| crate::http::client().get(u).header("user-agent", crate::http::ua()).timeout(std::time::Duration::from_secs(300));
     let tmp = std::env::temp_dir().join(format!("whalegate-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
 
     // 1) tải archive + checksum
-    let bytes = client.get(format!("{}/{}", base, archive)).send().await?.error_for_status()?.bytes().await?;
-    let sums = client.get(format!("{}/SHA256SUMS.txt", base)).send().await?.error_for_status()?.text().await?;
+    let bytes = get(format!("{}/{}", base, archive)).send().await?.error_for_status()?.bytes().await?;
+    let sums = get(format!("{}/SHA256SUMS.txt", base)).send().await?.error_for_status()?.text().await?;
     let want = sums.lines().find_map(|l| {
         let mut it = l.split_whitespace();
         match (it.next(), it.next()) {

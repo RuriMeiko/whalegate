@@ -227,11 +227,11 @@ fn head_chars(s: &str, n: usize) -> &str {
 
 /// Chặn SSRF: chỉ cho http/https tới host công khai. Ảnh trong hội thoại là dữ liệu do client
 /// (có thể bị prompt-injection điều khiển) nên không được phép chạm vào loopback/LAN/metadata.
-fn url_is_public(url: &reqwest::Url) -> bool {
-    if !matches!(url.scheme(), "http" | "https") {
+fn url_is_public(url: &wreq::Uri) -> bool {
+    if !matches!(url.scheme_str(), Some("http" | "https")) {
         return false;
     }
-    let Some(host) = url.host_str() else { return false };
+    let Some(host) = url.host() else { return false };
     let host_l = host.trim_end_matches('.').to_ascii_lowercase();
     if host_l == "localhost" || host_l.ends_with(".localhost") || host_l.ends_with(".local") || host_l.ends_with(".internal") {
         return false;
@@ -296,19 +296,16 @@ async fn decode_image_part(part: &Value) -> Option<(Vec<u8>, String)> {
         return b64.decode(data.trim()).ok().map(|b| (b, mime));
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        let parsed = reqwest::Url::parse(url).ok()?;
+        let parsed: wreq::Uri = url.parse().ok()?;
         if !url_is_public(&parsed) {
             crate::elog!("[image] chặn URL nội bộ/không hợp lệ: {}", head_chars(url, 120));
             return None;
         }
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(20))
-            // mỗi bước redirect cũng phải qua kiểm tra SSRF (host công khai có thể 302 về 127.0.0.1)
-            .redirect(reqwest::redirect::Policy::custom(|a| {
-                if a.previous().len() >= 3 || !url_is_public(a.url()) { a.stop() } else { a.follow() }
-            }))
-            .build().ok()?;
-        let r = client.get(parsed).send().await.ok()?;
+        // mỗi bước redirect cũng phải qua kiểm tra SSRF (host công khai có thể 302 về 127.0.0.1)
+        let policy = wreq::redirect::Policy::custom(|a| {
+            if a.previous.len() >= 3 || !url_is_public(&a.uri) { a.stop() } else { a.follow() }
+        });
+        let r = crate::http::client().get(parsed).redirect(policy).timeout(std::time::Duration::from_secs(20)).send().await.ok()?;
         if !r.status().is_success() {
             return None;
         }
@@ -1591,9 +1588,10 @@ mod safety_tests {
     #[test]
     fn ssrf_blocks_internal() {
         for u in ["http://127.0.0.1/x", "http://[::1]/", "http://192.168.1.5/", "http://169.254.169.254/", "file:///etc/passwd", "http://localhost:8790/"] {
-            assert!(!url_is_public(&reqwest::Url::parse(u).unwrap()), "{u}");
+            // URI không parse được (vd file:///) cũng coi là bị chặn — fetch_image trả None khi parse lỗi
+            assert!(!u.parse::<wreq::Uri>().map(|x| url_is_public(&x)).unwrap_or(false), "{u}");
         }
-        assert!(url_is_public(&reqwest::Url::parse("https://example.com/a.png").unwrap()));
+        assert!(url_is_public(&"https://example.com/a.png".parse().unwrap()));
     }
 }
 

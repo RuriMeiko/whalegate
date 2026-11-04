@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux: fully static (musl + BoringSSL của wreq, rustls cho reqwest) → runs on any distro
+          # Linux: fully static (musl + BoringSSL của wreq) → runs on any distro
           - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, tool: cross }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04, tool: cross }
           - { target: aarch64-apple-darwin, os: macos-14, tool: cargo }
