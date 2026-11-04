@@ -577,6 +577,8 @@ http://198.51.100.4:8080'
 
 导入是合并而不是替换。账号先按 DeepSeek 用户 ID 匹配，再按 Token 匹配，所以同一个包导入两次，第二次不会添加任何东西。不勾选*覆盖*时，已存在的账号会被跳过；勾选后，它们的 Token 和 Cookie 会被替换（并清除其过期的网页会话）。任何账号都不会被删除。
 
+**完整备份（整台机器）。** 导出对话框里的 **Sao lưu đầy đủ**（完整备份）按钮会下载一个 `whalegate-backup-<时间>.tar.gz`，除上述内容外还包含控制面板设置、代理列表与指纹→代理的绑定、使用历史，以及每个专属 Chrome 配置文件中的身份部分（含登录信息和设备 ID 的 localStorage、IndexedDB、Cookie、偏好设置：每个只有几百 KB，不含缓存）。在 **Import**（导入）里选同一个文件，会先显示预览（账号、配置文件、设置、代理、使用历史），确认后才会写入。导入是合并：账号按 DeepSeek 用户 ID 匹配，本机已有的内容（设置、代理列表、绑定、使用小时、配置文件夹）会保留，除非你勾选*覆盖*。有登录窗口打开时绝不会动配置文件。Chrome 用与操作系统绑定的密钥加密 Cookie 数据库，因此在不同操作系统（或不同用户）的机器上，配置文件里的 Cookie 可能无法解密；登录信息和设备 ID（localStorage）以及保存在 `accounts.json` 中的账号自身 Cookie 仍会完整到达，下一次设备刷新会更新其余部分。读取时会校验压缩包：指向数据目录之外的路径、链接和过大的内容都会被拒绝。通过 HTTP：`GET /api/backup/export` 和 `POST /api/backup/import?dry_run=1&overwrite=1`（请求体为该文件）。
+
 > [!WARNING]
 > 导出包包含每个账号的 Token 和 Cookie。持有它的人就能使用这些会话。请通过你信任的渠道传输，用完后删除文件，并且绝不要提交到仓库——`accounts.json` 和 `*.session` 已经在 `.gitignore` 里了。
 
@@ -666,6 +668,7 @@ curl -fsSL https://raw.githubusercontent.com/RuriMeiko/whalegate/main/install.sh
 | `GET` / `POST` | `/api/restart` | 状态 / `{"mode": "idle" \| "now" \| "cancel"}` |
 | `GET` | `/api/accounts/export` | 把整个账号池下载为 JSON 包（含 Token——当作机密对待） |
 | `POST` | `/api/accounts/import` | 合并一个包或 `{accounts: [...]}`。`dry_run` 用于预览，`overwrite` 会替换已知用户的 Token |
+| `GET` / `POST` | `/api/backup/export` · `/api/backup/import` | 完整备份为一个 `.tar.gz`（账号、设置、代理、绑定、使用历史、Chrome 配置文件）/ 合并回本机（`?dry_run=1` 预览，`?overwrite=1` 覆盖已有内容；请求体为该文件） |
 | `GET` / `POST` | `/api/update` | 检查 GitHub 上最新的发布 / 下载、校验并安装，然后重启 |
 
 > [!IMPORTANT]

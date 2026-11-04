@@ -41,7 +41,7 @@
     -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat;
             mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat; }
   .rngw:hover::after, .rngw:focus-within::after { background: var(--ink); }
-  select.rng { font: inherit; letter-spacing: inherit; text-transform: uppercase; color: inherit; background: transparent; border: 0; height: 20px; line-height: 20px; padding: 0 14px 0 0; margin: 0; overflow: visible; cursor: pointer; appearance: none; -webkit-appearance: none; border-radius: 0; field-sizing: content; }
+  select.rng { font: inherit; letter-spacing: inherit; text-transform: uppercase; color: inherit; background: transparent; border: 0; height: 20px; line-height: 20px; padding: 0 14px 0 0; margin: 0; overflow: visible; cursor: pointer; appearance: none; -webkit-appearance: none; border-radius: 0; }
   select.rng:hover { color: var(--ink); }
   /* bấm vào: chỉ nhấn chữ (đậm + gạch chân), không tô nền, không khung — thắng quy tắc select:focus chung */
   select.rng:focus, select.rng:focus-visible, select.rng:active { background: transparent; outline: none; color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
@@ -196,9 +196,20 @@
   .ll time { color: var(--mute); flex: none; } .ll span { white-space: pre-wrap; word-break: break-word; min-width: 0; }
   .ll.err span { color: var(--bad); } .ll.warn span { color: var(--warn); } .ll.dim span { color: var(--mute); }
   #logJump { position: absolute; right: 16px; bottom: 12px; display: none; }
-  .fchip.on, .fchip.on:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
-  #logQ { width: 160px; }
-  .exp { display: inline-flex; gap: 0; } .exp select { border-right: 0; padding: 0 6px; height: auto; min-height: 0; }
+  .fchip[aria-pressed="true"], .fchip[aria-pressed="true"]:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
+  /* thanh công cụ log: ô tìm có icon, nút chỉ icon, nhóm nút xuất (chọn khoảng + tải) liền nhau */
+  .logq { position: relative; display: inline-flex; align-items: center; }
+  .logq svg { position: absolute; left: 9px; pointer-events: none; color: var(--mute); }
+  #logQ { width: 160px; height: 29px; padding-left: 28px; }
+  button.icn { width: 29px; height: 29px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+  .bgroup { display: inline-flex; }
+  .bgroup .bsel { position: relative; display: inline-flex; }
+  .bgroup .bsel::after { content: ''; position: absolute; right: 8px; top: 50%; width: 9px; height: 6px; margin-top: -3px; background: var(--mute); pointer-events: none;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat;
+            mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1.2 4.5 4.8 8 1.2' fill='none' stroke='black' stroke-width='1.4'/%3E%3C/svg%3E") center / contain no-repeat; }
+  .bgroup select { appearance: none; -webkit-appearance: none; border: 1px solid var(--ink); border-right: 0; border-radius: 0; background: transparent; color: var(--ink); font: 500 11px/1 var(--mono); letter-spacing: .04em; height: 29px; padding: 0 24px 0 10px; cursor: pointer; }
+  .bgroup select:hover { background: var(--hair); }
+  .bgroup select:focus, .bgroup select:focus-visible { background: transparent; outline: none; text-decoration: underline; text-underline-offset: 4px; }
   /* công tắc ngôn ngữ: quả cầu + VI / EN / 中, mục đang chọn tô đặc */
   .lang { display: inline-flex; align-items: center; gap: 2px; height: 29px; padding: 0 5px 0 8px; border: 1px solid var(--ink); font: 500 11px/1 var(--mono); color: var(--mute); user-select: none; }
   .lang svg { width: 13px; height: 13px; flex: none; margin-right: 4px; color: var(--ink); }
@@ -255,10 +266,10 @@
     .row { flex-wrap: wrap; } .row .ctl { margin-left: auto; }
     .modal { padding: 0; } .dlg, .dlg.log { width: 100%; height: 100%; max-height: none; box-shadow: none; border: 0; }
     .modal:not(#logModal):not(#setModal) .dlg { height: auto; max-height: 100%; align-self: flex-end; border-top: 1px solid var(--ink); }
-    .ll { flex-direction: column; gap: 0; } #logQ { width: 100%; order: 9; }
+    .ll { flex-direction: column; gap: 0; } .logq { width: 100%; order: 9; } #logQ { width: 100%; }
     #toasts { left: 12px; right: 12px; bottom: 12px; max-width: none; }
   }
-  @media (pointer: coarse) { button { min-height: 44px; } button.sm, a.btn { min-height: 40px; } .lang { height: 40px; } .lang button { min-height: 34px; padding: 0 8px; } }
+  @media (pointer: coarse) { button { min-height: 44px; } button.sm, a.btn { min-height: 40px; } button.icn { width: 40px; height: 40px; } .bgroup select { height: 40px; } #logQ { height: 40px; } .lang { height: 40px; } .lang button { min-height: 34px; padding: 0 8px; } }
 </style>
 </head>
 <body>
@@ -365,10 +376,12 @@
       <p>Gói export chứa <b>token và cookie</b> của mọi tài khoản trong pool — coi như mật khẩu, chỉ chuyển qua kênh tin cậy.</p>
       <div class="sub" id="expSum">—</div>
       <p class="sub" style="margin-top:12px">Chọn cách mang đi: tải file <code>.json</code> hoặc copy JSON vào clipboard để dán thẳng vào máy kia.</p>
+      <p class="sub" style="margin-top:12px"><b>Sao lưu đầy đủ</b> (<code>.tar.gz</code>): thêm cài đặt, danh sách và ghim proxy, lịch sử dùng và profile Chrome riêng của từng tài khoản — đủ để chuyển nguyên vẹn sang máy khác. Cookie trong profile Chrome gắn với hệ điều hành nên máy khác hệ điều hành có thể phải đăng nhập lại.</p>
     </div>
     <div class="foot">
       <button class="ghost sm" onclick="closeModal('expModal')">Huỷ</button>
       <span class="sp"></span>
+      <button class="sm" id="btnExpBackup" onclick="exportBackup()" title="Tài khoản + cài đặt + proxy + lịch sử dùng + profile Chrome riêng, một file .tar.gz">Sao lưu đầy đủ</button>
       <button class="sm" id="btnExpClip" onclick="exportClipboard()">Copy clipboard</button>
       <button class="solid sm" id="btnExpFile" onclick="exportFile()">Tải file</button>
     </div>
@@ -380,12 +393,12 @@
   <div class="dlg">
     <div class="top"><h2>Import tài khoản</h2><button class="sm solid" aria-label="Đóng" onclick="closeModal('impModal')">×</button></div>
     <div class="inner">
-      <p>Chọn file gói export, hoặc dán JSON vào ô dưới (dùng khi đã copy clipboard ở máy kia).</p>
-      <input type="file" id="impFile" accept=".json,application/json" onchange="importFilePicked(this)" style="width:100%;margin-bottom:10px">
+      <p>Chọn file gói export hoặc bản sao lưu đầy đủ (<code>.tar.gz</code>), hoặc dán JSON vào ô dưới (dùng khi đã copy clipboard ở máy kia).</p>
+      <input type="file" id="impFile" accept=".json,application/json,.gz,.tgz,application/gzip" onchange="importFilePicked(this)" style="width:100%;margin-bottom:10px">
       <textarea id="impText" rows="5" spellcheck="false" autocomplete="off" placeholder='{"kind":"whalegate-accounts", ...} hoặc [... ]' oninput="importPreview()"></textarea>
       <div class="sub" id="impInfo">Chưa có dữ liệu.</div>
       <label class="fl" style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font:13px/1.4 var(--sans);color:var(--ink)">
-        <input type="checkbox" id="impOver" onchange="importPreview()"> Ghi đè token/cookie của tài khoản đã có
+        <input type="checkbox" id="impOver" onchange="importPreview()"> Ghi đè dữ liệu đã có (token/cookie, cài đặt, proxy, profile…)
       </label>
     </div>
     <div class="foot">
@@ -463,12 +476,12 @@
   <div class="dlg log">
     <div class="top">
       <h2>log <span id="logState" style="font-weight:400;color:var(--mute)"></span></h2>
-      <button class="sm fchip on" data-f="all" onclick="logFilter(this)">tất cả</button>
-      <button class="sm fchip" data-f="err" onclick="logFilter(this)">lỗi</button>
-      <input type="text" id="logQ" placeholder="lọc…" aria-label="Lọc log" oninput="logRender()" autocomplete="off">
-      <button class="sm" id="logPause" onclick="logTogglePause()">tạm dừng</button>
-      <button class="sm" onclick="logCopy()">copy</button>
-      <span class="exp"><select id="logExportH" class="sm" aria-label="Khoảng thời gian xuất"><option value="24">24 giờ</option><option value="72">3 ngày</option><option value="168">7 ngày</option></select><button class="sm has-ic" onclick="logExport()" title="Tải file debug: log + chi tiết nối lại / challenge / cuối luồng SSE (không có token hay cookie). Đã lưu sẵn ở thư mục logs/ trong thư mục dữ liệu."><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M8 2v8M4.6 6.8 8 10.2l3.4-3.4M2.5 13.5h11"/></svg><span class="bt">export</span></button></span>
+      <span class="sp"></span>
+      <button class="sm has-ic fchip" id="logFilterBtn" aria-pressed="false" onclick="logToggleFilter()" title="Lọc log: tất cả hoặc chỉ lỗi"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M2 3h12l-4.6 5.4V13l-2.8-1.4V8.4z"/></svg><span class="bt" id="logFilterTxt">tất cả</span></button>
+      <label class="logq"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><circle cx="7" cy="7" r="3.9"/><path d="M9.9 9.9 14 14"/></svg><input type="text" id="logQ" placeholder="lọc…" aria-label="Lọc log" oninput="logRender()" autocomplete="off"></label>
+      <button class="sm icn" id="logPause" onclick="logTogglePause()" title="tạm dừng" aria-label="tạm dừng"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M5 3v10M11 3v10"/></svg></button>
+      <button class="sm icn" onclick="logCopy()" title="copy" aria-label="copy"><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><rect x="5.5" y="5.5" width="8" height="8"/><path d="M10.5 3.5v-1h-8v8h1"/></svg></button>
+      <span class="bgroup" role="group"><span class="bsel"><select id="logExportH" aria-label="Khoảng thời gian xuất"><option value="24">24 giờ</option><option value="72">3 ngày</option><option value="168">7 ngày</option></select></span><button class="sm has-ic" onclick="logExport()" title="Tải file debug: log + chi tiết nối lại / challenge / cuối luồng SSE (không có token hay cookie). Đã lưu sẵn ở thư mục logs/ trong thư mục dữ liệu."><svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M8 2v8M4.6 6.8 8 10.2l3.4-3.4M2.5 13.5h11"/></svg><span class="bt">export</span></button></span>
       <button class="sm solid" aria-label="Đóng" onclick="closeLog()">×</button>
     </div>
     <div class="lbody" id="logBody"><button class="sm solid" id="logJump" onclick="logBottom(true)">↓ mới</button></div>
@@ -536,7 +549,19 @@ function setRng(k, v) {
   try { localStorage.setItem('wg.rng.' + k, v); } catch (e) {}
   if (window.__lastUsage) renderUsage(window.__lastUsage);
 }
-const syncRng = () => { for (const [k, id] of [['tok', 'rngTok'], ['save', 'rngSave'], ['chart', 'rngChart']]) { const s = $(id); if (s && s.querySelector('option[value="' + RNG[k] + '"]')) s.value = RNG[k]; else RNG[k] = s ? s.options[0].value : RNG[k]; } };
+/// Chiều rộng ô chọn = chữ đang chọn (đo bằng một span ẩn cùng font) + chỗ cho mũi tên. Đặt cố định bằng JS thay vì
+/// `field-sizing: content`: cách đó khiến trình duyệt tính lại theo mục dài nhất mỗi khi mở danh sách rồi co lại sau ~0,2s.
+function fitRng(sel) {
+  const txt = sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : '';
+  if (sel.dataset.fit === txt && sel.style.width) return;
+  const m = el('span', null, txt);
+  m.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font:inherit;letter-spacing:inherit;text-transform:uppercase;left:0;top:0';
+  sel.parentElement.append(m);
+  const w = Math.ceil(m.getBoundingClientRect().width);
+  m.remove();
+  if (w > 0) { sel.style.width = (w + 16) + 'px'; sel.dataset.fit = txt; }
+}
+const syncRng = () => { for (const [k, id] of [['tok', 'rngTok'], ['save', 'rngSave'], ['chart', 'rngChart']]) { const s = $(id); if (s && s.querySelector('option[value="' + RNG[k] + '"]')) s.value = RNG[k]; else RNG[k] = s ? s.options[0].value : RNG[k]; if (s) fitRng(s); } };
 const hh = (t) => String(new Date(t * 1000).getHours()).padStart(2, '0');
 const dur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h >= 24 ? Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : h ? h + 'h' + String(m).padStart(2, '0') : m + 'm'; };
 
@@ -1250,9 +1275,40 @@ async function exportClipboard() {
   } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
 }
 
-let IMP_RAW = null, IMP_PLAN = null, IMP_T = null;
+let IMP_RAW = null, IMP_PLAN = null, IMP_T = null, IMP_BK = null;
+const isBackupName = (n) => /\.(tar\.gz|tgz|gz)$/i.test(n || '');
+
+/// Bản sao lưu đầy đủ (.tar.gz): tải thẳng từ server.
+function exportBackup() {
+  const a = el('a'); a.href = '/api/backup/export'; a.download = '';
+  document.body.append(a); a.click(); a.remove();
+  say('Đang tạo bản sao lưu đầy đủ…', 'ok');
+}
+
+async function backupCall(dry) {
+  const q = new URLSearchParams({overwrite: $('impOver').checked ? '1' : '0'});
+  if (dry) q.set('dry_run', '1');
+  const r = await fetch('/api/backup/import?' + q, {method: 'POST', headers: {'Content-Type': 'application/gzip'}, body: IMP_BK});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || d.error) throw new Error(d.error || ('lỗi ' + r.status));
+  return d;
+}
+
+/// Mỗi dòng một phần tử riêng để bộ dịch xử lý từng dòng.
+function backupLines(d) {
+  const a = d.accounts || {}, p = d.profiles || {}, pr = d.proxy || {}, s = d.settings || {};
+  const L = [`Tài khoản: ${a.added || 0} mới · ${a.updated || 0} ghi đè · ${a.skipped || 0} bỏ qua (đã có)`,
+    `Profile Chrome riêng: ${p.restored || 0}` + (p.skipped ? ` (bỏ qua ${p.skipped} đã có)` : ''),
+    `Cài đặt: ${s.applied || 0}`,
+    `Proxy: ${pr.bindings || 0} ghim` + (pr.list_written ? ' + danh sách' : ''),
+    `Lịch sử dùng: ${(d.usage && d.usage.hours) || 0} giờ`];
+  if (p.busy) L.push('Đang có cửa sổ đăng nhập mở nên chưa khôi phục được profile Chrome');
+  if (pr.note) L.push(pr.note);
+  return L;
+}
+
 function openImport() {
-  IMP_RAW = null; IMP_PLAN = null;
+  IMP_RAW = null; IMP_PLAN = null; IMP_BK = null; $('impText').disabled = false;
   $('impFile').value = ''; $('impText').value = ''; $('impOver').checked = false;
   $('impInfo').textContent = 'Chưa có dữ liệu.'; $('btnImp').disabled = true;
   openModal('impModal');
@@ -1268,9 +1324,15 @@ function importParse(text) {
   throw new Error('gói import phải là object hoặc mảng');
 }
 
+// ô dán chỉ dùng cho JSON; chọn file sao lưu thì khoá lại, xoá file thì mở lại
 function importFilePicked(inp) {
   const f = inp.files && inp.files[0];
   if (!f) return;
+  if (isBackupName(f.name)) {
+    f.arrayBuffer().then((buf) => { IMP_BK = buf; $('impText').value = ''; $('impText').disabled = true; importPreview(); });
+    return;
+  }
+  IMP_BK = null; $('impText').disabled = false;
   const rd = new FileReader();
   rd.onload = () => { $('impText').value = String(rd.result || ''); importPreview(); };
   rd.onerror = () => say('Không đọc được file', 'err');
@@ -1280,6 +1342,17 @@ function importFilePicked(inp) {
 function importPreview() {
   clearTimeout(IMP_T);
   IMP_PLAN = null; $('btnImp').disabled = true;
+  if (IMP_BK) {
+    const box = $('impInfo'); box.textContent = 'Đang đọc bản sao lưu…';
+    backupCall(true).then((d) => {
+      box.textContent = '';
+      backupLines(d).forEach((l) => box.append(el('div', null, l)));
+      IMP_PLAN = d;
+      const a = d.accounts || {}, p = d.profiles || {}, s = d.settings || {}, pr = d.proxy || {};
+      $('btnImp').disabled = !((a.added || 0) + (a.updated || 0) + (p.restored || 0) + (s.applied || 0) + (pr.bindings || 0) + (pr.list_written ? 1 : 0) + ((d.usage && d.usage.hours) || 0));
+    }).catch((e) => { box.textContent = e.message; });
+    return;
+  }
   const raw = $('impText').value;
   if (!raw.trim()) { $('impInfo').textContent = 'Chưa có dữ liệu.'; return; }
   IMP_T = setTimeout(async () => {
@@ -1299,6 +1372,16 @@ function importPreview() {
 }
 
 async function importApply() {
+  if (IMP_BK) {
+    if (!(await ask('Khôi phục?', 'Gộp bản sao lưu vào máy này: tài khoản, cài đặt, proxy, lịch sử dùng và profile Chrome riêng. Không xoá tài khoản nào đang có.' + ($('impOver').checked ? ' Dữ liệu đã có sẽ bị ghi đè.' : ''), 'Khôi phục'))) return;
+    const b = $('btnImp'); b.disabled = true;
+    try {
+      const d = await backupCall(false);
+      say('Đã khôi phục bản sao lưu', 'ok');
+      closeModal('impModal'); loadStats();
+    } catch (e) { say(e.message, 'err'); } finally { b.disabled = false; }
+    return;
+  }
   if (!IMP_RAW) return say('Chưa có dữ liệu', 'err');
   if (!(await ask('Import?', 'Gộp tài khoản từ gói vào pool' + ($('impOver').checked ? ', ghi đè token/cookie của tài khoản đã có' : '') + '. Không xoá tài khoản nào đang có.', 'Import'))) return;
   const b = $('btnImp'); b.disabled = true;
@@ -1502,8 +1585,22 @@ function logExport() {
   document.body.append(a); a.click(); a.remove();
   say('Đang tạo file debug…', 'ok');
 }
-function logFilter(btn) { LOG.filter = btn.dataset.f; document.querySelectorAll('.fchip').forEach((b) => b.classList.toggle('on', b === btn)); logRender(); }
-function logTogglePause() { LOG.paused = !LOG.paused; $('logPause').textContent = LOG.paused ? 'tiếp tục' : 'tạm dừng'; $('logPause').classList.toggle('solid', LOG.paused); if (!LOG.paused) logRender(); }
+function logToggleFilter() {
+  LOG.filter = LOG.filter === 'all' ? 'err' : 'all';
+  $('logFilterBtn').setAttribute('aria-pressed', String(LOG.filter === 'err'));
+  $('logFilterTxt').textContent = LOG.filter === 'err' ? 'lỗi' : 'tất cả';
+  logRender();
+}
+const ICO_PAUSE = '<svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M5 3v10M11 3v10"/></svg>', ICO_PLAY = '<svg class="ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"><path d="M5 3l8 5-8 5z"/></svg>';
+function logTogglePause() {
+  LOG.paused = !LOG.paused;
+  const b = $('logPause');
+  b.innerHTML = LOG.paused ? ICO_PLAY : ICO_PAUSE;
+  const t = LOG.paused ? 'tiếp tục' : 'tạm dừng';
+  b.setAttribute('title', t); b.setAttribute('aria-label', t);
+  b.classList.toggle('solid', LOG.paused);
+  if (!LOG.paused) logRender();
+}
 async function logCopy() {
   const text = LOG.lines.filter(logVisible).map((l) => logTime(l.t) + ' ' + l.line).join('\n');
   try { await navigator.clipboard.writeText(text); say('Đã copy ' + text.split('\n').length + ' dòng', 'ok'); } catch (e) { say('Không copy được', 'err'); }

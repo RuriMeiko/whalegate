@@ -98,6 +98,27 @@ pub fn record(prompt: u64, cached: u64, completion: u64) {
     s.dirty = true;
 }
 
+/// Toàn bộ lịch sử theo giờ (nội dung usage.json) — để sao lưu.
+pub fn export_json() -> String {
+    let s = store().lock().unwrap_or_else(|e| e.into_inner());
+    serde_json::to_string(&s.buckets).unwrap_or_else(|_| "{}".into())
+}
+
+/// Nhập lịch sử từ bản sao lưu: giờ chưa có thì thêm, đã có thì giữ trừ khi `overwrite`. Trả số giờ được nhận.
+pub fn import_json(json: &str, overwrite: bool, dry: bool) -> usize {
+    let Ok(m) = serde_json::from_str::<BTreeMap<u64, Bucket>>(json) else { return 0 };
+    let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
+    let mut n = 0;
+    for (h, b) in m {
+        if overwrite || !s.buckets.contains_key(&h) {
+            n += 1;
+            if !dry { s.buckets.insert(h, b); }
+        }
+    }
+    if !dry && n > 0 { s.dirty = true; }
+    n
+}
+
 /// Ghi đĩa ngay (dùng trước khi khởi động lại).
 pub fn flush_blocking() { flush(); }
 

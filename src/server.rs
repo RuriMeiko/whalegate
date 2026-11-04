@@ -3541,6 +3541,8 @@ pub async fn run(port: u16) -> Result<()> {
         .route("/api/accounts", get(api_list_accounts).post(api_add_account))
         .route("/api/accounts/export", get(crate::transfer::api_export_accounts))
         .route("/api/accounts/import", post(crate::transfer::api_import_accounts))
+        .route("/api/backup/export", get(crate::backup::api_backup_export))
+        .route("/api/backup/import", post(crate::backup::api_backup_import).layer(axum::extract::DefaultBodyLimit::max(600 << 20)))
         .route("/api/accounts/{id}", axum::routing::delete(api_delete_account).patch(api_edit_account))
         .route("/api/accounts/{id}/verify", post(api_verify_account))
         .route("/api/accounts/{id}/pool", post(api_toggle_pool))

@@ -558,6 +558,8 @@ The pool lives in `~/.whalegate/accounts.json`, which holds session tokens — t
 
 Import merges instead of replacing. Accounts are matched by DeepSeek user id first, then by token, so importing the same bundle twice adds nothing the second time. Without *overwrite*, accounts that already exist are skipped; with it, their token and cookies are replaced (and their stale web sessions cleared). Nothing is ever deleted.
 
+**Full backup (the whole machine).** The **Sao lưu đầy đủ** button of the Export dialog downloads one `whalegate-backup-<time>.tar.gz` with everything above plus the dashboard settings, the proxy list and the fingerprint→proxy bindings, the usage history, and the identity part of every dedicated Chrome profile (localStorage with the login and the device ids, IndexedDB, cookies, preferences: a few hundred KB each, no caches). Pick the same file in **Import** and you get a preview (accounts, profiles, settings, proxies, usage) before anything is written. Import merges: accounts by DeepSeek user id, and whatever already exists on the machine (settings, proxy list, bindings, usage hours, a profile folder) is kept unless you tick *overwrite*. Profiles are never touched while a login window is open. Chrome encrypts its cookie database with a key tied to the operating system, so on a machine with another OS (or user) the cookies inside a profile may not decrypt; the login and device ids (localStorage) and the account's own cookies saved in `accounts.json` still arrive, and the next device refresh renews the rest. The archive is checked while it is read: paths outside the data directory, links and oversized contents are rejected. Over HTTP: `GET /api/backup/export` and `POST /api/backup/import?dry_run=1&overwrite=1` with the file as the body.
+
 > [!WARNING]
 > An exported bundle contains every account's token and cookies. Anyone holding it can use those sessions. Move it over a channel you trust, delete the file afterwards, and never commit it — `accounts.json` and `*.session` are already in `.gitignore`.
 
@@ -645,6 +647,7 @@ Precedence: value saved on the dashboard → `DS_*` environment variable → def
 | `GET` / `POST` | `/api/restart` | Status / `{"mode": "idle" \| "now" \| "cancel"}` |
 | `GET` | `/api/accounts/export` | Download the whole pool as a JSON bundle (contains tokens — treat as a secret) |
 | `POST` | `/api/accounts/import` | Merge a bundle or `{accounts: [...]}`. `dry_run` previews, `overwrite` replaces tokens of known users |
+| `GET` / `POST` | `/api/backup/export` · `/api/backup/import` | Full backup as one `.tar.gz` (accounts, settings, proxies, bindings, usage, Chrome profiles) / merge it back (`?dry_run=1` previews, `?overwrite=1` replaces what exists; body = the file) |
 | `GET` / `POST` | `/api/update` | Check the latest GitHub release / download, verify and install it, then restart |
 
 > [!IMPORTANT]

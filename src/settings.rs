@@ -116,6 +116,25 @@ pub fn int(key: &str) -> i64 {
 pub fn uint(key: &str) -> u64 { int(key).max(0) as u64 }
 pub fn boolean(key: &str) -> bool { !matches!(get(key).as_str(), "0" | "false" | "off" | "") }
 
+/// Các giá trị đã đổi trên dashboard (nội dung settings.json) — để sao lưu.
+pub fn overrides_map() -> HashMap<String, String> {
+    overrides().read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Nhập cài đặt từ bản sao lưu: chỉ khoá hợp lệ và đúng kiểu; khoá đã đổi ở máy này giữ nguyên trừ khi `overwrite`.
+/// Trả (đã áp dụng, bỏ qua). `dry` chỉ đếm, không ghi.
+pub fn import_overrides(m: &HashMap<String, String>, overwrite: bool, dry: bool) -> (usize, usize) {
+    let cur = overrides_map();
+    let (mut ok, mut skip) = (0, 0);
+    for (k, v) in m {
+        let valid = find(k).filter(|d| d.show).map(|d| validate(d, v).is_ok()).unwrap_or(false);
+        if !valid || (!overwrite && cur.contains_key(k)) { skip += 1; continue; }
+        if !dry && set(k, Some(v)).is_err() { skip += 1; continue; }
+        ok += 1;
+    }
+    (ok, skip)
+}
+
 /// Đặt giá trị (None = bỏ override, quay về env/mặc định) và ghi đĩa.
 pub fn set(key: &str, value: Option<&str>) -> Result<(), String> {
     let d = find(key).filter(|d| d.show).ok_or_else(|| format!("khoá không hợp lệ: {key}"))?;

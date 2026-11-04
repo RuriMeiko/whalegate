@@ -277,6 +277,46 @@ pub fn snapshot_bindings() -> Vec<(String, String)> {
     bindings().lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(fp, raw)| (fp.clone(), raw.clone())).collect()
 }
 
+/// Ghim hiện tại (vân tay → proxy gốc) để sao lưu.
+pub fn bindings_map() -> HashMap<String, String> {
+    bindings().lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Nhập ghim từ bản sao lưu: vân tay chưa có ghim thì thêm, đã có thì giữ trừ khi `overwrite`. Trả số ghim được nhận.
+pub fn import_bindings(m: &HashMap<String, String>, overwrite: bool, dry: bool) -> usize {
+    let mut b = bindings().lock().unwrap_or_else(|e| e.into_inner());
+    let mut n = 0;
+    for (k, v) in m {
+        if overwrite || !b.contains_key(k) {
+            n += 1;
+            if !dry { b.insert(k.clone(), v.clone()); }
+        }
+    }
+    if !dry && n > 0 { save_bindings(&b); }
+    n
+}
+
+/// Nội dung file danh sách proxy (None nếu chưa có hoặc rỗng).
+pub fn proxies_file_text() -> Option<String> {
+    std::fs::read_to_string(proxies_file()).ok().filter(|t| !t.trim().is_empty())
+}
+
+/// Nhập danh sách proxy từ bản sao lưu: máy này đã có danh sách thì giữ trừ khi `overwrite`. Trả true nếu sẽ ghi / đã ghi.
+/// Danh sách phải hợp lệ trọn vẹn (như `write_file`).
+pub fn import_proxies_file(text: &str, overwrite: bool, dry: bool) -> Result<bool> {
+    if !overwrite && proxies_file_text().is_some() { return Ok(false); }
+    if dry {
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            ProxyEntry::parse(line).map_err(|e| anyhow::anyhow!("dòng {}: {:#}", n + 1, e))?;
+        }
+        return Ok(true);
+    }
+    write_file(text)?;
+    Ok(true)
+}
+
 /// Ghi đè danh sách proxy (một dòng một proxy). Chỉ ghi khi MỌI dòng đều hợp lệ —
 /// ghi một nửa danh sách là âm thầm làm acc mất proxy.
 pub fn write_file(lines: &str) -> Result<usize> {

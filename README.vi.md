@@ -573,6 +573,8 @@ Pool nằm trong `~/.whalegate/accounts.json`, file này chứa token phiên —
 
 Import là gộp chứ không thay thế. Tài khoản được khớp theo user id của DeepSeek trước, rồi theo token, nên import cùng một gói hai lần thì lần thứ hai không thêm gì. Không bật *ghi đè* thì tài khoản đã có bị bỏ qua; bật thì token và cookie của chúng được thay (và các phiên web cũ bị xoá). Không có gì bị xoá cả.
 
+**Sao lưu đầy đủ (cả máy).** Nút **Sao lưu đầy đủ** trong hộp Export tải về một file `whalegate-backup-<giờ>.tar.gz` gồm mọi thứ ở trên cộng với cài đặt dashboard, danh sách proxy và ghim vân tay→proxy, lịch sử dùng, và phần định danh của từng profile Chrome riêng (localStorage chứa đăng nhập và mã thiết bị, IndexedDB, cookie, tuỳ chọn: vài trăm KB mỗi cái, không có cache). Chọn đúng file đó ở **Import** sẽ có bản xem trước (tài khoản, profile, cài đặt, proxy, lịch sử) trước khi ghi gì. Import là gộp: tài khoản khớp theo user id của DeepSeek, còn thứ gì máy này đã có (cài đặt, danh sách proxy, ghim, giờ dùng, thư mục profile) thì giữ nguyên trừ khi bạn tick *ghi đè*. Không bao giờ đụng vào profile khi đang có cửa sổ đăng nhập mở. Chrome mã hoá cơ sở dữ liệu cookie bằng khoá gắn với hệ điều hành, nên máy khác hệ điều hành (hoặc khác người dùng) có thể không giải mã được cookie trong profile; đăng nhập và mã thiết bị (localStorage) cùng cookie của chính tài khoản lưu trong `accounts.json` vẫn sang đủ, và lần làm mới thiết bị kế tiếp sẽ làm mới phần còn lại. Gói được kiểm tra khi đọc: đường dẫn ra ngoài thư mục dữ liệu, link và nội dung quá lớn đều bị từ chối. Qua HTTP: `GET /api/backup/export` và `POST /api/backup/import?dry_run=1&overwrite=1` với file làm thân request.
+
 > [!WARNING]
 > Gói export chứa token và cookie của mọi tài khoản. Ai có nó đều dùng được các phiên đó. Hãy chuyển qua kênh bạn tin cậy, xoá file sau khi xong, và đừng bao giờ commit — `accounts.json` và `*.session` đã nằm sẵn trong `.gitignore`.
 
@@ -662,6 +664,7 @@ Thứ tự ưu tiên: giá trị đã lưu trên dashboard → biến môi trư�
 | `GET` / `POST` | `/api/restart` | Trạng thái / `{"mode": "idle" \| "now" \| "cancel"}` |
 | `GET` | `/api/accounts/export` | Tải cả pool dạng gói JSON (chứa token — coi như bí mật) |
 | `POST` | `/api/accounts/import` | Gộp một gói hoặc `{accounts: [...]}`. `dry_run` để xem trước, `overwrite` thay token của user đã biết |
+| `GET` / `POST` | `/api/backup/export` · `/api/backup/import` | Sao lưu đầy đủ một file `.tar.gz` (tài khoản, cài đặt, proxy, ghim, lịch sử dùng, profile Chrome) / gộp lại vào máy (`?dry_run=1` xem trước, `?overwrite=1` ghi đè cái đã có; thân = file) |
 | `GET` / `POST` | `/api/update` | Kiểm tra bản phát hành mới nhất trên GitHub / tải, kiểm tra và cài rồi khởi động lại |
 
 > [!IMPORTANT]
