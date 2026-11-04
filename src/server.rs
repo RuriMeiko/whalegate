@@ -1482,6 +1482,7 @@ fn find_tool_marker(buf: &str) -> Option<usize> {
     // ứng viên theo thứ tự vị trí; độ chẵn lẻ backtick trên dòng tính dần một lượt (không đếm lại mỗi ứng viên —
     // văn xuôi một dòng dài toàn marker trích trong backtick từng là O(n²))
     let mut cands: Vec<usize> = TOOL_MARKERS.iter().flat_map(|k| buf.match_indices(k).map(|(i, _)| i)).collect();
+    if let Some((a, _)) = orphan_calls_tag(buf) { cands.push(a); }
     cands.sort_unstable();
     cands.dedup();
     let (mut pos, mut odd) = (0usize, false);
@@ -2015,6 +2016,31 @@ fn strip_trailing_dsml(v: &str) -> &str {
     }
 }
 
+/// Thẻ mở khối tool-call bị rụng chữ DSML: `< calls>`, `<｜ calls>`, `<｜｜ calls>` (model web đôi khi nhả vậy ngay trước
+/// các `<｜｜DSML｜｜ invoke …>` bình thường). Trả (đầu, cuối) của thẻ đầu tiên, nằm ở đầu dòng. Cần có thanh '｜' hoặc
+/// khoảng trắng sau '<' — `<calls>` trơn là XML thường nên không đụng.
+pub(crate) fn orphan_calls_tag(s: &str) -> Option<(usize, usize)> {
+    for (i, _) in s.match_indices('<') {
+        if !s[..i].chars().rev().take_while(|c| *c != '\n').all(|c| c == ' ' || c == '\t') { continue; }
+        let rest = &s[i + 1..];
+        let bars = rest.len() - rest.trim_start_matches(['｜', '|', '∣']).len();
+        let after_bars = &rest[bars..];
+        let spaces = after_bars.len() - after_bars.trim_start_matches(' ').len();
+        if bars == 0 && spaces == 0 { continue; }
+        if after_bars[spaces..].starts_with("calls>") { return Some((i, i + 1 + bars + spaces + "calls>".len())); }
+    }
+    None
+}
+
+/// Bỏ mọi thẻ `calls` mồ côi khỏi văn xuôi (xem `orphan_calls_tag`), và dòng rác kiểu `<｜ rooms: …` (thẻ mở tool-call
+/// bị model bỏ dở: '<｜' + khoảng trắng ở đầu dòng). Chỉ gọi cho phần chữ đứng TRƯỚC một khối tool-call đã parse được.
+fn strip_orphan_calls(text: &str) -> String {
+    let mut t = text.to_string();
+    while let Some((a, b)) = orphan_calls_tag(&t) { t.replace_range(a..b, ""); }
+    let kept: Vec<&str> = t.lines().filter(|l| { let l = l.trim_start(); !(l.starts_with("<｜ ") || l.starts_with("<| ")) }).collect();
+    kept.join("\n").trim().to_string()
+}
+
 /// Xoá mảnh markup DSML còn sót khỏi phần prose.
 fn strip_dsml_fragments(text: &str) -> String {
     let mut t = text.to_string();
@@ -2105,7 +2131,7 @@ pub(crate) fn parse_dsml_tool_calls(text: &str) -> Option<(String, Vec<DsmlToolC
     let close_calls = text.find("</｜｜DSML｜｜ calls>");
     let had_close = close_calls.is_some();
     let end_block = close_calls.unwrap_or(text.len());
-    let before = strip_dsml_fragments(&text[..start]);
+    let before = strip_orphan_calls(&strip_dsml_fragments(&text[..start]));
     let block = &text[start..end_block];
 
     let mut calls = Vec::new();
@@ -3984,6 +4010,24 @@ mod dsml_tests {
 #[cfg(test)]
 mod xml_tests {
     use super::*;
+
+    #[test]
+    fn orphan_calls_opener_is_not_leaked() {
+        // mẫu thật từ phiên dsh: model nhả `< calls>` rồi các invoke bình thường
+        let raw = "\n\n< calls>\n<｜｜DSML｜｜ invoke name=\"run_code\">\n<｜｜DSML｜｜ parameter name=\"code\" string=\"true\">x()</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let (before, calls) = parse_dsml_tool_calls(raw).expect("parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(before, "", "không được để lại `< calls>`: {before:?}");
+        let (b2, _) = parse_dsml_tool_calls(&format!("Kiểm tra.\n\n<｜ calls>\n{}", &raw[raw.find("<｜｜DSML｜｜ invoke").unwrap()..])).expect("parse");
+        assert_eq!(b2, "Kiểm tra.");
+        let junk = format!("\n\n<｜ rooms: /data/x/khu-i-rooms.js\n\n{}", &raw[raw.find("<｜｜DSML｜｜ invoke").unwrap()..]);
+        assert_eq!(parse_dsml_tool_calls(&junk).expect("parse").0, "", "dòng `<｜ rooms:` phải bị bỏ");
+        // stream: thẻ mồ côi phải được giữ lại như marker, không flush ra client
+        assert_eq!(safe_flush_len("Kiểm tra.\n\n< calls>\n<｜｜DSML｜｜ inv"), "Kiểm tra.".len() + 2 - 0);
+        assert!(has_tool_marker("a\n< calls>\n"));
+        // văn xuôi thường và XML trơn không bị đụng
+        assert!(orphan_calls_tag("so sánh x < calls> y").is_none() && orphan_calls_tag("<calls>ok</calls>").is_none());
+    }
 
     #[test]
     fn parse_dsml_close_tag_with_attrs() {
